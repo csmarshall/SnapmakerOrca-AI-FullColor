@@ -173,3 +173,12 @@ TEST_CASE("ReconnectPolicy backs off and resets after a stable connection", "[ga
     REQUIRE(policy.next_delay() == std::chrono::milliseconds{250});
     REQUIRE(policy.attempts() == 1);
 }
+
+TEST_CASE("cli version manifests format the runtime bundle version", "[gateway][protocol]")
+{
+    REQUIRE(format_cli_version(json{{"version", "1.7.6"}, {"build_number", "20261016175226"}}) == "1.7.6 (build 20261016175226)");
+    REQUIRE(format_cli_version(json{{"version", "1.7.6"}}) == "1.7.6");
+    REQUIRE(format_cli_version(json{{"version", 1}}).empty());
+    REQUIRE(format_cli_version(json{{"build_number", "1"}}).empty());
+    REQUIRE(format_cli_version(json::array()).empty());
+}
