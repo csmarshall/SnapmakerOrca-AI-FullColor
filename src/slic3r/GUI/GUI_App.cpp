@@ -908,13 +908,14 @@ void GUI_App::log_version_info()
     BOOST_LOG_TRIVIAL(warning) << "[Version] Snapmaker Orca: " << Snapmaker_VERSION
                                << ", Build: " << SLIC3R_VERSION;
 
-    const std::string cli_version = read_cli_version_from_resources();
-    BOOST_LOG_TRIVIAL(warning) << "[Version] CLI: " << (cli_version.empty() ? "N/A" : cli_version);
-
     std::string profile_ver = common::get_profile_version();
     BOOST_LOG_TRIVIAL(warning) << "[Version] Profile: " << (profile_ver.empty() ? "N/A" : profile_ver);
 
     BOOST_LOG_TRIVIAL(warning) << "[Version] OS: " << s_cached_os_desc;
+
+    const std::string snapmaker_connect_version = read_cli_version_from_resources();
+    BOOST_LOG_TRIVIAL(warning) << "[Version] Snapmaker Connect: "
+                               << (snapmaker_connect_version.empty() ? "N/A" : snapmaker_connect_version);
 
     BOOST_LOG_TRIVIAL(warning) << "========================================";
 
