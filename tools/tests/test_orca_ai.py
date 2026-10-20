@@ -125,7 +125,7 @@ class AgentTests(Base):
     def test_print_host_prefix_and_gcode_suffix_keys_are_refused(self):
         for key in ("printhost_ssl_ignore_revoke", "printhost_port", "bbl_use_printhost",
                     "print_host_future_key", "machine_start_gcode", "layer_change_gcode",
-                    "gcode_substitutions"):
+                    "gcode_substitutions", "bed_custom_texture", "bed_custom_model"):
             call = ToolCall("1", "putConfig", {"settings": {key: "x"}})
             self.run_agent([Turn(tool_calls=[call]), Turn(text="ok")])
             self.assertEqual(SEEN, [], key)
@@ -205,6 +205,21 @@ class AdvisoryTests(unittest.TestCase):
     def test_wrong_suffix_is_refused_even_inside_allowed_dir(self):
         open(self.tmp + "/x.txt", "w").write("hi")
         self.assertTrue(self.call("analyzePrintability", file=self.tmp + "/x.txt").is_error)
+    def test_cli_flag_injection_through_strength_arguments_is_refused(self):
+        beam = self.tmp + "/beam.stl"
+        bad = [dict(fixed=["--output=/tmp/pwn"], forces=["+x=0,0,-10"]),
+               dict(fixed=["-x"], forces=["--config=/tmp/evil"]),
+               dict(fixed=["-x"], forces=["+x=0,0,-10; id"]),
+               dict(fixed=["-x"], forces=["+x=0,0,-10"], safety_factor="--help"),
+               dict(fixed=["-x"], forces=["+x=0,0,-10"], material="PLA --out=/tmp/x"),
+               dict(fixed=["-x"], forces=["+x=0,0,-10"], infill_percent="10 --verbose")]
+        for args in bad:
+            r = self.call("analyzeStrength", file=beam, **args)
+            self.assertTrue(r.is_error, args)
+            self.assertNotIn("phyx3d not found", r.text, args)  # refused by validation, not by a missing binary
+    def test_flag_injection_through_check_options_is_refused(self):
+        r = self.call("analyzePrintability", file=self.tmp + "/cube.stl", material="PLA --out=/tmp/x")
+        self.assertTrue(r.is_error); self.assertIn("material must be one of", r.text)
     @unittest.skipUnless(__import__("orca_ai.advisory", fromlist=["x"]).phyx3d_command(), "phyx3d not installed (set PHYX3D_CLI)")
     def test_known_good_passes_and_known_bad_fails(self):
         good = json.loads(self.call("analyzePrintability", file=self.tmp + "/cube.stl").text)

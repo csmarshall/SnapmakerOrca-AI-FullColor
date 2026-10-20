@@ -255,8 +255,9 @@ static bool is_print_host_key(const std::string &key)
 
 static bool is_forbidden_write_key(const std::string &key)
 {
+    // bed_custom_* hold file paths the app opens, so they carry the same UNC/arbitrary-file risk as loadModel.
     static const std::set<std::string> exact = { "post_process", "printer_model", "filename_format",
-                                                 "gcode_substitutions" };
+                                                 "gcode_substitutions", "bed_custom_texture", "bed_custom_model" };
     static const std::string gcode_suffix = "_gcode";
     // Anything Orca itself flags as code (custom G-code / script fields), whatever it is named.
     const ConfigOptionDef *def = print_config_def.get(key);
@@ -803,6 +804,11 @@ Response Controller::handle_load_model(const std::string &body)
         return { 400, {{"error", "missing_path"}} };
     std::string path = in["path"].get<std::string>();
 
+    // Network (UNC / \\?\ device) and relative paths are refused: opening one can make the host
+    // authenticate to an attacker-chosen server, and a relative path depends on the app's cwd.
+    if (path.rfind("\\\\", 0) == 0 || path.rfind("//", 0) == 0 || !boost::filesystem::path(path).is_absolute())
+        return { 422, {{"error", "path_not_allowed"}, {"detail", "an absolute local path is required"}} };
+
     std::string lower = path;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return (char) std::tolower(c); });
@@ -823,6 +829,33 @@ Response Controller::handle_load_model(const std::string &body)
     nlohmann::json r = run_on_ui([path, is_step]() -> nlohmann::json {
         if (!boost::filesystem::exists(path))
             return {{"error", "not_found"}};
+        // Optional allowlist: app config key remote_api_model_dirs = dir1;dir2. Unset = any local path.
+        {
+            const std::string dirs = wxGetApp().app_config->get("remote_api_model_dirs");
+            if (!dirs.empty()) {
+                boost::system::error_code ec;
+                const boost::filesystem::path real = boost::filesystem::weakly_canonical(path, ec);
+                bool allowed = false;
+                size_t start = 0;
+                while (!ec && start <= dirs.size()) {
+                    const size_t semi = dirs.find(';', start);
+                    const std::string item = dirs.substr(start, semi == std::string::npos ? std::string::npos : semi - start);
+                    if (!item.empty()) {
+                        boost::system::error_code ec2;
+                        const boost::filesystem::path root = boost::filesystem::weakly_canonical(item, ec2);
+                        if (!ec2) {
+                            auto r = real.begin();
+                            auto d = root.begin();
+                            while (d != root.end() && r != real.end() && *r == *d) { ++r; ++d; }
+                            if (d == root.end()) { allowed = true; break; }
+                        }
+                    }
+                    if (semi == std::string::npos) break;
+                    start = semi + 1;
+                }
+                if (!allowed) return {{"error", "path_not_allowed"}};
+            }
+        }
         Plater *plater = wxGetApp().plater();
         // Use the stored deflection defaults instead of StepMeshDialog and skip
         // the non-UTF8 name warning while loading; restore the user's flags after.

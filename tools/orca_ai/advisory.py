@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -82,6 +83,30 @@ def _condense(report: dict[str, Any]) -> dict[str, Any]:
             "fixes": report.get("fixes", []), "data": {k: data[k] for k in keep if k in data}}
 
 
+_REGION = r"(?:[+-]?[xyz]|bottom|top|box:[0-9.,:+-]+)"
+_REGION_RE = re.compile(rf"^{_REGION}$")
+_FORCE_RE = re.compile(rf"^{_REGION}=[-+0-9.,eE]+$")
+
+
+def _number(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or abs(value) == float("inf"):
+        raise ValueError(f"{name} must be a finite number")
+    return value
+
+
+def _region(value: Any, name: str) -> str:
+    # A leading '-' is only legal as the axis form (-x); anything else starting with '-' would parse as a CLI flag.
+    if not isinstance(value, str) or not _REGION_RE.match(value):
+        raise ValueError(f"{name} entry {value!r} is not a valid region (x, -y, bottom, top, box:x,y,z:x,y,z)")
+    return value
+
+
+def _force(value: Any) -> str:
+    if not isinstance(value, str) or not _FORCE_RE.match(value):
+        raise ValueError(f"forces entry {value!r} must look like +x=0,0,-20 (region=fx,fy,fz in newtons)")
+    return value
+
+
 def _file_property() -> dict[str, Any]:
     return {"type": "string", "description": "Path to an .stl or .3mf model on disk (must be under an allowed directory)."}
 
@@ -94,25 +119,41 @@ def advisory_tools() -> list[Tool]:
               "wall_loops": {"type": "integer", "description": "Wall loop count (default 2)."}}
 
     def options(a: dict[str, Any]) -> list[str]:
-        out = ["-m", str(a.get("material", "PLA"))]
-        if "infill_percent" in a: out += ["--infill", str(a["infill_percent"])]
-        if "wall_loops" in a: out += ["--walls", str(a["wall_loops"])]
-        if a.get("rotate_deg"): out += ["--rotate", ",".join(str(v) for v in a["rotate_deg"])]
+        # Every value reaches phyx3d's argv, so each is validated here rather than trusting the provider's schema.
+        material = str(a.get("material", "PLA"))
+        if material not in materials:
+            raise ValueError(f"material must be one of {materials}")
+        out = ["-m", material]
+        if "infill_percent" in a: out += ["--infill", str(_number(a["infill_percent"], "infill_percent"))]
+        if "wall_loops" in a: out += ["--walls", str(int(_number(a["wall_loops"], "wall_loops")))]
+        if a.get("rotate_deg"):
+            out += ["--rotate", ",".join(str(_number(v, "rotate_deg")) for v in a["rotate_deg"])]
         return out
 
     rotate = {"rotate_deg": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
                              "description": "Rotate [x,y,z] degrees before analysis, to test an orientation."}}
 
     def check(a: dict[str, Any]) -> ToolResult:
-        return _run("check", a["file"], options(a))
+        try:
+            return _run("check", a["file"], options(a))
+        except ValueError as exc:
+            return ToolResult(str(exc), is_error=True)
 
     def strength(a: dict[str, Any]) -> ToolResult:
-        extra = options(a) + ["--fixed", *a["fixed"], "--force", *a["forces"]]
-        if "safety_factor" in a: extra += ["--safety", str(a["safety_factor"])]
+        try:
+            fixed = [_region(r, "fixed") for r in a["fixed"]]
+            forces = [_force(f) for f in a["forces"]]
+            extra = options(a) + ["--fixed", *fixed, "--force", *forces]
+            if "safety_factor" in a: extra += ["--safety", str(_number(a["safety_factor"], "safety_factor"))]
+        except (ValueError, TypeError) as exc:
+            return ToolResult(str(exc), is_error=True)
         return _run("stress", a["file"], extra)
 
     def orient(a: dict[str, Any]) -> ToolResult:
-        return _run("orient", a["file"], options(a))
+        try:
+            return _run("orient", a["file"], options(a))
+        except ValueError as exc:
+            return ToolResult(str(exc), is_error=True)
 
     def tool(name: str, description: str, properties: dict[str, Any], required: list[str], fn: Any) -> Tool:
         return Tool(name=name, description=description + " Advisory, file-based. " + CAVEAT, method="LOCAL", path=name,

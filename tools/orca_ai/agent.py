@@ -18,7 +18,8 @@ ConfirmFn = Callable[[Tool, dict], bool]
 # Mirrors is_forbidden_write_key() in RemoteAPIController.cpp: print-host keys by prefix,
 # plus keys that run host commands or inject G-code into the job.
 FORBIDDEN_SETTING_KEYS = frozenset({"post_process", "printer_model", "filename_format",
-                                    "bbl_use_printhost", "host_type", "gcode_substitutions"})
+                                    "bbl_use_printhost", "host_type", "gcode_substitutions",
+                                    "bed_custom_texture", "bed_custom_model"})
 FORBIDDEN_KEY_PREFIXES = ("print_host", "printhost_")
 FORBIDDEN_KEY_SUFFIXES = ("_gcode",)
 
