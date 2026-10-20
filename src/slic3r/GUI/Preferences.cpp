@@ -72,6 +72,7 @@
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "NetworkPluginDialog.hpp"
 #include "DownloadProgressDialog.hpp"
+#include "slic3r/GUI/RemoteAPI/RemoteAPIConfig.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE

@@ -3,6 +3,7 @@
 #include "IPrinterAgent.hpp"
 #include "CalibUtils.hpp"
 #include "Flashforge.hpp"
+#include "RemoteAPI/RemoteAPIController.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r_version.h"
 
@@ -9954,7 +9955,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 // convert_model_if(model, answer_convert_from_imperial_units == wxID_YES);
             }
 
-             if (!is_project_file && model.looks_like_multipart_object()) {
+             if (!is_project_file && model.looks_like_multipart_object()
+                 && !RemoteAPI::Controller::api_ui_task_active()) {
                MessageDialog msg_dlg(q, _L("This file contains several objects positioned at multiple heights.\nInstead of considering them as multiple objects, should \nthe file be loaded as a single object with multiple parts\?") + "\n",
                     _L("Multi-part object detected"), wxICON_WARNING | wxYES | wxNO);
                 if (msg_dlg.ShowModal() == wxID_YES) {
@@ -16293,6 +16295,7 @@ void Plater::load_project(wxString const& filename2,
     sidebar().set_flushing_volume_warning(has_modify);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load project done";
+    Slic3r::GUI::RemoteAPI::Controller::notify_project_opened();
 }
 
 // BBS: save logic
@@ -20753,7 +20756,7 @@ bool Plater::is_multi_extruder_ams_empty()
 }
 
 //BBS: add multiple plate reslice logic
-void Plater::reslice()
+bool Plater::reslice()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter, process_completed_with_error=%2%")%__LINE__ %p->process_completed_with_error;
     // There is "invalid data" button instead "slice now"
@@ -20761,7 +20764,7 @@ void Plater::reslice()
     {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": process_completed_with_error, return directly");
         reset_gcode_toolpaths();
-        return;
+        return false;
     }
 
     // A mixed filament with deleted or type-mismatched components cannot be resolved at slicing
@@ -20770,13 +20773,13 @@ void Plater::reslice()
     // here too instead of letting the engine slice the broken slot as a plain filament.
     if (sidebar().has_broken_mixed_filament()) {
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": broken mixed filament detected, refuse to slice";
-        return;
+        return false;
     }
 
     // In case SLA gizmo is in editing mode, refuse to continue
     // and notify user that he should leave it first.
     if (get_view3D_canvas3D()->get_gizmos_manager().is_in_editing_mode(true))
-        return;
+        return false;
 
     // Enforce the missing-plugin block at the slicing choke point: menu/keyboard/queued triggers can
     // carry a stale enabled state while plugins load asynchronously. refresh_missing_plugin_block
@@ -20787,7 +20790,7 @@ void Plater::reslice()
         p->partplate_list.get_curr_plate()->update_slice_ready_status(false);
         p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, false);
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": required plugins missing; slicing blocked.";
-        return;
+        return false;
     }
 
     // Stop the running (and queued) UI jobs and only proceed if they actually
@@ -20796,7 +20799,7 @@ void Plater::reslice()
     if (!stop_queue(this->get_ui_job_worker(), timeout_ms)) {
         BOOST_LOG_TRIVIAL(error) << "Could not stop UI job within "
                                  << timeout_ms << " milliseconds timeout!";
-        return;
+        return false;
     }
 
     // Orca: regenerate CalibPressureAdvancePattern custom G-code to apply changes
@@ -20827,7 +20830,7 @@ void Plater::reslice()
         //BBS: add logs
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": state %1% is UPDATE_BACKGROUND_PROCESS_INVALID, can not slice") % state;
         p->update_fff_scene_only_shells();
-        return;
+        return false;
     }
 
     if ((!result) && p->m_slice_all && (p->m_cur_slice_plate < (p->partplate_list.get_plate_count() - 1)))
@@ -20841,7 +20844,7 @@ void Plater::reslice()
         p->m_is_slicing = true;
         if (p->m_cur_slice_plate == 0)
             reset_gcode_toolpaths();
-        return;
+        return false;
     }
 
     if (result) {
@@ -20884,6 +20887,7 @@ void Plater::reslice()
     p->preview->reload_print();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": finished, started slicing for plate %1%") % p->partplate_list.get_curr_plate_index();
+    return true;
 }
 
 //BBS: add project slicing related logic
@@ -23601,6 +23605,14 @@ int Plater::delete_plate(int plate_index)
 void Plater::set_bed_position(Vec2d& pos)
 {
     p->bed.set_position(pos);
+}
+
+// Remote API: abort the background slice from the API's cancel route.
+void Plater::stop_background_slicing()
+{
+    if (p->background_process.running())
+        p->background_process.stop();
+    p->m_is_slicing = false;
 }
 
 //BBS: is the background process slicing currently

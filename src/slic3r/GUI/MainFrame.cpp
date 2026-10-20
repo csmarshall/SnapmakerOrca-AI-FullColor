@@ -51,6 +51,7 @@
 #include "slic3r/GUI/ParamsPanel.hpp"
 #include "slic3r/GUI/UnsavedChangesDialog.hpp"
 #include "slic3r/GUI/Widgets/SideButton.hpp"
+#include "RemoteAPI/RemoteAPIController.hpp" // backup/API mutual exclusion
 #include <wx/panel.h>
 #include <wx/settings.h>
 #include <wx/textentry.h>
@@ -789,9 +790,25 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
                 wxPostEvent(this, wxCommandEvent(EVT_BACKUP_POST));
             }
             else if (action == 1) {
+                // Remote API: never export while an API mutation is on the
+                // stack (this callback can run from a nested event pump inside
+                // it) - skip and re-arm for the next cycle instead.
+                if (Slic3r::GUI::RemoteAPI::Controller::api_ui_task_active()) {
+                    Slic3r::backup_soon();
+                    return;
+                }
                 if (!m_plater->up_to_date(false, true)) {
-                    m_plater->export_3mf(m_plater->model().get_backup_path() + "/.3mf", SaveStrategy::Backup);
-                    m_plater->up_to_date(true, true);
+                    // Bracket the export so API mutations arriving mid-export
+                    // (via its event pumping) are parked, not interleaved.
+                    Slic3r::GUI::RemoteAPI::Controller::set_backup_in_progress(true);
+                    try {
+                        m_plater->export_3mf(m_plater->model().get_backup_path() + "/.3mf", SaveStrategy::Backup);
+                        m_plater->up_to_date(true, true);
+                    } catch (...) {
+                        Slic3r::GUI::RemoteAPI::Controller::set_backup_in_progress(false);
+                        throw;
+                    }
+                    Slic3r::GUI::RemoteAPI::Controller::set_backup_in_progress(false);
                 }
             }
          });
