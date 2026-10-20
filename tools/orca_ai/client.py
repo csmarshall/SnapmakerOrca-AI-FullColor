@@ -37,7 +37,10 @@ class RemoteAPIClient:
 
     def call(self, tool: Tool, args: dict[str, Any]) -> ToolResult:
         if tool.local is not None:
-            return tool.local(args)
+            try:
+                return tool.local(args)
+            except Exception as exc:  # one bad tool must not take down the agent loop or the MCP server
+                return ToolResult(f"{tool.name} failed: {type(exc).__name__}: {exc}", is_error=True)
         path = tool.path
         for name in tool.path_params:
             path = path.replace("{" + name + "}", quote(str(args[name]), safe=""))

@@ -77,6 +77,10 @@ def _run(command: str, file: str, extra: list[str]) -> ToolResult:
 
 def _condense(report: dict[str, Any]) -> dict[str, Any]:
     """Keep verdicts, summaries, fixes and the few numbers a model needs; drop per-voxel/hotspot bulk."""
+    if isinstance(report, list):  # `orient` returns a ranked list of candidate orientations
+        keep_o = ("rotation", "label", "status", "score", "supportArea", "islands", "tipAngle", "contactArea", "height", "warpScore")
+        ranked = sorted((o for o in report if isinstance(o, dict)), key=lambda o: o.get("score", 0), reverse=True)
+        return {"orientations": [{k: o[k] for k in keep_o if k in o} for o in ranked[:6]]}
     if "checks" in report:
         return {"verdict": report.get("verdict"), "score": report.get("score"), "headline": report.get("headline"),
                 "checks": [{"id": c["id"], "status": c["status"], "accuracy": c.get("accuracy"),

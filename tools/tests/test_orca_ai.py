@@ -211,6 +211,19 @@ class AdvisoryTests(unittest.TestCase):
         r = self.call("analyzePrintability", file="/etc/passwd.stl"); self.assertTrue(r.is_error)
     def test_traversal_out_of_allowed_dir_is_refused(self):
         r = self.call("analyzePrintability", file=self.tmp + "/../../../etc/hosts.stl"); self.assertTrue(r.is_error)
+    def test_orientation_ranking_is_condensed_not_crashed(self):
+        rows = [{"rotation": [0, 0, 0], "label": "as loaded", "status": "fail", "score": 40, "supportArea": 900, "extra": "x"},
+                {"rotation": [180, 0, 0], "label": "upside down", "status": "pass", "score": 97, "supportArea": 36}]
+        out = self.advisory._condense(rows)
+        self.assertEqual([o["label"] for o in out["orientations"]], ["upside down", "as loaded"])  # best first
+        self.assertNotIn("extra", out["orientations"][0])
+    def test_a_crashing_local_tool_becomes_an_error_result_not_an_exception(self):
+        from orca_ai.client import RemoteAPIClient
+        from orca_ai.spec import Tool
+        def boom(_a): raise AttributeError("'list' object has no attribute 'get'")
+        tool = Tool(name="boom", description="d", method="GET", path="/", input_schema={}, local=boom)
+        r = RemoteAPIClient(base_url="http://127.0.0.1:1", token="t").call(tool, {})
+        self.assertTrue(r.is_error); self.assertIn("boom failed: AttributeError", r.text)
     def test_no_implicit_sandbox_at_filesystem_root_or_home(self):
         import os
         from unittest import mock
