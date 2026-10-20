@@ -36,7 +36,8 @@ public:
 
     int GetLastError() const { return m_error; }
 
-    static const wxMediaState MEDIASTATE_BUFFERING;
+    // 6 is outside the wxMediaState enumerators, so this is not a constant expression under newer clang (Xcode 27).
+    static inline const wxMediaState MEDIASTATE_BUFFERING = static_cast<wxMediaState>(6);
 
 protected:
     void DoSetSize(int x, int y, int width, int height, int sizeFlags) override;
