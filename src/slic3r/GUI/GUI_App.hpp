@@ -29,6 +29,10 @@
 
 #include <vector>
 #include <utility>
+// RemoteAPI types are kept out of this widely-included header (they pull in
+// Boost.Asio/Beast) via forward declaration; the full definitions are included
+// in GUI_App.cpp. This stops Asio/Beast from being parsed by every GUI TU.
+namespace Slic3r { namespace GUI { namespace RemoteAPI { class Server; class Controller; } } }
 #include <wx/app.h>
 #include <wx/colour.h>
 #include <wx/event.h>
@@ -383,6 +387,8 @@ private:
     bool             m_show_error_msgdlg{false};
     wxString         m_info_dialog_content;
     std::unique_ptr<HttpServer> m_http_server;
+    std::unique_ptr<RemoteAPI::Server>     m_remote_api_server;
+    std::unique_ptr<RemoteAPI::Controller> m_remote_api_controller;
     bool             m_show_gcode_window{true};
     boost::thread    m_check_network_thread;
 public:
@@ -649,6 +655,9 @@ public:
     int             sync_bundle(std::string bundle_id, std::string version);
     bool            unsubscribe_bundle(const std::string& id);
     void            update_single_bundle(wxCommandEvent& evt);
+    void            start_remote_api();
+    void            stop_remote_api();
+    RemoteAPI::Server &remote_api_server(); // defined in GUI_App.cpp (Server is only fwd-declared here)
 
     PresetBundleDialog* m_preset_bundle_dlg{nullptr};
     PluginsDialog* m_plugins_dlg{nullptr};

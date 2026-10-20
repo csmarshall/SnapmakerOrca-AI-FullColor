@@ -5,6 +5,12 @@
 #include "OrcaCloudServiceAgent.hpp"
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
+// Boost.Asio-based RemoteAPI headers included BEFORE GUI_App.hpp (which pulls in
+// wx/windows.h) to preserve asio-before-windows.h ordering, and to supply the
+// full RemoteAPI::Server/Controller definitions this TU needs (they are only
+// forward-declared in GUI_App.hpp).
+#include "RemoteAPI/RemoteAPIServer.hpp"
+#include "RemoteAPI/RemoteAPIController.hpp"
 #include "GUI_App.hpp"
 #include "BBLTopbar.hpp"
 #include "Shortcuts.hpp"
@@ -1233,6 +1239,7 @@ void GUI_App::post_init()
     if (m_startup_cloud_report)
         std::exchange(m_startup_cloud_report, nullptr)();
 
+    this->start_remote_api();
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
 #ifdef _WIN32
@@ -1299,6 +1306,7 @@ void GUI_App::shutdown()
         login_dlg = nullptr;
     }
 
+    if (!m_is_recreating_gui) stop_remote_api();
     if (m_is_recreating_gui) return;
     stop_http_server();
     set_closing(true);
@@ -5040,6 +5048,13 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 
     update_publish_status();
 
+    // Rebind the Remote API's slice-event subscriptions onto the freshly built
+    // plater (the old plater's Bind()s died with it). No-op if the API is off or
+    // already bound to this plater. The server itself keeps running across a
+    // recreate (shutdown() skips stop when m_is_recreating_gui), so WS clients
+    // are preserved.
+    if (m_remote_api_controller) m_remote_api_controller->bind_plater_events();
+
     m_is_recreating_gui = false;
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "recreate_GUI exit";
@@ -8295,6 +8310,33 @@ void GUI_App::stop_sync_user_preset()
     }
 }
 
+RemoteAPI::Server &GUI_App::remote_api_server()
+{
+    if (!m_remote_api_server)
+        m_remote_api_server = std::make_unique<RemoteAPI::Server>();
+    return *m_remote_api_server;
+}
+
+void GUI_App::start_remote_api()
+{
+    auto cfg = RemoteAPI::Config::load();
+    if (!cfg.enabled) return;
+    if (!m_remote_api_controller)
+        m_remote_api_controller = std::make_unique<RemoteAPI::Controller>();
+    m_remote_api_controller->bind_plater_events();
+    auto &server = remote_api_server();
+    server.set_handler([this](const RemoteAPI::Request &req) {
+        return m_remote_api_controller->dispatch(req);
+    });
+    server.start(cfg);
+}
+
+void GUI_App::stop_remote_api()
+{
+    if (m_remote_api_server)
+        m_remote_api_server->stop();
+}
+
 void GUI_App::restart_sync_user_preset()
 {
     // A manual sync's progress dialog is already on screen — ignore repeat triggers so a
@@ -9149,6 +9191,10 @@ void GUI_App::open_preferences(PreferencesTab tab, const std::string& highlight_
         PreferencesDialog dlg(mainframe);
         dlg.select_tab(tab, highlight_option);
         dlg.ShowModal();
+        // Apply Remote API settings changed in the dialog. Cheap and idempotent
+        // even if nothing Remote-API-related changed.
+        stop_remote_api();
+        start_remote_api(); // no-op if remote_api_enabled is false
         need_recreate_gui = dlg.recreate_GUI();
         pending_language = dlg.pending_language();
         if (!need_recreate_gui) {

@@ -3267,6 +3267,16 @@ void GCodeViewer::render_translucent_toolpaths(int canvas_width, int canvas_heig
     render_markers(canvas_width, canvas_height);
 }
 
+void GCodeViewer::render_toolpaths_with_camera(const Camera& camera)
+{
+    // This viewer draws with the plater camera (render_toolpaths() reads it directly), and the
+    // offscreen caller installs its framing camera into that same object for the duration of the
+    // render (see GLCanvas3D::render_gcode_thumbnail). Check that contract instead of assuming it.
+    assert(&camera == &wxGetApp().plater()->get_camera());
+    (void) camera;
+    render_toolpaths();
+}
+
 void GCodeViewer::render_toolpaths()
 {
     const Camera& camera = wxGetApp().plater()->get_camera();
