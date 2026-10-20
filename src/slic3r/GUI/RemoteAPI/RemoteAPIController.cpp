@@ -806,7 +806,9 @@ Response Controller::handle_load_model(const std::string &body)
 
     // Network (UNC / \\?\ device) and relative paths are refused: opening one can make the host
     // authenticate to an attacker-chosen server, and a relative path depends on the app's cwd.
-    if (path.rfind("\\\\", 0) == 0 || path.rfind("//", 0) == 0 || !boost::filesystem::path(path).is_absolute())
+    // Any mix of two leading separators (\\, //, \/, /\) is a network or device path, so check both characters.
+    auto is_sep = [](char c) { return c == '\\' || c == '/'; };
+    if ((path.size() >= 2 && is_sep(path[0]) && is_sep(path[1])) || !boost::filesystem::path(path).is_absolute())
         return { 422, {{"error", "path_not_allowed"}, {"detail", "an absolute local path is required"}} };
 
     std::string lower = path;
@@ -827,9 +829,7 @@ Response Controller::handle_load_model(const std::string &body)
     // STEP (and mesh import of a very large STL) can exceed 10 s, and the load
     // would still complete on the GUI thread after a ui_timeout was returned.
     nlohmann::json r = run_on_ui([path, is_step]() -> nlohmann::json {
-        if (!boost::filesystem::exists(path))
-            return {{"error", "not_found"}};
-        // Optional allowlist: app config key remote_api_model_dirs = dir1;dir2. Unset = any local path.
+        // Optional allowlist (checked before any existence test, so a disallowed path is never probed): app config key remote_api_model_dirs = dir1;dir2. Unset = any local path.
         {
             const std::string dirs = wxGetApp().app_config->get("remote_api_model_dirs");
             if (!dirs.empty()) {
@@ -856,6 +856,8 @@ Response Controller::handle_load_model(const std::string &body)
                 if (!allowed) return {{"error", "path_not_allowed"}};
             }
         }
+        if (!boost::filesystem::exists(path))
+            return {{"error", "not_found"}};
         Plater *plater = wxGetApp().plater();
         // Use the stored deflection defaults instead of StepMeshDialog and skip
         // the non-UTF8 name warning while loading; restore the user's flags after.
