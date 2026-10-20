@@ -16,8 +16,8 @@ from .spec import load_tools
 PROTOCOL_VERSION = "2024-11-05"
 
 
-def serve(read_only: bool = False, allow_destructive: bool = False) -> None:
-    tools = {t.name: t for t in load_tools(read_only=read_only)}
+def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bool = True) -> None:
+    tools = {t.name: t for t in load_tools(read_only=read_only, advisory=advisory)}
     if not allow_destructive:
         tools = {n: t for n, t in tools.items() if not t.destructive}
     client = RemoteAPIClient()

@@ -159,10 +159,16 @@ class McpTests(Base):
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                 {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "getStatus", "arguments": {}}},
                 {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "deletePreset", "arguments": {}}}]
-        out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp"], input="\n".join(map(json.dumps, reqs)),
-                             capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
-        replies = {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}
-        self.assertEqual(len(replies[2]["result"]["tools"]), 23)  # destructive tool hidden by default
+        def run(*flags):
+            out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp", *flags], input="\n".join(map(json.dumps, reqs)),
+                                 capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
+            return {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}
+        replies = run()
+        names = {t["name"] for t in replies[2]["result"]["tools"]}
+        self.assertEqual(len(names), 26)  # 23 API tools (destructive one hidden) + 3 phyx3d advisory tools
+        self.assertTrue({"analyzePrintability", "analyzeStrength", "rankOrientations"} <= names)  # reachable over MCP by default
+        bare = {t["name"] for t in run("--no-advisory")[2]["result"]["tools"]}
+        self.assertEqual(len(bare), 23); self.assertFalse(bare & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
         self.assertEqual(replies[3]["result"]["isError"], False)
         self.assertIn("error", replies[4])  # hidden tool cannot be called
 

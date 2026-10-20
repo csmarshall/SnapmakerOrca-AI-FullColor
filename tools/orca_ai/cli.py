@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.mcp:
         from .mcp_server import serve
-        serve(read_only=args.read_only, allow_destructive=args.yes)
+        serve(read_only=args.read_only, allow_destructive=args.yes, advisory=not args.no_advisory)
         return 0
     if not args.request:
         ap.error("give a request, e.g. orca-ai 'review this model for strength; it is a bracket under load'")
