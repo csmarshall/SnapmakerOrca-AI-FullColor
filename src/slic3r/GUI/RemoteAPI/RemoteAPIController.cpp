@@ -860,6 +860,14 @@ Response Controller::handle_load_model(const std::string &body)
                 }
                 if (!allowed) return {{"error", "path_not_allowed"}};
                 load_path = real.string();   // load what was checked, so a later symlink swap cannot escape the allowlist
+                // The extension check ran on the requested name; a symlink must not turn it into another file type.
+                auto ext_lower = [](const boost::filesystem::path &p) {
+                    std::string e = p.extension().string();
+                    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+                    return e;
+                };
+                if (ext_lower(real) != ext_lower(boost::filesystem::path(path)))
+                    return {{"error", "path_not_allowed"}};
             }
         }
         if (!boost::filesystem::exists(path))
