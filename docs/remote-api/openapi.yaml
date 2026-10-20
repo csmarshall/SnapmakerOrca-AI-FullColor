@@ -215,6 +215,7 @@ paths:
       summary: Delete an object
       operationId: deleteObject
       x-mutating: true
+      x-destructive: true
       parameters: [ { $ref: "#/components/parameters/ObjectId" } ]
       responses:
         "200": { $ref: "#/components/responses/Json" }
@@ -439,6 +440,7 @@ components:
       properties:
         type: { type: string, enum: [print, filament, printer] }
         name: { type: string }
+        extruder: { type: integer, minimum: 0, default: 0, description: "selectPreset only, type=filament: the filament slot (0-based) to set. A multi-tool printer has one preset per slot." }
     Error:
       type: object
       properties:

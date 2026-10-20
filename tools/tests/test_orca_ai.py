@@ -61,6 +61,7 @@ class SpecTests(Base):
         self.assertNotIn("events", self.tools)
     def test_destructive_and_mutating_flags(self):
         self.assertTrue(self.tools["deletePreset"].destructive)
+        self.assertTrue(self.tools["deleteObject"].destructive)  # deleting a plate object loses unsaved work
         self.assertTrue(self.tools["putConfig"].mutating)
         self.assertFalse(self.tools["getStatus"].mutating)
         self.assertFalse(self.tools["getPresetConfig"].mutating)  # POST, but read-only
@@ -164,14 +165,14 @@ class McpTests(Base):
                                  capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
             return {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}
         implicit = {t["name"] for t in run()[2]["result"]["tools"]}   # no model dir named: advisory tools stay off
-        self.assertEqual(len(implicit), 23); self.assertFalse(implicit & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
+        self.assertEqual(len(implicit), 22); self.assertFalse(implicit & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
         env["ORCA_AI_MODEL_DIRS"] = str(Path(__file__).resolve().parents[1])
         replies = run()
         names = {t["name"] for t in replies[2]["result"]["tools"]}
-        self.assertEqual(len(names), 26)  # 23 API tools (destructive one hidden) + 3 phyx3d advisory tools
+        self.assertEqual(len(names), 25)  # 22 API tools (destructive ones hidden) + 3 phyx3d advisory tools
         self.assertTrue({"analyzePrintability", "analyzeStrength", "rankOrientations"} <= names)  # reachable over MCP by default
         bare = {t["name"] for t in run("--no-advisory")[2]["result"]["tools"]}
-        self.assertEqual(len(bare), 23); self.assertFalse(bare & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
+        self.assertEqual(len(bare), 22); self.assertFalse(bare & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
         self.assertEqual(replies[3]["result"]["isError"], False)
         self.assertIn("error", replies[4])  # hidden tool cannot be called
 

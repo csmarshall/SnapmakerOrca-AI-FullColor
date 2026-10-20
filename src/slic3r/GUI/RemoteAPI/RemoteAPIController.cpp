@@ -923,8 +923,17 @@ Response Controller::handle_select_preset(const std::string &body)
                         type_s == "printer"  ? Preset::TYPE_PRINTER : Preset::TYPE_INVALID;
     if (type == Preset::TYPE_INVALID)
         return { 400, {{"error", "unknown_type"}} };
+    // Filaments are chosen per slot (extruder); the slot defaults to 0 like the first filament combo.
+    int extruder = 0;
+    if (in.contains("extruder")) {
+        if (!in["extruder"].is_number_integer() || in["extruder"].get<int>() < 0)
+            return { 400, {{"error", "bad_extruder"}, {"detail", "extruder must be a non-negative integer"}} };
+        if (type != Preset::TYPE_FILAMENT)
+            return { 400, {{"error", "bad_extruder"}, {"detail", "extruder only applies to type=filament"}} };
+        extruder = in["extruder"].get<int>();
+    }
 
-    nlohmann::json r = run_on_ui([type, name]() -> nlohmann::json {
+    nlohmann::json r = run_on_ui([type, name, extruder]() -> nlohmann::json {
         auto *bundle = wxGetApp().preset_bundle;
         PresetCollection &presets = type == Preset::TYPE_PRINT    ? bundle->prints :
                                     type == Preset::TYPE_FILAMENT ? bundle->filaments :
@@ -948,6 +957,24 @@ Response Controller::handle_select_preset(const std::string &body)
         discard_if_dirty(bundle->filaments);
         discard_if_dirty(bundle->sla_materials);
         discard_if_dirty(bundle->printers);
+        if (type == Preset::TYPE_FILAMENT) {
+            // Selecting in the collection alone leaves every slot unchanged on a multi-extruder printer, so apply it
+            // to the slot the way the GUI's filament combo does, then refresh the dependent panels.
+            if ((size_t) extruder >= bundle->filament_presets.size())
+                return {{"error", "bad_extruder"}, {"detail", "this printer has " + std::to_string(bundle->filament_presets.size()) + " filament slots"}};
+            const Preset *fp = bundle->filaments.find_preset(name, false);
+            if (fp == nullptr || !fp->is_compatible)
+                return {{"error", "incompatible_preset"}};
+            bundle->set_filament_preset((size_t) extruder, name);
+            wxGetApp().plater()->update_project_dirty_from_presets();
+            bundle->export_selections(*wxGetApp().app_config);
+            wxGetApp().sidebar().update_dynamic_filament_list();
+            wxGetApp().sidebar().update_color_mix_panel();
+            wxGetApp().sidebar().update_presets(Preset::TYPE_FILAMENT);
+            if (bundle->filament_presets[(size_t) extruder] != name)   // never report a selection that did not take
+                return {{"error", "select_failed"}};
+            return {{"selected", name}, {"extruder", extruder}};
+        }
         bool ok = tab->select_preset(name, false, "", /*force_select=*/true);
         if (!ok) return {{"error", "select_cancelled"}};
         return {{"selected", name}};
@@ -957,6 +984,8 @@ Response Controller::handle_select_preset(const std::string &body)
             api_notify("No such " + type_s + " preset '" + name + "'", true);
             return { 422, r };
         }
+        if (r["error"] == "bad_extruder" || r["error"] == "incompatible_preset")
+            return { 422, r };
         return { 500, r };
     }
     api_notify("Switched to " + type_s + " preset '" + name + "'");
