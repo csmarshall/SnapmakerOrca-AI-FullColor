@@ -834,6 +834,7 @@ Response Controller::handle_load_model(const std::string &body)
     // would still complete on the GUI thread after a ui_timeout was returned.
     nlohmann::json r = run_on_ui([path, is_step]() -> nlohmann::json {
         // Optional allowlist (checked before any existence test, so a disallowed path is never probed): app config key remote_api_model_dirs = dir1;dir2. Unset = any local path.
+        std::string load_path = path;   // the path that is actually loaded: the canonical one when an allowlist is set
         {
             const std::string dirs = wxGetApp().app_config->get("remote_api_model_dirs");
             if (!dirs.empty()) {
@@ -858,6 +859,7 @@ Response Controller::handle_load_model(const std::string &body)
                     start = semi + 1;
                 }
                 if (!allowed) return {{"error", "path_not_allowed"}};
+                load_path = real.string();   // load what was checked, so a later symlink swap cannot escape the allowlist
             }
         }
         if (!boost::filesystem::exists(path))
@@ -872,7 +874,7 @@ Response Controller::handle_load_model(const std::string &body)
             cfg->set_bool("enable_step_mesh_setting", false);
             cfg->set_bool("step_not_utf8_no_warn", true);
         }
-        std::vector<size_t> idxs = plater->load_files(std::vector<std::string>{ path },
+        std::vector<size_t> idxs = plater->load_files(std::vector<std::string>{ load_path },
                                                       LoadStrategy::LoadModel);
         if (is_step) {
             cfg->set_bool("enable_step_mesh_setting", prev_mesh_dlg);
