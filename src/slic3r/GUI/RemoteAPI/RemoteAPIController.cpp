@@ -808,7 +808,11 @@ Response Controller::handle_load_model(const std::string &body)
     // authenticate to an attacker-chosen server, and a relative path depends on the app's cwd.
     // Any mix of two leading separators (\\, //, \/, /\) is a network or device path, so check both characters.
     auto is_sep = [](char c) { return c == '\\' || c == '/'; };
-    if ((path.size() >= 2 && is_sep(path[0]) && is_sep(path[1])) || !boost::filesystem::path(path).is_absolute())
+    const boost::filesystem::path parsed(path);
+    const std::string root_name = parsed.root_name().string();
+    const bool plain_drive      = root_name.empty() || (root_name.size() == 2 && std::isalpha((unsigned char) root_name[0]) && root_name[1] == ':');
+    if ((path.size() >= 2 && is_sep(path[0]) && is_sep(path[1])) || path.rfind("\\??\\", 0) == 0 ||
+        !plain_drive || !parsed.is_absolute())
         return { 422, {{"error", "path_not_allowed"}, {"detail", "an absolute local path is required"}} };
 
     std::string lower = path;
