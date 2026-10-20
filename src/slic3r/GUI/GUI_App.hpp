@@ -20,6 +20,10 @@
 #include "slic3r/GUI/HMS.hpp"
 #include "slic3r/GUI/Jobs/UpgradeNetworkJob.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
+// RemoteAPI types are kept out of this widely-included header (they pull in
+// Boost.Asio/Beast) via forward declaration; the full definitions are included
+// in GUI_App.cpp. This stops Asio/Beast from being parsed by every GUI TU.
+namespace Slic3r { namespace GUI { namespace RemoteAPI { class Server; class Controller; } } }
 #include "../Utils/PrintHost.hpp"
 #include "slic3r/GUI/SSWCP.hpp"
 #include "slic3r/Utils/Bonjour.hpp"
@@ -349,6 +353,8 @@ private:
     bool             m_show_http_errpr_msgdlg{false};
     wxString         m_info_dialog_content;
     //HttpServer       m_http_server;
+    std::unique_ptr<RemoteAPI::Server>     m_remote_api_server;
+    std::unique_ptr<RemoteAPI::Controller> m_remote_api_controller;
 
 public:
     HttpServer       m_page_http_server;
@@ -650,6 +656,10 @@ private:
     //void            stop_http_server();
 
     // page loading http server
+    void            start_remote_api();
+    void            stop_remote_api();
+    RemoteAPI::Server &remote_api_server(); // defined in GUI_App.cpp (Server is only fwd-declared here)
+
     void            start_page_http_server();
     void            stop_page_http_server();
     /// Actual listen port (may differ from PAGE_HTTP_PORT if the default was in use).
