@@ -35,7 +35,11 @@ def phyx3d_command() -> list[str] | None:
 
 def allowed_dirs() -> list[Path]:
     raw = os.environ.get("ORCA_AI_MODEL_DIRS")
-    return [Path(d).resolve() for d in raw.split(os.pathsep) if d] if raw else [Path.cwd().resolve()]
+    if raw:
+        return [Path(d).resolve() for d in raw.split(os.pathsep) if d]
+    cwd = Path.cwd().resolve()
+    # A filesystem root or the home directory is not a sensible implicit sandbox: name a directory explicitly.
+    return [] if cwd in (Path(cwd.anchor), Path.home().resolve()) else [cwd]
 
 
 def _resolve_model(file: str) -> Path:

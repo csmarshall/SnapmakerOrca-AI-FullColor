@@ -6,6 +6,7 @@ initialize, tools/list and tools/call, which is all MCP tool servers need.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
@@ -17,6 +18,11 @@ PROTOCOL_VERSION = "2024-11-05"
 
 
 def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bool = True) -> None:
+    if advisory and not os.environ.get("ORCA_AI_MODEL_DIRS"):
+        # MCP clients often start servers with cwd=/ or $HOME, so the cwd default would expose far too much.
+        print("orca-ai: advisory analysers disabled over MCP until --model-dir or ORCA_AI_MODEL_DIRS names a directory",
+              file=sys.stderr)
+        advisory = False
     tools = {t.name: t for t in load_tools(read_only=read_only, advisory=advisory)}
     if not allow_destructive:
         tools = {n: t for n, t in tools.items() if not t.destructive}

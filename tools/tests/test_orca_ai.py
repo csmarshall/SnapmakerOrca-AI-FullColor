@@ -163,6 +163,9 @@ class McpTests(Base):
             out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp", *flags], input="\n".join(map(json.dumps, reqs)),
                                  capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
             return {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}
+        implicit = {t["name"] for t in run()[2]["result"]["tools"]}   # no model dir named: advisory tools stay off
+        self.assertEqual(len(implicit), 23); self.assertFalse(implicit & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
+        env["ORCA_AI_MODEL_DIRS"] = str(Path(__file__).resolve().parents[1])
         replies = run()
         names = {t["name"] for t in replies[2]["result"]["tools"]}
         self.assertEqual(len(names), 26)  # 23 API tools (destructive one hidden) + 3 phyx3d advisory tools
@@ -208,6 +211,18 @@ class AdvisoryTests(unittest.TestCase):
         r = self.call("analyzePrintability", file="/etc/passwd.stl"); self.assertTrue(r.is_error)
     def test_traversal_out_of_allowed_dir_is_refused(self):
         r = self.call("analyzePrintability", file=self.tmp + "/../../../etc/hosts.stl"); self.assertTrue(r.is_error)
+    def test_no_implicit_sandbox_at_filesystem_root_or_home(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ):
+            os.environ.pop("ORCA_AI_MODEL_DIRS", None)
+            here = os.getcwd()
+            try:
+                for where in ("/", os.path.expanduser("~")):
+                    os.chdir(where)
+                    self.assertEqual(self.advisory.allowed_dirs(), [], where)
+            finally:
+                os.chdir(here)
     def test_wrong_suffix_is_refused_even_inside_allowed_dir(self):
         open(self.tmp + "/x.txt", "w").write("hi")
         self.assertTrue(self.call("analyzePrintability", file=self.tmp + "/x.txt").is_error)
