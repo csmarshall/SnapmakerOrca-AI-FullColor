@@ -29,6 +29,7 @@ class PartPlateList;
 class OpenGLManager;
 class PathLayerStack;
 class PathRenderer;
+class Camera;
 
 static const float GCODE_VIEWER_SLIDER_SCALE = 0.6f;
 static const float SLIDER_DEFAULT_RIGHT_MARGIN  = 10.0f;
@@ -889,6 +890,9 @@ public:
 
     bool is_legend_enabled() const { return m_legend_enabled; }
     void enable_legend(bool enable) { m_legend_enabled = enable; }
+    // Offscreen plate render (Remote API): draw only the toolpaths using an
+    // explicit camera - no legend, sliders, ImGui, markers or shells.
+    void render_toolpaths_with_camera(const Camera& camera);
     float get_legend_height() { return m_legend_height; }
 
     void export_toolpaths_to_obj(const char* filename) const;

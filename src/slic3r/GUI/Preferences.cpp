@@ -22,6 +22,7 @@
 
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "SSWCP.hpp"
+#include "slic3r/GUI/RemoteAPI/RemoteAPIConfig.hpp"
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -1084,12 +1085,14 @@ void PreferencesDialog::create()
     m_sizer_body->Add(m_top_line, 0, wxEXPAND, 0);
 
     auto general_page = create_general_page();
+    auto remote_api_page = create_remote_api_page();
 #if !BBL_RELEASE_TO_PUBLIC
     auto debug_page   = create_debug_page();
 #endif
 
     m_sizer_body->Add(0, 0, 0, wxTOP, FromDIP(28));
     m_sizer_body->Add(general_page, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(38));
+    m_sizer_body->Add(remote_api_page, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(38));
 #if !BBL_RELEASE_TO_PUBLIC
     m_sizer_body->Add(debug_page, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(38));
 #endif
@@ -1503,6 +1506,93 @@ void PreferencesDialog::create_shortcuts_page()
     page->SetSizer(sizer_page);
     page->Layout();
     sizer_page->Fit(page);
+}
+
+wxWindow* PreferencesDialog::create_remote_api_page()
+{
+    auto page = new wxWindow(m_scrolledWindow, wxID_ANY);
+    page->SetBackgroundColour(*wxWHITE);
+
+    wxBoxSizer *bSizer = new wxBoxSizer(wxVERTICAL);
+
+    // Starting/stopping the server happens when the dialog closes
+    // (GUI_App::open_preferences calls stop_remote_api()/start_remote_api() right
+    // after ShowModal() returns), so these controls only persist AppConfig here.
+    auto title = create_item_title(_L("Remote Control API"), page, _L("Remote Control API"));
+    auto item_enable = create_item_checkbox(_L("Enable Remote API"), page,
+        _L("Allow external tools (e.g. AI agents via MCP) to read and change slicer settings and trigger slicing on this machine."),
+        50, "remote_api_enabled");
+    auto item_lan = create_item_checkbox(_L("Allow LAN access"), page,
+        _L("Off: only this computer (127.0.0.1). On: other devices on your local network can control this slicer with the token."),
+        50, "remote_api_bind_lan");
+    auto item_notify = create_item_checkbox(_L("Notify on API changes"), page,
+        _L("Show a notification when an external tool changes settings, loads or edits objects, or switches presets."),
+        50, "remote_api_notify");
+
+    // Port row (bespoke): the stock create_item_input() writes the raw field text back
+    // on every Enter/focus-loss with no empty/range guard, so closing the dialog could
+    // persist "" over the port. Load with a sane default; only ever persist 1-65535.
+    auto port_display = [this]() -> wxString {
+        try {
+            int p = std::stoi(app_config->get("remote_api_port"));
+            if (p >= 1 && p <= 65535) return wxString::Format("%d", p);
+        } catch (...) {}
+        return wxString::Format("%d", Slic3r::GUI::RemoteAPI::Config{}.port);
+    };
+
+    wxBoxSizer *port_sizer = new wxBoxSizer(wxHORIZONTAL);
+    port_sizer->AddSpacer(FromDIP(50));
+    auto port_title = new wxStaticText(page, wxID_ANY, _L("Port"), wxDefaultPosition, DESIGN_TITLE_SIZE, wxST_NO_AUTORESIZE);
+    port_title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    port_title->SetFont(::Label::Body_14);
+    auto port_input = new ::TextInput(page, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, DESIGN_INPUT_SIZE, wxTE_PROCESS_ENTER);
+    port_input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_DIGITS));
+    port_input->GetTextCtrl()->SetValue(port_display());
+    auto commit_port = [this, port_input, port_display]() {
+        long p = 0;
+        if (port_input->GetTextCtrl()->GetValue().ToLong(&p) && p >= 1 && p <= 65535)
+            app_config->set("remote_api_port", std::to_string((int) p));
+        else
+            port_input->GetTextCtrl()->SetValue(port_display()); // revert; never clobber with blank/garbage
+    };
+    port_input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_port](wxCommandEvent &e) { commit_port(); e.Skip(); });
+    port_input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_port](wxFocusEvent &e) { commit_port(); e.Skip(); });
+    port_sizer->Add(port_title, 0, wxALIGN_CENTER_VERTICAL);
+    port_sizer->Add(port_input, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+
+    // Token row: read-only display + regenerate (restarts the running server).
+    wxBoxSizer *token_sizer = new wxBoxSizer(wxHORIZONTAL);
+    token_sizer->AddSpacer(FromDIP(50));
+    auto token_label = new wxStaticText(page, wxID_ANY, _L("API token"), wxDefaultPosition, DESIGN_TITLE_SIZE, wxST_NO_AUTORESIZE);
+    token_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    token_label->SetFont(::Label::Body_14);
+    auto token_value = new wxTextCtrl(page, wxID_ANY, wxString(app_config->get("remote_api_token")), wxDefaultPosition, wxSize(FromDIP(120), -1), wxTE_READONLY);
+    auto token_btn = new Button(page, _L("Regenerate"));
+    token_btn->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    token_btn->Bind(wxEVT_LEFT_DOWN, [this, token_value](wxMouseEvent &) {
+        auto tok = Slic3r::GUI::RemoteAPI::Config::generate_token();
+        app_config->set("remote_api_token", tok);
+        app_config->save();
+        token_value->SetValue(wxString(tok));
+        wxGetApp().stop_remote_api();
+        wxGetApp().start_remote_api();
+    });
+    token_sizer->Add(token_label, 0, wxALIGN_CENTER_VERTICAL);
+    token_sizer->Add(token_value, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+    token_sizer->Add(token_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+
+    bSizer->Add(title, 0, wxTOP, FromDIP(20));
+    bSizer->Add(item_enable, 0, wxTOP, FromDIP(5));
+    bSizer->Add(item_lan, 0, wxTOP, FromDIP(5));
+    bSizer->Add(item_notify, 0, wxTOP, FromDIP(5));
+    bSizer->Add(port_sizer, 0, wxTOP, FromDIP(5));
+    bSizer->Add(token_sizer, 0, wxEXPAND | wxTOP, FromDIP(5));
+    bSizer->AddSpacer(FromDIP(10));
+
+    page->SetSizer(bSizer);
+    page->Layout();
+    bSizer->Fit(page);
+    return page;
 }
 
 wxWindow* PreferencesDialog::create_debug_page()
