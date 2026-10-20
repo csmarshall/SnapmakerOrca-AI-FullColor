@@ -4089,6 +4089,16 @@ m_no_render_path = false;
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
 }
 
+void GCodeViewer::render_toolpaths_with_camera(const Camera& camera)
+{
+    // This viewer draws with the plater camera (render_toolpaths() reads it directly), and the
+    // offscreen caller installs its framing camera into that same object for the duration of the
+    // render (see GLCanvas3D::render_gcode_thumbnail). Check that contract instead of assuming it.
+    assert(&camera == &wxGetApp().plater()->get_camera());
+    (void) camera;
+    render_toolpaths();
+}
+
 void GCodeViewer::render_toolpaths()
 {
     // GPU path pipeline: the toolpaths are drawn from the de-geometrized
