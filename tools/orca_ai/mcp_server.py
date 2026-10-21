@@ -17,15 +17,19 @@ from .spec import load_tools
 PROTOCOL_VERSION = "2024-11-05"
 
 
-def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bool = True) -> None:
+def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bool = True,
+          allow_tools: frozenset[str] = frozenset()) -> None:
     if advisory and not os.environ.get("ORCA_AI_MODEL_DIRS"):
         # MCP clients often start servers with cwd=/ or $HOME, so the cwd default would expose far too much.
         print("orca-ai: advisory analysers disabled over MCP until --model-dir or ORCA_AI_MODEL_DIRS names a directory",
               file=sys.stderr)
         advisory = False
-    tools = {t.name: t for t in load_tools(read_only=read_only, advisory=advisory)}
-    if not allow_destructive:
-        tools = {n: t for n, t in tools.items() if not t.destructive}
+    tools = {t.name: t for t in load_tools(read_only=read_only, advisory=advisory, export=True)}
+    unknown = allow_tools - tools.keys()
+    if unknown:
+        print(f"orca-ai: --allow-tool names no available tool: {', '.join(sorted(unknown))}", file=sys.stderr)
+    if not allow_destructive:   # one destructive tool can be unhidden by name (--allow-tool) without unhiding the others
+        tools = {n: t for n, t in tools.items() if not t.destructive or n in allow_tools}
     client = RemoteAPIClient()
 
     def reply(msg_id: Any, result: dict | None = None, error: dict | None = None) -> None:

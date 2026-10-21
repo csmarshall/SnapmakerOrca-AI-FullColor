@@ -17,6 +17,11 @@ Needs `requests` and `pyyaml`. Pin the interpreter in unattended scripts (see th
   "cwd": "<repo>/tools", "env": {"ORCA_API_TOKEN": "..."}}}}
 ```
 
+## Export and delete (MCP)
+
+- `--export-dir DIR` adds a `saveGcode` tool that writes the last slice's G-code to a new `.gcode` file inside DIR (plain names only, never overwrites, nothing is sent to a printer). Without the flag the tool does not exist.
+- `--allow-tool NAME` (repeatable) unhides one destructive tool, e.g. `--allow-tool deleteObject`, without unhiding the others (`deletePreset` stays hidden). `--yes` still unhides all of them.
+
 ## Safety
 
 - `--read-only` exposes only tools that change nothing. Destructive tools (`deletePreset`) are hidden from MCP unless `--yes`, and require terminal confirmation in agent mode.
