@@ -66,7 +66,7 @@ def _content_kinds(op: dict[str, Any]) -> set[str]:
 
 
 def load_tools(spec_path: str | os.PathLike[str] | None = None, read_only: bool = False,
-               advisory: bool = False) -> list[Tool]:
+               advisory: bool = False, export: bool = False) -> list[Tool]:
     path = Path(spec_path or os.environ.get("ORCA_AI_SPEC") or DEFAULT_SPEC)
     doc = yaml.safe_load(path.read_text())
     tools: list[Tool] = []
@@ -127,6 +127,9 @@ def load_tools(spec_path: str | os.PathLike[str] | None = None, read_only: bool 
     if advisory:
         from .advisory import advisory_tools
         tools += advisory_tools()
+    if export and not read_only:
+        from .export import export_tools
+        tools += export_tools()
     return tools
 
 
