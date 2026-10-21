@@ -23,6 +23,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-p", "--provider", help="provider name from the config (default: config 'default')")
     ap.add_argument("--read-only", action="store_true", help="expose only tools that do not change anything")
     ap.add_argument("--yes", action="store_true", help="auto-approve destructive actions (preset deletion)")
+    ap.add_argument("--allow-tool", action="append", default=[], metavar="NAME",
+                    help="MCP only: unhide one destructive tool by name (e.g. deleteObject) without unhiding the rest (repeatable)")
+    ap.add_argument("--export-dir", help="MCP only: directory the saveGcode tool may write G-code files into (tool absent without it)")
     ap.add_argument("--list-tools", action="store_true", help="print the tools derived from the OpenAPI spec and exit")
     ap.add_argument("--init-config", action="store_true", help=f"write an example config to {CONFIG_PATH}")
     ap.add_argument("--mcp", action="store_true", help="run as an MCP stdio server instead of an agent (for Claude Code / Desktop)")
@@ -36,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.init_config:
         print(f"Wrote {write_example()}; edit the model names, then export the API-key variables it names.")
         return 0
+    if args.export_dir:
+        os.environ["ORCA_AI_EXPORT_DIR"] = args.export_dir
     if args.model_dir:
         os.environ["ORCA_AI_MODEL_DIRS"] = os.pathsep.join(args.model_dir)
     tools = load_tools(read_only=args.read_only, advisory=not args.no_advisory)
@@ -46,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.mcp:
         from .mcp_server import serve
-        serve(read_only=args.read_only, allow_destructive=args.yes, advisory=not args.no_advisory)
+        serve(read_only=args.read_only, allow_destructive=args.yes, advisory=not args.no_advisory,
+              allow_tools=frozenset(args.allow_tool))
         return 0
     if not args.request:
         ap.error("give a request, e.g. orca-ai 'review this model for strength; it is a bracket under load'")
