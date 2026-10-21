@@ -4,16 +4,20 @@ What these cannot show: that the real Orca server accepts these requests. They c
 schemas derive from the spec, requests are shaped as the spec says, and the loop/guardrails behave.
 """
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orca_ai.agent import Agent  # noqa: E402
 from orca_ai.client import RemoteAPIClient  # noqa: E402
+from orca_ai.export import export_tools, save_gcode  # noqa: E402
 from orca_ai.providers import Message, Provider, ToolCall, Turn  # noqa: E402
 from orca_ai.providers.openai_compat import OpenAICompatProvider  # noqa: E402
 from orca_ai.spec import load_tools  # noqa: E402
@@ -175,6 +179,55 @@ class McpTests(Base):
         self.assertEqual(len(bare), 22); self.assertFalse(bare & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
         self.assertEqual(replies[3]["result"]["isError"], False)
         self.assertIn("error", replies[4])  # hidden tool cannot be called
+
+class ExportAndAllowToolTests(Base):
+    def _env(self, directory, token="tok"):
+        return mock.patch.dict(os.environ, {"ORCA_AI_EXPORT_DIR": directory, "ORCA_API_URL": self.url, "ORCA_API_TOKEN": token})
+
+    def test_saveGcode_is_absent_without_an_export_dir(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ORCA_AI_EXPORT_DIR", None)
+            self.assertEqual(export_tools(), [])
+
+    def test_saveGcode_writes_a_new_file_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as d, self._env(d):
+            first, second = save_gcode({"filename": "leg"}), save_gcode({"filename": "leg"})
+            self.assertFalse(first.is_error or second.is_error, (first.text, second.text))
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["leg-1.gcode", "leg.gcode"])
+            self.assertEqual((Path(d) / "leg.gcode").read_text(), '{"ok":true}')   # the fake server's /gcode body
+
+    def test_saveGcode_refuses_path_like_names_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d, self._env(d):
+            for bad in ["../escape", "a/b", "/etc/passwd", ".hidden", "", "x\x00y", "..", "a\\b", "x" * 200]:
+                result = save_gcode({"filename": bad})
+                self.assertTrue(result.is_error, bad)
+            self.assertEqual(list(Path(d).iterdir()), [])
+            self.assertFalse((Path(d).parent / "escape.gcode").exists())
+            self.assertTrue(save_gcode({"filename": "ok name-1.v2"}).is_error is False)   # control: a plain name still works
+
+    def test_saveGcode_with_a_bad_token_is_an_error_and_leaves_no_file(self):
+        with tempfile.TemporaryDirectory() as d, self._env(d, token="wrong"):
+            self.assertTrue(save_gcode({"filename": "leg"}).is_error)
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+    def test_allow_tool_unhides_only_the_named_destructive_tool(self):
+        env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin"}
+        def names(*flags):
+            req = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+            out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp", "--no-advisory", *flags], input="\n".join(map(json.dumps, req)),
+                                 capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
+            return {t["name"] for t in {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}[2]["result"]["tools"]}, out.stderr
+        default, _ = names()
+        self.assertFalse(default & {"deleteObject", "deletePreset", "saveGcode"})
+        allowed, _ = names("--allow-tool", "deleteObject")
+        self.assertIn("deleteObject", allowed); self.assertNotIn("deletePreset", allowed)
+        bogus, err = names("--allow-tool", "nonsense")
+        self.assertEqual(bogus, default); self.assertIn("nonsense", err)
+        with tempfile.TemporaryDirectory() as d:
+            exporting, _ = names("--export-dir", d)
+            self.assertIn("saveGcode", exporting)
+            readonly, _ = names("--export-dir", d, "--read-only")
+            self.assertNotIn("saveGcode", readonly)
 
 
 def _stl(path, boxes):
