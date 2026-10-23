@@ -478,9 +478,14 @@ public:
         int logoSize = scaleX(140);
         int logoX    = scaleX(170);
         int logoY    = scaleY(80);
-        wxBitmap* logoBmp = bmpCache.load_svg("splash_app_icon", logoSize, logoSize);
-        if (logoBmp != nullptr)
+        // The fork's logo is a raster (NanoSVG cannot embed images); fall back to the original SVG if it cannot be loaded.
+        wxImage logoImg;
+        if (logoImg.LoadFile(from_u8(Slic3r::resources_dir() + "/images/splash_app_icon.png")) && logoImg.IsOk()) {
+            logoImg.Rescale(logoSize, logoSize, wxIMAGE_QUALITY_HIGH);
+            memDc.DrawBitmap(wxBitmap(logoImg), logoX, logoY, true);
+        } else if (wxBitmap* logoBmp = bmpCache.load_svg("splash_app_icon", logoSize, logoSize)) {
             memDc.DrawBitmap(*logoBmp, logoX, logoY, true);
+        }
 
         // Brand name: "Snapmaker Orca"
         memDc.SetFont(m_constant_text.titleFont);
@@ -592,7 +597,7 @@ private:
 
         void init()
         {
-            title    = "Snapmaker Orca";
+            title    = "Snapmaker Orca AI FullColor";
             version  = wxString::Format("V%s %s", Snapmaker_VERSION, _L("Release"));
 
             titleFont   = Label::sysFont(20, false);
