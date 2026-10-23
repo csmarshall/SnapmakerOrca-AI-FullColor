@@ -242,9 +242,9 @@ AboutDialog::AboutDialog()
     // version
     {
         vesizer->Add(0, FromDIP(165), 1, wxEXPAND, FromDIP(5));
-        auto version_string = _L("Snapmaker Orca ") + " " + std::string(Snapmaker_VERSION);
+        auto version_string = _L("Snapmaker Orca AI FullColor ") + " " + std::string(Snapmaker_VERSION);
         wxStaticText* version = new wxStaticText(this, wxID_ANY, version_string.c_str(), wxDefaultPosition, wxDefaultSize);
-        wxStaticText* bs_version = new wxStaticText(this, wxID_ANY, wxString::Format("Based on Orca Slicer"), wxDefaultPosition, wxDefaultSize);
+        wxStaticText* bs_version = new wxStaticText(this, wxID_ANY, wxString::Format("Unofficial fork of Snapmaker Orca (based on Orca Slicer). Not affiliated with Snapmaker."), wxDefaultPosition, wxDefaultSize);
         bs_version->SetFont(Label::Body_12);
         wxFont version_font = GetFont();
         #ifdef __WXMSW__
@@ -333,7 +333,7 @@ AboutDialog::AboutDialog()
 
     copyright_hor_sizer->Add(copyright_ver_sizer, 0, wxLEFT, FromDIP(20));
 
-    wxStaticText *html_text = new wxStaticText(this, wxID_ANY, "Copyright © 2024-2026 Snapmaker. All rights reserved.", wxDefaultPosition, wxDefaultSize);
+    wxStaticText *html_text = new wxStaticText(this, wxID_ANY, "Copyright © 2024-2026 Snapmaker and Orca Slicer contributors; fork changes by their authors. All rights reserved.", wxDefaultPosition, wxDefaultSize);
     html_text->SetForegroundColour(wxColour(107, 107, 107));
 
     copyright_ver_sizer->Add(html_text, 0, wxALL , 0);
@@ -350,7 +350,7 @@ AboutDialog::AboutDialog()
               (boost::format(
               "<html>"
               "<body>"
-              "<p style=\"text-align:left\"><a style=\"color:#009789\" href=\"www.snapmaker.com\">www.snapmaker.com</ a></p>"
+              "<p style=\"text-align:left\"><a style=\"color:#009789\" href=\"https://github.com/csmarshall/SnapmakerOrca-AI-FullColor\">github.com/csmarshall/SnapmakerOrca-AI-FullColor</ a></p>"
               "</body>"
               "</html>")
             ).str());
