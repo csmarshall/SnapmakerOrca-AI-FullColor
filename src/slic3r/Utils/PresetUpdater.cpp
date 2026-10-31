@@ -288,7 +288,7 @@ PresetUpdater::priv::priv()
 	, cancel(false)
 {
 	//BBS: refine preset updater logic
-	enabled_version_check = true;
+	enabled_version_check = false; // no stock-release check in this build (see GUI_App::check_new_version_sf)
 	set_download_prefs(GUI::wxGetApp().app_config);
 	// Install indicies from resources. Only installs those that are either missing or older than in resources.
 	check_installed_vendor_profiles();
