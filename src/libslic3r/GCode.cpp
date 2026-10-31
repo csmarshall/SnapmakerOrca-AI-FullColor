@@ -4031,6 +4031,24 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         this->placeholder_parser().set("enable_high_low_temp_mix", new ConfigOptionBool(!print.need_check_multi_filaments_compatibility()));
         this->placeholder_parser().set("min_vitrification_temperature", new ConfigOptionInt(min_temperature_vitrification));
 
+        // Snapmaker U1 start G-code reads chamber_cooling_mode (0 keep warm, 1 weak cooling, 2 strong cooling), which is not a config option here
+        constexpr int kChamberCoolingKeepWarm  = 0;
+        constexpr int kChamberCoolingWeak      = 1;
+        constexpr int kChamberCoolingStrong    = 2;
+        constexpr int kVitrificationStrongCool = 50; // <= 50: strong cooling
+        constexpr int kVitrificationWeakCool   = 70; // <= 70: weak cooling
+        int chamber_cooling_mode = kChamberCoolingKeepWarm;
+        for (unsigned int extruder : tool_ordering.all_extruders()) {
+            const int vitrification = m_config.temperature_vitrification.get_at(extruder);
+            if (vitrification <= kVitrificationStrongCool) {
+                chamber_cooling_mode = kChamberCoolingStrong;
+                break;
+            }
+            if (vitrification <= kVitrificationWeakCool)
+                chamber_cooling_mode = std::max(chamber_cooling_mode, kChamberCoolingWeak);
+        }
+        this->placeholder_parser().set("chamber_cooling_mode", new ConfigOptionInt(chamber_cooling_mode));
+
         // SoftFever: support variables `first_layer_temperature` and `first_layer_bed_temperature`
         this->placeholder_parser().set("first_layer_bed_temperature", new ConfigOptionInts(*first_bed_temp_opt));
         this->placeholder_parser().set("first_layer_temperature", new ConfigOptionInts(m_config.nozzle_temperature_initial_layer));
