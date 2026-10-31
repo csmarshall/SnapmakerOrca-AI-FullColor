@@ -730,7 +730,7 @@ Response Controller::handle_put_config(const std::string &body)
         // routing to the print preset exactly as it did before.
         DynamicPrintConfig     proj_new = bundle->project_config;
         std::set<std::string>  proj_keys;
-        const int              nozzles  = 1; // Snapmaker base: flush_volumes_matrix is filaments^2 (16 values for 4 filaments), no per-nozzle dimension
+        const int              nozzles  = bundle->get_printer_extruder_count(); // flush_volumes_matrix is filaments^2 x nozzles on stock 2.5
         const auto            *colours0 = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
         const size_t           filaments_before = colours0 == nullptr ? 0 : colours0->values.size();
         const int              plate_idx = wxGetApp().plater()->get_partplate_list().get_curr_plate_index();
@@ -1715,10 +1715,10 @@ Response Controller::handle_get_preset_config(const std::string &body)
         nlohmann::json cfg = nlohmann::json::object();
         for (const std::string &k : p->config.keys()) {
             std::string v = p->config.opt_serialize(k);
-            if (is_credential_key(k) && !v.empty())
+            // Deny by default: every print-host key is redacted outright (print_host and print_host_webui can
+            // carry tokens in the path, query or fragment, which stripping userinfo would leave in place).
+            if (is_secret_read_key(k) || (is_credential_key(k) && !v.empty()))
                 v = k_redacted;
-            else if (is_host_url_key(k))
-                v = strip_url_userinfo(v);
             cfg[k] = v;
         }
         return {{"name", p->name}, {"system", p->is_system}, {"config", cfg}};
