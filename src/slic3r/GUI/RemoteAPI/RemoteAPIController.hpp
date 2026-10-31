@@ -74,9 +74,16 @@ private:
     Response handle_arrange();                              // M4b: POST /arrange (async)
     Response handle_orient();                               // M4b: POST /orient (async)
     Response handle_jobs_status();                          // M4b: GET /jobs/status
+    Response handle_get_plates();                           // plates: GET /plates
+    Response handle_create_plate(const std::string &body);  // plates: POST /plates
+    Response handle_select_plate(int index);                // plates: POST /plates/{i}/select
+    Response handle_delete_plate(int index);                // plates: DELETE /plates/{i}
+    Response handle_put_object_plate(uint64_t id, const std::string &body); // plates: POST /objects/{id}/plate
 
     // Mutate m_slice under the lock and broadcast a snapshot (event_name) to WS clients.
     void set_slice_state(const std::function<void(SliceState&)> &mut, const char *event_name);
+    // plates: make the stored slice state describe the current plate (GUI thread).
+    void sync_slice_state_to_current_plate(const char *event_name);
 
     // Debounced config.changed emitter (GUI thread; mutex guards the pending set).
     void on_config_changed(int preset_type);
