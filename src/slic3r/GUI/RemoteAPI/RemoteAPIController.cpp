@@ -1931,6 +1931,21 @@ Response Controller::handle_get_objects()
                     o["bbox_max"] = {bb.max.x(), bb.max.y(), bb.max.z()};
                     o["on_plate"] = (std::abs(bb.min.z()) < 0.05);
                 }
+                // Every instance's transform; `transform` above stays instance 0.
+                nlohmann::json detail = nlohmann::json::array();
+                for (size_t k = 0; k < mo->instances.size(); ++k) {
+                    const ModelInstance *ki = mo->instances[k];
+                    auto koff = ki->get_offset();
+                    auto krot = ki->get_rotation();
+                    auto kscl = ki->get_scaling_factor();
+                    detail.push_back({
+                        {"index",    k},
+                        {"offset",   {koff.x(), koff.y(), koff.z()}},
+                        {"rotation", {krot.x(), krot.y(), krot.z()}},
+                        {"scale",    {kscl.x(), kscl.y(), kscl.z()}},
+                    });
+                }
+                o["instances_detail"] = detail;
             }
             // M4c readback: per-object overrides + variable-layer-height state
             {
@@ -1992,6 +2007,10 @@ Response Controller::handle_transform_object(uint64_t id, const std::string &bod
     if (!has_t && !has_r && !has_s)
         return { 400, {{"error", "no_transform"},
                        {"detail", "provide translate (mm), rotate (deg), and/or scale (factor)"}} };
+    if (in.contains("instance") && !in["instance"].is_number_integer())
+        return { 400, {{"error", "instance_must_be_integer"}} };
+    const int inst_idx = in.value("instance", 0);
+    if (inst_idx < 0) return { 400, {{"error", "negative_index"}} };
 
     nlohmann::json r = run_on_ui([=]() -> nlohmann::json {
         Plater *plater = wxGetApp().plater();
@@ -1999,7 +2018,9 @@ Response Controller::handle_transform_object(uint64_t id, const std::string &bod
         if (idx < 0) { api_notify("Object not found", true); return {{"error", "unknown_object"}}; }
         ModelObject *mo = plater->model().objects[idx];
         if (mo->instances.empty()) return {{"error", "no_instance"}};
-        ModelInstance *mi = mo->instances.front();
+        if (inst_idx >= (int) mo->instances.size())
+            return {{"error", "unknown_instance"}, {"instances", (unsigned) mo->instances.size()}};
+        ModelInstance *mi = mo->instances[inst_idx];
         if (has_t) mi->set_offset(mi->get_offset() + tr);
         if (has_r) mi->set_rotation(mi->get_rotation() + ro * 0.017453292519943295); // deg->rad
         if (has_s) mi->set_scaling_factor(sc);
@@ -2010,12 +2031,12 @@ Response Controller::handle_transform_object(uint64_t id, const std::string &bod
         // kept trying to slice it and the new one ignored it. is_new=true: a plate in
         // spiral-vase mode applies its vase settings to the object without the drag's
         // question dialog, which nothing could answer from an API call.
-        wxGetApp().plater()->get_partplate_list().notify_instance_update(idx, 0, true);
+        wxGetApp().plater()->get_partplate_list().notify_instance_update(idx, inst_idx, true);
         plater->changed_object(idx);
         wxGetApp().obj_list()->update_plate_values_for_items();
         api_notify(std::string(has_t ? "Moved" : (has_r ? "Rotated" : "Resized")) + " '" + mo->name + "'");
         auto off = mi->get_offset(); auto rot = mi->get_rotation(); auto scl = mi->get_scaling_factor();
-        return {{"id", id}, {"transform", {
+        return {{"id", id}, {"instance", inst_idx}, {"transform", {
             {"offset",   {off.x(), off.y(), off.z()}},
             {"rotation", {rot.x(), rot.y(), rot.z()}},
             {"scale",    {scl.x(), scl.y(), scl.z()}}}}};

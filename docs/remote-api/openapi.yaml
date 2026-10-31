@@ -433,6 +433,7 @@ paths:
     get:
       summary: List objects on the plate with transform, size, per-object config, layer-height ranges
       operationId: getObjects
+      description: Each object carries `transform` (instance 0) and `instances_detail`, an array of {index, offset, rotation (radians), scale} with one entry per instance.
       responses:
         "200": { $ref: "#/components/responses/Json" }
   /objects/{id}:
@@ -461,8 +462,17 @@ paths:
                 translate: { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
                 rotate:    { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
                 scale:     { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
+                instance:  { type: integer, minimum: 0, default: 0, description: "0-based instance to transform; an index past the last instance returns unknown_instance." }
       responses:
         "200": { $ref: "#/components/responses/Json" }
+        "404":
+          description: Unknown object or instance.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                object:   { value: { error: "unknown_object" } }
+                instance: { value: { error: "unknown_instance", instances: 1 } }
   /objects/{id}/duplicate:
     post:
       summary: Add another instance of an object
