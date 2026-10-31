@@ -587,7 +587,7 @@ private:
     wxColour m_progress_bg_color;
     wxColour m_progress_fg_color;
 
-    wxString m_text_version = GUI_App::format_display_version();
+    wxString m_text_version = GUI_App::format_display_version() + " (2.5 AI build)";
     wxString m_text_action  = _L("Loading configuration") + dots;
     int      m_progress     = 0;
     int      m_progress_h   = 6;

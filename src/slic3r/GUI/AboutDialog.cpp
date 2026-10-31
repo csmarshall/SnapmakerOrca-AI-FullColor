@@ -34,6 +34,9 @@
 namespace Slic3r {
 namespace GUI {
 
+// Repository shown in the About dialog.
+static const char* const AI_BUILD_REPO_URL = "https://github.com/csmarshall/SnapmakerOrca-AI-FullColor";
+
 AboutDialogLogo::AboutDialogLogo(wxWindow* parent)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
 {
@@ -263,7 +266,7 @@ AboutDialog::AboutDialog()
         // _build_string_font.SetStyle(wxFONTSTYLE_ITALIC);
 
         vesizer->Add(0, 0, 1, wxEXPAND, FromDIP(5));
-        auto          version_string = std::string(SoftFever_VERSION); // _L("Orca Slicer ") + " " + std::string(SoftFever_VERSION);
+        auto          version_string = std::string(SoftFever_VERSION) + " (2.5 AI build)"; // _L("Orca Slicer ") + " " + std::string(SoftFever_VERSION);
         wxStaticText* version = new wxStaticText(this, wxID_ANY, version_string.c_str(), wxDefaultPosition, wxDefaultSize);
         // TRN %s is the commit the application was built from
         wxStaticText* credits_string = new wxStaticText(this, wxID_ANY, wxString::Format(_L("Build %s"), build_commit_label), wxDefaultPosition, wxDefaultSize);
@@ -343,7 +346,7 @@ AboutDialog::AboutDialog()
           const int fs = font.GetPointSize()-1;
           int size[] = {fs,fs,fs,fs,fs,fs,fs};
           m_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-          m_html->SetMinSize(wxSize(FromDIP(-1), FromDIP(16)));
+          m_html->SetMinSize(wxSize(FromDIP(-1), FromDIP(32)));
           m_html->SetBorders(2);
           wxColour   bgr_clr = GetBackgroundColour();
           const auto bgr_clr_str = encode_color(ColorRGB(bgr_clr.Red(), bgr_clr.Green(), bgr_clr.Blue()));
@@ -351,9 +354,10 @@ AboutDialog::AboutDialog()
               (boost::format(
               "<html>"
               "<body bgcolor= \"" + bgr_clr_str + "\" >"
-              "<p style=\"text-align:left\"><a style=\"color:#009789\" href=\"https://www.orcaslicer.com\">https://www.orcaslicer.com</ a></p>"
+              "<p style=\"text-align:left\"><a style=\"color:#009789\" href=\"%1%\">%1%</ a><br/>"
+              "<a style=\"color:#009789\" href=\"https://www.orcaslicer.com\">https://www.orcaslicer.com</ a></p>"
               "</body>"
-              "</html>")
+              "</html>") % AI_BUILD_REPO_URL
             ).str());
           m_html->SetPage(text);
           copyright_ver_sizer->Add(m_html, 0, wxEXPAND, 0);
