@@ -16,7 +16,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-BASE_REF = "u25/stack"
+# The fork's own icon art (the S with a sparkle), taken from the branding commit on the older tree.
+# Sources are read from git, never from resources/, so a re-run cannot badge an icon twice.
+BASE_REF = "ec00b7cad9"
+SRC_ICNS = "resources/Icon.icns"
+SRC_ICO = "resources/images/Snapmaker_Orca.ico"
 BADGE_TEXT = "2.5"
 BADGE_FILL = (214, 40, 40, 255)      # high-contrast red
 BADGE_TEXT_COLOR = (255, 255, 255, 255)
@@ -83,11 +87,10 @@ def write_icns(master: Image.Image, dest: Path) -> None:
 
 def main() -> None:
     preview = Path(sys.argv[1]) if len(sys.argv) > 1 else None
-    master = largest_from_icns(git_blob(ICNS_FILES[0]))   # 1024 px
+    master = largest_from_icns(git_blob(SRC_ICNS))   # 1024 px
     for rel in ICNS_FILES:
-        m = largest_from_icns(git_blob(rel))
-        write_icns(m, ROOT / rel)
-    ico_master = Image.open(io.BytesIO(git_blob(ICO_FILE))).convert("RGBA")
+        write_icns(master, ROOT / rel)
+    ico_master = Image.open(io.BytesIO(git_blob(SRC_ICO))).convert("RGBA")
     ico_master = ico_master.resize((256, 256), Image.LANCZOS)
     frames = [badge(ico_master.resize((s, s), Image.LANCZOS)) for s in ICO_SIZES]
     frames[-1].save(ROOT / ICO_FILE, format="ICO", sizes=[(s, s) for s in ICO_SIZES], append_images=frames[:-1])
