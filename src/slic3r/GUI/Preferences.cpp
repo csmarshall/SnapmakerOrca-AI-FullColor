@@ -2333,6 +2333,58 @@ void PreferencesDialog::create_items()
 #endif // _WIN32
 
     //////////////////////////
+    //// REMOTE API TAB
+    /////////////////////////////////////
+    // Starting/stopping the server happens when the dialog closes (GUI_App::open_preferences calls
+    // stop_remote_api()/start_remote_api() right after ShowModal() returns), so these controls only
+    // persist AppConfig here.
+    m_pref_tabs->AppendItem(_L("Remote API"));
+    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
+    g_sizer = f_sizers.back();
+    g_sizer->AddGrowableCol(0, 1);
+
+    g_sizer->Add(create_item_title(_L("Remote Control API")), 1, wxEXPAND);
+
+    g_sizer->Add(create_item_checkbox(_L("Enable Remote API"),
+        _L("Allow external tools (e.g. AI agents via MCP) to read and change slicer settings and trigger slicing on this machine."),
+        "remote_api_enabled"));
+    g_sizer->Add(create_item_checkbox(_L("Allow LAN access"),
+        _L("Off: only this computer (127.0.0.1). On: other devices on your local network can control this slicer with the token."),
+        "remote_api_bind_lan"));
+    g_sizer->Add(create_item_checkbox(_L("Notify on API changes"),
+        _L("Show a notification when an external tool changes settings, loads or edits objects, or switches presets."),
+        "remote_api_notify"));
+
+    // A bounded spin box: the port can only ever be saved as 1-65535.
+    // The spin box parses the stored value, so seed a missing key (first run) with the default port.
+    if (!app_config->has("remote_api_port"))
+        app_config->set("remote_api_port", std::to_string(Slic3r::GUI::RemoteAPI::Config{}.port));
+    g_sizer->Add(create_item_spinctrl(_L("Port"), "", "", _L("TCP port the Remote API listens on."), "remote_api_port", 1, 65535));
+
+    // Token row: read-only display plus a button that regenerates it and restarts the running server.
+    {
+        wxBoxSizer *token_row = create_item_label(_L("API token"), _L("Sent by clients in the X-Api-Token header."));
+        auto token_value = new wxTextCtrl(m_parent, wxID_ANY, wxString(app_config->get("remote_api_token")),
+                                          wxDefaultPosition, wxSize(FromDIP(260), -1), wxTE_READONLY);
+        auto token_btn = new Button(m_parent, _L("Regenerate"));
+        token_btn->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+        token_btn->Bind(wxEVT_LEFT_DOWN, [this, token_value](wxMouseEvent &) {
+            auto tok = Slic3r::GUI::RemoteAPI::Config::generate_token();
+            app_config->set("remote_api_token", tok);
+            app_config->save();
+            token_value->SetValue(wxString(tok));
+            wxGetApp().stop_remote_api();
+            wxGetApp().start_remote_api();
+        });
+        token_row->Add(token_value, 0, wxALIGN_CENTER_VERTICAL);
+        token_row->Add(token_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+        g_sizer->Add(token_row);
+    }
+
+    g_sizer->AddSpacer(FromDIP(10));
+    sizer_page->Add(g_sizer, 0, wxEXPAND);
+
+    //////////////////////////
     //// DEVELOPER TAB
     /////////////////////////////////////
     m_pref_tabs->AppendItem(_L("Developer"));
