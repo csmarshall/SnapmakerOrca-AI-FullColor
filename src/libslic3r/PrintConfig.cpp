@@ -9872,6 +9872,28 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         || opt_key == "extruder_variant_list") {
         ReplaceString(value, "Normal", "Standard");
         ReplaceString(value, "Big Traffic", "High Flow");
+        // Snapmaker saves the lowercase enum names "standard" / "high_flow"; map each ;/, separated token case-insensitively
+        if (opt_key == "nozzle_volume_type") {
+            std::string out;
+            std::string token;
+            auto flush = [&out, &token]() {
+                if (boost::iequals(token, "standard"))
+                    token = "Standard";
+                else if (boost::iequals(token, "high_flow"))
+                    token = "High Flow";
+                out += token;
+                token.clear();
+            };
+            for (char c : value) {
+                if (c == ';' || c == ',') {
+                    flush();
+                    out += c;
+                } else
+                    token += c;
+            }
+            flush();
+            value = out;
+        }
     }
     else if (opt_key == "extruder_type") {
         ReplaceString(value, "DirectDrive", "Direct Drive");
@@ -9921,6 +9943,9 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         opt_key = "ironing_angle";
     } else if (opt_key == "ironing_angle" && boost::starts_with(value, "-")) {
         value = "0";
+    } else if (opt_key == "raft_first_layer_expansion" && boost::starts_with(value, "-")) {
+        // Snapmaker uses -1 for "auto", which is below the minimum here; fall back to the default
+        value = "2";
     } else if (opt_key == "counterbole_hole_bridging") {
         opt_key = "counterbore_hole_bridging";
     } else if (opt_key == "draft_shield" && value == "limited") {
