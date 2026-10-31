@@ -70,8 +70,8 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
     status, r = api.j("POST", "/preset/config", {"type": "printer", "name": printer})
     cfg = r.get("config", {})
     hosts = {k: v for k, v in cfg.items() if k.startswith(("print_host", "printhost_")) or k in ("bbl_use_printhost", "host_type")}
-    check("preset read redacts every print-host value", bool(hosts) and all(v == "[redacted]" for v in hosts.values()),
-          f"{len(hosts)} keys, unredacted: {[k for k, v in hosts.items() if v != '[redacted]'][:4]}")
+    check("preset read redacts every print-host value", bool(hosts) and all(v == "<redacted>" for v in hosts.values()),
+          f"{len(hosts)} keys, unredacted: {[k for k, v in hosts.items() if v != '<redacted>'][:4]}")
 
     for path in BAD_PATHS:
         status, r = api.j("POST", "/model", {"path": path})

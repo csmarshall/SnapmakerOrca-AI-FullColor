@@ -278,7 +278,7 @@ static bool is_secret_read_key(const std::string &key)
     return is_print_host_key(key);
 }
 
-static const char *const REDACTED_VALUE = "[redacted]";
+static const char *const REDACTED_VALUE = "<redacted>"; // one placeholder for every read; k_redacted below is the same text
 
 static nlohmann::json config_to_json(const DynamicPrintConfig &cfg,
                                      const std::vector<std::string> *only_keys)
