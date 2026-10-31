@@ -2110,12 +2110,37 @@ Response Controller::handle_put_object_config(uint64_t id, const std::string &bo
     return { r["errors"].empty() ? 200 : 422, r };
 }
 
-Response Controller::handle_arrange()
+// POST /arrange  body (optional) {"spacing": <mm, 0..100>, "rotate": <bool>}
+// Sets the same arrange settings the window's arrange menu edits (spacing 0 = auto),
+// for the current print-sequence mode, then arranges. Omitted fields keep their value.
+Response Controller::handle_arrange(const std::string &body)
 {
-    nlohmann::json r = run_on_ui([]() -> nlohmann::json {
+    bool  has_spacing = false, has_rotate = false, rotate = false;
+    float spacing = 0.f;
+    if (!body.empty()) {
+        nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
+        if (!in.is_object()) return { 400, {{"error", "body_must_be_object"}} };
+        if (in.contains("spacing")) {
+            if (!in["spacing"].is_number()) return { 400, {{"error", "spacing_must_be_number"}} };
+            const double v = in["spacing"].get<double>();
+            if (!(v >= 0. && v <= 100.))
+                return { 400, {{"error", "spacing_out_of_range"}, {"detail", "spacing is in mm, 0 to 100 (0 = auto)"}} };
+            has_spacing = true;
+            spacing     = (float) v;
+        }
+        if (in.contains("rotate")) {
+            if (!in["rotate"].is_boolean()) return { 400, {{"error", "rotate_must_be_boolean"}} };
+            has_rotate = true;
+            rotate     = in["rotate"].get<bool>();
+        }
+    }
+    nlohmann::json r = run_on_ui([=]() -> nlohmann::json {
         Plater *plater = wxGetApp().plater();
         if (plater->model().objects.empty()) return {{"error", "empty"}};
         if (!plater->get_ui_job_worker().is_idle()) return {{"busy", true}};
+        GLCanvas3D::ArrangeSettings &settings = plater->canvas3D()->get_arrange_settings();
+        if (has_spacing) settings.distance        = spacing;
+        if (has_rotate)  settings.enable_rotation = rotate;
         plater->arrange();
         return {{"started", true}};
     });
@@ -2463,7 +2488,10 @@ Response Controller::dispatch(const Request &req)
         if (is("GET",  "/api/v1/objects"))      return handle_get_objects();
         if (is("GET",  "/api/v1/plate/render")) return handle_plate_render(t);
         if (is("GET",  "/api/v1/presets"))      return handle_get_presets(t);
-        if (is("POST", "/api/v1/arrange"))      return handle_arrange();
+        if (is("POST", "/api/v1/arrange")) {
+            try { return handle_arrange(req.body); }
+            catch (const nlohmann::json::parse_error &) { return { 400, {{"error", "invalid_json"}} }; }
+        }
         if (is("POST", "/api/v1/orient"))       return handle_orient();
         if (is("GET",  "/api/v1/jobs/status"))  return handle_jobs_status();
         if (is("GET",  "/api/v1/plates"))       return handle_get_plates();

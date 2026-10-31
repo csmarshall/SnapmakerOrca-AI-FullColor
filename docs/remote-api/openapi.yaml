@@ -527,9 +527,26 @@ paths:
     post:
       summary: Auto-arrange objects on the plate
       operationId: arrange
+      description: Optional body fields set the arrange settings the window's arrange menu edits, for the current print-sequence mode, before arranging. Omitted fields keep their current value.
       x-mutating: true
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                spacing: { type: number, minimum: 0, maximum: 100, description: "Minimum distance between objects in mm; 0 means auto. print_sequence by object needs more than the nozzle clearance." }
+                rotate:  { type: boolean, description: "Allow auto rotation while arranging." }
+            example: { spacing: 40, rotate: false }
       responses:
         "200": { $ref: "#/components/responses/Json" }
+        "400":
+          description: Spacing outside 0 to 100, or a field of the wrong type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "spacing_out_of_range" }
         "409": { $ref: "#/components/responses/Json" }
   /orient:
     post:
