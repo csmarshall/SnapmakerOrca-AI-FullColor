@@ -18,10 +18,13 @@
 #include "libslic3r/Format/bbs_3mf.hpp" // LoadStrategy (used by Plater::load_files)
 #include "libslic3r/Slicing.hpp"          // M4c: layer_height_profile_adaptive, t_layer_height_range
 #include "slic3r/GUI/GUI_ObjectList.hpp" // M4c: obj_list()->update_info_items
+#include "slic3r/GUI/I18N.hpp"     // _L for the object list's "default" filament label
 #include "slic3r/GUI/GLCanvas3D.hpp"      // plate_render: offscreen thumbnail/gcode render
 #include "slic3r/GUI/Camera.hpp"          // plate_render
 #include "libslic3r/GCode/ThumbnailData.hpp" // plate_render: ThumbnailData/ThumbnailsParams
 #include <miniz.h>                        // plate_render: RGBA -> PNG in memory
+#include "libslic3r/FlushVolCalc.hpp"      // project scope: g_max_flush_volume bound
+#include "slic3r/GUI/WipeTowerDialog.hpp"  // project scope: is_flush_config_modified
 
 #include <algorithm>
 #include <cmath>
@@ -114,6 +117,7 @@ static std::string api_config_unit(const std::string &key)
 }
 
 static int find_object_index(const Model &model, uint64_t id); // defined with the M4b object handlers below
+static bool sensitive_writes_allowed(); // defined with the sensitive-key policy below
 
 
 void Controller::notify_config_changed(int preset_type)
@@ -306,12 +310,16 @@ Response Controller::handle_status()
             objects.push_back({{"name", mo->name},
                                {"size_mm", {sz.x(), sz.y(), sz.z()}}});
         }
-        auto plate_valid = plater->get_partplate_list().get_curr_plate()->is_slice_result_valid();
+        PartPlateList &plates = plater->get_partplate_list();
+        auto plate_valid = plates.get_curr_plate()->is_slice_result_valid();
         return {
             {"app", SLIC3R_APP_NAME},
+            // plates: how many there are and which one slice/gcode/render act on.
+            {"plates", {{"count", plates.get_plate_count()}, {"current", plates.get_curr_plate_index()}}},
             {"app_version", SLIC3R_VERSION},
             {"api_version", "1.0"},
-            {"capabilities", {"status", "config", "slice", "events", "model", "preset", "gcode", "objects", "arrange", "orient", "object_config", "slice_breakdown", "plate_render"}},
+            {"capabilities", {"status", "config", "slice", "events", "model", "preset", "gcode", "objects", "arrange", "orient", "object_config", "slice_breakdown", "plate_render", "sensitive_key_policy", "plates"}},
+            {"sensitive_keys_allowed", sensitive_writes_allowed()},
             {"project", plater->get_project_filename().ToUTF8().data()},
             {"objects", objects},
             {"presets", {
@@ -406,6 +414,280 @@ static std::string json_value_to_config_string(const nlohmann::json &v)
     throw std::runtime_error("unsupported value type");
 }
 
+// ---------------------------------------------------------------------------
+// Sensitive keys
+//
+// PUT /config reaches every preset key, and some of them are not slicing settings:
+// post_process runs shell commands after export, the *_gcode templates go straight to
+// the printer, and the physical-printer options (print_host, printhost_*, host_type,
+// printer_agent, ...) decide where and how a print is sent and with which credentials.
+// printer_model / printer_technology move OrcaSlicer onto other code paths and
+// filename_format names the exported file. An AI agent holding the token can be steered
+// by text it reads, so changing any of these is refused unless the user ticks
+// Preferences > Remote API > "Allow script, G-code and connection edits". Writing a key
+// back to the value it already has is not a change and passes. The MCP server keeps the
+// same rule in its guard.py as a second check; keep the two in step.
+static bool is_sensitive_config_key(const std::string &key)
+{
+    static const std::string gcode_suffix = "_gcode";
+    if (key == "post_process" || key == "printer_model" || key == "filename_format" ||
+        key.rfind("printhost_", 0) == 0)
+        return true;
+    if (key.size() > gcode_suffix.size() &&
+        key.compare(key.size() - gcode_suffix.size(), gcode_suffix.size(), gcode_suffix) == 0)
+        return key != "emit_machine_limits_to_gcode"; // a toggle, not a template
+    const std::vector<std::string> &pp = PhysicalPrinter::printer_options();
+    return std::find(pp.begin(), pp.end(), key) != pp.end();
+}
+
+// GUI thread only (AppConfig).
+static bool sensitive_writes_allowed()
+{
+    return wxGetApp().app_config->get_bool("remote_api_allow_sensitive");
+}
+
+// What POST /preset/config hides. GET /config already drops the whole host block
+// (full_config_secure), but a named preset's config is returned as stored, so the
+// credentials are replaced and any user:password inside a host URL (the print_host
+// tooltip documents https://user:password@host/) is cut out. The host, CA file path and
+// port stay visible so upload problems can still be diagnosed.
+static const char *const k_redacted = "<redacted>";
+
+static bool is_credential_key(const std::string &key)
+{
+    return key == "printhost_apikey" || key == "printhost_user" || key == "printhost_password";
+}
+
+static bool is_host_url_key(const std::string &key)
+{
+    return key == "print_host" || key == "print_host_webui";
+}
+
+// Length of a leading "scheme://", or 0. The scheme has to start the value and be
+// RFC 3986 letters (ASCII, whatever the locale), so in "user:pa://ss@host" the "user:pa"
+// is not mistaken for one.
+static size_t url_scheme_length(const std::string &url)
+{
+    const auto alpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+    const auto digit = [](char c) { return c >= '0' && c <= '9'; };
+    if (url.empty() || !alpha(url[0]))
+        return 0;
+    size_t i = 1;
+    while (i < url.size() && (alpha(url[i]) || digit(url[i]) || url[i] == '+' || url[i] == '-' || url[i] == '.'))
+        ++i;
+    return url.compare(i, 3, "://") == 0 ? i + 3 : 0;
+}
+
+// Everything between the scheme and the LAST '@' is cut. A host never contains '@', while a
+// password may contain '@', '/', '?', '#' or spaces, so this hides all of them. A URL with an
+// '@' in its path loses the part before it too: it cannot be told apart from a password
+// containing '/', and over-redacting a rare URL is the safe way to be wrong.
+// Keep in step with _strip_userinfo in orcaslicer-mcp's guard.py.
+static std::string strip_url_userinfo(const std::string &url)
+{
+    const size_t at = url.rfind('@');
+    if (at == std::string::npos)
+        return url;
+    return url.substr(0, url_scheme_length(url)) + k_redacted + url.substr(at);
+}
+
+// ---------------------------------------------------------------------------
+// Project-scope writes (CFS / multi-material)
+//
+// PresetBundle::project_config holds the ~19 keys of s_project_options, but
+// opening all of them would be unsafe. Their consumers index them with unchecked
+// arithmetic whose bound comes from a DIFFERENT vector, so a wrong-length write
+// is an out-of-bounds heap access rather than a validation failure - e.g.
+// Sidebar::auto_calc_flushing_volumes sizes its loop from filament_colour and
+// writes flush_volumes_matrix at [n*from + to] (Plater.cpp), and
+// Print::_make_wipe_tower uses filament_map values as direct extruder indices.
+//
+// The usual guard does not help: set_deserialize_strict rejects a malformed
+// scalar or enum, but ConfigOptionFloatsTempl::deserialize (Config.hpp) accepts
+// any input and unconditionally returns true, so a short or non-numeric matrix
+// sails through as "applied". Hence an explicit allow-list, each entry carrying
+// the invariant its consumers assume, checked after the whole batch is staged.
+static bool project_key_writable(const std::string &key)
+{
+    static const std::set<std::string> s_writable {
+        "flush_volumes_matrix",  // filaments^2 * nozzles
+        "flush_multiplier",      // one per nozzle
+        "flush_multiplier_fast", // one per nozzle
+        "filament_colour",       // its length IS the filament count - kept fixed
+        "curr_bed_type",         // enum; btDefault rejected
+        "prime_volume_mode",     // enum, self-validating
+        "wipe_tower_x",          // per-plate vector, written via set_at
+        "wipe_tower_y",
+    };
+    return s_writable.count(key) > 0;
+}
+
+// Why a recognized project key stays read-only. Keeps the 422 actionable rather
+// than a bare "not_editable_in_current_config".
+static const char *project_key_block_reason(const std::string &key)
+{
+    if (key == "flush_volumes_vector")
+        return "derived_from_flush_volumes_matrix";
+    if (key == "filament_colour_type" || key == "filament_multi_colour")
+        return "indexed_unchecked_by_the_colour_picker";
+    if (key == "filament_map" || key == "filament_volume_map" || key == "filament_nozzle_map")
+        return "values_are_unchecked_extruder_indices";
+    if (key == "filament_map_mode" || key == "nozzle_volume_type")
+        return "tied_to_filament_map";
+    if (key == "has_filament_switcher" || key == "enable_filament_dynamic_map")
+        return "live_printer_state_not_a_setting";
+    return "not_writable_project_key";
+}
+
+// ConfigOptionFloatsTempl::deserialize pushes a zero-initialized value for any
+// token it cannot parse and still returns true, so "a,b,c" would be stored as
+// {0,0,0} and reported as applied - a silent wrong answer that no range check can
+// catch, because 0 is a perfectly valid purge volume. Vet the raw string first.
+static std::string numeric_list_error(const std::string &s)
+{
+    if (s.empty())
+        return "expected a comma-separated list of numbers, got an empty string";
+    size_t start = 0;
+    while (true) {
+        const size_t comma = s.find(',', start);
+        std::string  tok   = s.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        const size_t b     = tok.find_first_not_of(" \t");
+        const size_t e     = tok.find_last_not_of(" \t");
+        tok                = (b == std::string::npos) ? std::string() : tok.substr(b, e - b + 1);
+        try {
+            size_t pos = 0;
+            (void) std::stod(tok, &pos);
+            if (pos != tok.size())
+                throw std::invalid_argument("trailing characters");
+        } catch (const std::exception &) {
+            return "\"" + tok + "\" is not a number";
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return {};
+}
+
+// Same class of silent failure for colours: ConfigOptionStrings::deserialize
+// accepts anything, and a colour the parser cannot read becomes black in the
+// flush estimator rather than an error.
+static std::string colour_list_error(const std::string &s)
+{
+    size_t start = 0;
+    while (true) {
+        const size_t semi = s.find(';', start);
+        std::string  tok  = s.substr(start, semi == std::string::npos ? std::string::npos : semi - start);
+        const size_t b    = tok.find_first_not_of(" \t");
+        const size_t e    = tok.find_last_not_of(" \t");
+        tok               = (b == std::string::npos) ? std::string() : tok.substr(b, e - b + 1);
+        const bool ok = (tok.size() == 7 || tok.size() == 9) && tok[0] == '#' &&
+                        std::all_of(tok.begin() + 1, tok.end(),
+                                    [](char c) { return std::isxdigit((unsigned char) c) != 0; });
+        if (!ok)
+            return "\"" + tok + "\" is not a #RRGGBB or #RRGGBBAA colour";
+        if (semi == std::string::npos) break;
+        start = semi + 1;
+    }
+    return {};
+}
+
+// Checks the staged value against the invariant its consumers assume. Runs over
+// the FINAL staged config, after every key in the batch is written, so a request
+// that changes filament_colour and flush_volumes_matrix together is judged
+// against the new filament count regardless of key order. Returns "" when valid.
+static std::string project_value_error(const std::string        &key,
+                                       const DynamicPrintConfig &staged,
+                                       int                       nozzles,
+                                       size_t                    filaments_before)
+{
+    auto floats_of = [&staged](const std::string &k) -> std::vector<double> {
+        const auto *o = staged.option<ConfigOptionFloats>(k);
+        return o == nullptr ? std::vector<double>{} : o->values;
+    };
+
+    if (key == "flush_volumes_matrix") {
+        const std::vector<double> v = floats_of(key);
+        const auto *colours = staged.option<ConfigOptionStrings>("filament_colour");
+        const size_t filaments = colours == nullptr ? filaments_before : colours->values.size();
+        const size_t want = filaments * filaments * size_t(nozzles > 0 ? nozzles : 1);
+        if (v.size() != want)
+            return "expected " + std::to_string(want) + " values (filaments^2 x nozzles = " +
+                   std::to_string(filaments) + "^2 x " + std::to_string(nozzles) + "), got " +
+                   std::to_string(v.size());
+        for (double d : v)
+            if (!std::isfinite(d) || d < 0. || d > double(g_max_flush_volume))
+                return "each value must be a finite number within [0, " + std::to_string(g_max_flush_volume) + "]";
+        return {};
+    }
+    if (key == "flush_multiplier" || key == "flush_multiplier_fast") {
+        const std::vector<double> v = floats_of(key);
+        if (v.size() != size_t(nozzles > 0 ? nozzles : 1))
+            return "expected " + std::to_string(nozzles) + " value(s), one per nozzle, got " +
+                   std::to_string(v.size());
+        // Same range the wipe-tower dialog's spin control enforces.
+        for (double d : v)
+            if (!std::isfinite(d) || d < 0. || d > 3.)
+                return "each value must be a finite number within [0, 3]";
+        return {};
+    }
+    if (key == "filament_colour") {
+        const auto *o = staged.option<ConfigOptionStrings>(key);
+        const size_t n = o == nullptr ? 0 : o->values.size();
+        // The length of filament_colour is what defines the filament count for
+        // the wipe tower and the flush matrix. Changing it here would desync
+        // every vector sized from it, so colours may be recoloured but not
+        // added or removed - that is the filament-preset selection's job.
+        if (n != filaments_before)
+            return "filament count is fixed here: expected " + std::to_string(filaments_before) +
+                   " colours (';'-separated), got " + std::to_string(n);
+        return {};
+    }
+    if (key == "curr_bed_type") {
+        // btDefault is reachable only through a raw write (the GUI never offers
+        // it) and is a null dereference on the slicing path: its bed-temperature
+        // key is "", so the lookup returns nullptr and GCode.cpp dereferences it.
+        if (staged.opt_enum<BedType>(key) == btDefault)
+            return "\"Default Plate\" is not selectable; pick a concrete plate type";
+        return {};
+    }
+    if (key == "wipe_tower_x" || key == "wipe_tower_y") {
+        const std::vector<double> v = floats_of(key);
+        for (double d : v)
+            if (!std::isfinite(d))
+                return "must be a finite number";
+        return {};
+    }
+    return {};
+}
+
+// GET /config reports the MERGED config, where every vector-valued filament key holds
+// one run of values per loaded filament slot: PresetBundle::full_fff_config walks the
+// filament keys and does set() for the first slot then append() for the rest
+// (src/libslic3r/PresetBundle.cpp), skipping only the two compatibility lists. A write,
+// by contrast, lands in the single preset open in the Filament tab. So echoing a merged
+// value back ("70,100,70,70,35") would store the whole list in that one preset, and the
+// next merge would splice all of it in at every slot using that preset - the list grows
+// on each write and the per-slot values are lost.
+//
+// A preset's own vector length is the authoritative one (normally 1, but more when the
+// printer has extruder variants - full_fff_config reads that length back as
+// filament_variant_count), so rather than hard-coding "exactly one value" we refuse any
+// write that would CHANGE the length. That keeps single-filament write-back working and
+// rejects the merged shape.
+static bool is_merged_per_filament_key(Preset::Type type, const std::string &key, const ConfigOption *opt)
+{
+    return type == Preset::TYPE_FILAMENT && opt != nullptr && opt->is_vector() &&
+           key != "compatible_prints" && key != "compatible_printers";
+}
+
+static size_t config_vector_size(const DynamicPrintConfig &cfg, const std::string &key)
+{
+    const ConfigOption *opt = cfg.option(key);
+    return (opt == nullptr || ! opt->is_vector())
+               ? 0
+               : static_cast<const ConfigOptionVectorBase *>(opt)->size();
+}
+
 Response Controller::handle_put_config(const std::string &body)
 {
     // May throw nlohmann::json::parse_error - caught by the dispatch route
@@ -425,6 +707,7 @@ Response Controller::handle_put_config(const std::string &body)
     // of this function's stack lifetime.
     nlohmann::json result = run_on_ui([in = std::move(in)]() -> nlohmann::json {
         auto *bundle = wxGetApp().preset_bundle;
+        const bool allow_sensitive = sensitive_writes_allowed();
 
         struct Target {
             Preset::Type        type;
@@ -441,17 +724,76 @@ Response Controller::handle_put_config(const std::string &body)
         nlohmann::json errors  = nlohmann::json::object();
         std::vector<std::array<std::string, 3>> changes; // key, old, new -> notification
 
+        // Project scope (CFS / multi-material) is staged on its own copy. It is
+        // checked AFTER the three presets so wipe_tower_rotation_angle - the one
+        // key that lives in both s_project_options and the print preset - keeps
+        // routing to the print preset exactly as it did before.
+        DynamicPrintConfig     proj_new = bundle->project_config;
+        std::set<std::string>  proj_keys;
+        const int              nozzles  = 1; // Snapmaker base: flush_volumes_matrix is filaments^2 (16 values for 4 filaments), no per-nozzle dimension
+        const auto            *colours0 = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+        const size_t           filaments_before = colours0 == nullptr ? 0 : colours0->values.size();
+        const int              plate_idx = wxGetApp().plater()->get_partplate_list().get_curr_plate_index();
+
         for (auto it = in.begin(); it != in.end(); ++it) {
             const std::string &key = it.key();
             if (is_forbidden_write_key(key)) { errors[key] = "forbidden_key"; continue; }
             Target *tgt = nullptr;
             for (auto &t : targets)
                 if (t.cfg.option(key) != nullptr) { tgt = &t; break; }
+            if (tgt == nullptr && proj_new.option(key) != nullptr) {
+                if (!project_key_writable(key)) {
+                    errors[key] = project_key_block_reason(key);
+                    continue;
+                }
+                try {
+                    std::string oldv = proj_new.opt_serialize(key);
+                    std::string sval = json_value_to_config_string(it.value());
+                    // Vet the raw text: the vector deserializers below cannot fail,
+                    // so garbage would be stored as zeros and reported as applied.
+                    std::string terr;
+                    if (key == "flush_volumes_matrix" || key == "flush_multiplier" ||
+                        key == "flush_multiplier_fast" || key == "wipe_tower_x" || key == "wipe_tower_y")
+                        terr = numeric_list_error(sval);
+                    else if (key == "filament_colour")
+                        terr = colour_list_error(sval);
+                    if (!terr.empty()) {
+                        errors[key] = terr;
+                        continue;
+                    }
+                    if (key == "wipe_tower_x" || key == "wipe_tower_y") {
+                        // Per-plate vectors: the GUI writes them with set_at at the
+                        // plate index (GLCanvas3D::WipeTowerInfo::apply_wipe_tower).
+                        // A whole-vector deserialize would collapse them to a single
+                        // element and move every other plate's tower.
+                        ConfigOptionFloat one;
+                        if (!one.deserialize(sval))
+                            throw std::runtime_error("expected a number");
+                        proj_new.option<ConfigOptionFloats>(key, true)->set_at(&one, plate_idx, 0);
+                    } else {
+                        proj_new.set_deserialize_strict(key, sval);
+                    }
+                    // handle_legacy (run inside set_deserialize) may rename or clear
+                    // a key and still report success, which would otherwise be
+                    // reported as applied while nothing was written.
+                    if (proj_new.option(key) == nullptr) {
+                        errors[key] = "key_dropped_by_legacy_handler";
+                        continue;
+                    }
+                    proj_keys.insert(key);
+                    applied.push_back(key);
+                    // Re-serialized, not echoed: handle_legacy can rewrite the value.
+                    changes.push_back({ key, oldv, proj_new.opt_serialize(key) });
+                } catch (const std::exception &e) {
+                    errors[key] = e.what();
+                }
+                continue;
+            }
             if (tgt == nullptr) {
                 // F9: distinguish a real typo from a recognized Orca setting that
-                // simply isn't editable through the preset configs (project/plate/
-                // computed-layer keys: wipe tower position, flush volumes, AMS maps...
-                // - GET /config serializes the merged config, which is wider).
+                // simply isn't editable through the preset configs (plate-scope and
+                // computed-layer keys - GET /config serializes the merged config,
+                // which is wider than anything writable).
                 errors[key] = (print_config_def.get(key) != nullptr)
                                   ? "not_editable_in_current_config"
                                   : "unknown_key";
@@ -460,15 +802,63 @@ Response Controller::handle_put_config(const std::string &body)
             try {
                 std::string oldv = tgt->cfg.opt_serialize(key);
                 std::string sval = json_value_to_config_string(it.value());
+                const bool sensitive = is_sensitive_config_key(key);
+                if (sensitive && sval.find(k_redacted) != std::string::npos) {
+                    // A client writing back POST /preset/config output would replace a
+                    // real credential with the placeholder.
+                    errors[key] = "redacted_placeholder";
+                    continue;
+                }
+                // Per-filament vector keys are merged across every loaded filament on
+                // read but written to one preset here; a length change means the caller
+                // handed us the merged shape (see is_merged_per_filament_key).
+                const bool   per_filament = is_merged_per_filament_key(tgt->type, key, tgt->cfg.option(key));
+                const size_t len_before   = per_filament ? config_vector_size(tgt->cfg, key) : 0;
                 // Orca's own validation: throws BadOptionTypeException /
                 // BadOptionValueException on garbage.
                 tgt->cfg.set_deserialize_strict(key, sval);
+                if (per_filament) {
+                    const size_t len_after = config_vector_size(tgt->cfg, key);
+                    if (len_after != len_before) {
+                        // The batch is atomic and bails out below without applying, so the
+                        // already-mutated staged copy needs no restore.
+                        errors[key] = "per_filament_length_mismatch: the filament preset open in the "
+                                      "Filament tab holds " + std::to_string(len_before) + " value(s), got " +
+                                      std::to_string(len_after) +
+                                      ". GET /config reports this key merged across every loaded filament "
+                                      "slot; PUT /config writes one preset. Pass just that preset's value(s), "
+                                      "and change the other slots by selecting their presets in turn.";
+                        continue;
+                    }
+                }
+                std::string newv = tgt->cfg.opt_serialize(key);
+                if (sensitive && !allow_sensitive && newv != oldv) {
+                    // Judged on the re-serialized value, so writing back the current value
+                    // (snapshot/restore callers) is not a change. The staged copy is thrown
+                    // away with the rest of the batch.
+                    errors[key] = "blocked_by_remote_api_policy";
+                    continue;
+                }
                 tgt->touched = true;
                 applied.push_back(key);
-                changes.push_back({ key, oldv, tgt->cfg.opt_serialize(key) });
+                // The notification is on screen, so it never shows a credential.
+                if (is_credential_key(key))
+                    changes.push_back({ key, "(hidden)", "(hidden)" });
+                else if (is_host_url_key(key))
+                    changes.push_back({ key, strip_url_userinfo(oldv), strip_url_userinfo(newv) });
+                else
+                    changes.push_back({ key, oldv, newv });
             } catch (const std::exception &e) {
                 errors[key] = e.what();
             }
+        }
+
+        // Second pass over the FINAL staged project config: the invariants are
+        // cross-key (the matrix size depends on filament_colour), so they can only
+        // be judged once the whole batch is written, not as each key arrives.
+        for (const std::string &key : proj_keys) {
+            std::string err = project_value_error(key, proj_new, nozzles, filaments_before);
+            if (!err.empty()) errors[key] = err;
         }
 
         // Atomic: if any key failed validation, apply NOTHING and report errors.
@@ -478,6 +868,8 @@ Response Controller::handle_put_config(const std::string &body)
             for (auto it2 = errors.begin(); it2 != errors.end(); ++it2) {
                 emsg += "\n - ";
                 emsg += api_config_label(it2.key());
+                if (it2.value() == "blocked_by_remote_api_policy")
+                    emsg += " (blocked, see Preferences > Remote API)";
             }
             api_notify(emsg, true);
             return {{"applied", nlohmann::json::array()}, {"errors", errors}};
@@ -498,6 +890,55 @@ Response Controller::handle_put_config(const std::string &body)
                 tab->load_config(t.cfg);
                 wxGetApp().plater()->on_config_change(t.cfg);
             }
+
+        // Project scope has no Tab, so the preset path above does not apply. There
+        // is no single "apply a project config change" helper in-tree either - every
+        // GUI writer hand-composes this epilogue (WipeTowerDialog::open_flushing_dialog,
+        // Sidebar::auto_calc_flushing_volumes, Plater::priv::on_select_bed_type,
+        // PlaterPresetComboBox::sync_colour_config). This mirrors them, once per
+        // request rather than once per key.
+        if (!proj_keys.empty()) {
+            Plater *plater = wxGetApp().plater();
+            bundle->project_config.apply(proj_new);
+
+            const bool touched_flush = proj_keys.count("flush_volumes_matrix") ||
+                                       proj_keys.count("flush_multiplier") ||
+                                       proj_keys.count("flush_multiplier_fast");
+            const bool touched_tower = proj_keys.count("wipe_tower_x") || proj_keys.count("wipe_tower_y");
+
+            if (proj_keys.count("curr_bed_type")) {
+                // The bed type is cached in AppConfig as well, globally and per
+                // printer, and export_selections below reads the global copy back -
+                // so these have to run first. on_bed_type_change (not
+                // Sidebar::set_bed_type_accord_combox) because the latter fires
+                // wxEVT_COMBOBOX and would re-enter this same write path.
+                BedType    bt = bundle->project_config.opt_enum<BedType>("curr_bed_type");
+                AppConfig *ac = wxGetApp().app_config;
+                ac->set("curr_bed_type", std::to_string(int(bt)));
+                ac->set_printer_setting(bundle->printers.get_selected_preset_name(),
+                                        "curr_bed_type", std::to_string(int(bt)));
+                plater->on_bed_type_change(bt);
+            }
+
+            bundle->export_selections(*wxGetApp().app_config);
+            // Once per request: it re-arms the auto-backup exporter.
+            plater->update_project_dirty_from_presets();
+
+            // Flip the flag synchronously. on_config_change only arms a 500 ms
+            // one-shot timer, so a GET /status issued right after this 200 would
+            // otherwise still report the stale slice as valid.
+            plater->get_partplate_list().invalid_all_slice_result();
+
+            // Most project keys are outside Plater::priv::config's whitelist and so
+            // are ignored by the per-key loop, but the unconditional tail is what we
+            // want: schedule_background_process + title dirty + auto-reslice.
+            plater->on_config_change(bundle->full_config());
+
+            if (touched_flush || touched_tower) {
+                plater->get_view3D_canvas3D()->reload_scene(true);
+                plater->update();
+            }
+        }
 
         if (!changes.empty()) {
             std::string msg = "Settings updated";
@@ -535,6 +976,148 @@ void Controller::set_slice_state(const std::function<void(SliceState&)> &mut, co
         if (!m_slice.stats.is_null()) snapshot["stats"] = m_slice.stats;
     }
     wxGetApp().remote_api_server().broadcast(snapshot);
+}
+
+// Stats + warnings of the CURRENT plate's slice result, in the shape GET /slice/status
+// reports. GUI thread only. Used when a slice completes, and (plates) whenever the
+// current plate changes or an already-valid plate is sliced again, so /slice/status
+// always describes the plate that slice, gcode and plate/render act on.
+static void current_plate_slice_stats(nlohmann::json &stats, nlohmann::json &warnings)
+{
+    warnings = nlohmann::json::array();
+    auto &plates = wxGetApp().plater()->get_partplate_list();
+    const PrintStatistics &ps = plates.get_current_fff_print().print_statistics();
+    stats = {
+        {"estimated_time", ps.estimated_normal_print_time},
+        {"filament_used_mm", ps.total_used_filament},
+        {"filament_used_g", ps.total_weight},
+        {"total_cost", ps.total_cost}
+    };
+    if (GCodeProcessorResult *res = plates.get_curr_plate()->get_slice_result()) {
+        if (!res->print_statistics.modes.empty())
+            stats["estimated_time_seconds"] = res->print_statistics.modes.front().time;
+        for (const auto &w : res->warnings)
+            warnings.push_back({{"level", w.level}, {"message", w.msg}, {"code", w.error_code}});
+        // The "toolpath goes beyond the plate boundaries" warning is a GUI plater
+        // notification (GLCanvas3D), computed from the gcode viewer's bed-containment
+        // check - so it never reaches res->warnings and was invisible to the API.
+        // Recompute it here from the same data the viewer uses (BuildVolume::
+        // all_paths_inside over the extrude moves) and surface it in warnings[].
+        BoundingBoxf3 paths_bbox;
+        bool any_path = false;
+        for (const auto &mv : res->moves) {
+            if (mv.type == EMoveType::Extrude && mv.extrusion_role != erCustom &&
+                mv.width != 0.f && mv.height != 0.f) {
+                paths_bbox.merge(mv.position.cast<double>());
+                any_path = true;
+            }
+        }
+        if (any_path && !wxGetApp().plater()->build_volume().all_paths_inside(*res, paths_bbox))
+            warnings.push_back({{"level", 3},
+                                {"message", "A G-code path goes beyond the plate boundaries."},
+                                {"code", "TOOLPATH_OUTSIDE"}});
+
+        // F14: per-feature (extrusion-role) breakdown for the slice-analytics MCP.
+        // PrintEstimatedStatistics has no per-role TIME, so sum it per role from the
+        // moves (Normal mode, index 0 - matches estimated_time_seconds). Filament comes
+        // from used_filaments_per_role; flow is the COMMANDED volumetric rate
+        // (feedrate * mm3_per_mm), the right basis for detecting flow-ceiling clamping.
+        // Role keys are STABLE Orca config-feature tokens (NOT localized role_to_string)
+        // so the MCP predicted_flows keys match by string - see the fork-breakdown plan.
+        auto role_token = [](int r) -> const char* {
+            switch (r) {
+                case erExternalPerimeter:        return "outer_wall";
+                case erPerimeter:                return "inner_wall";
+                case erInternalInfill:           return "sparse_infill";
+                case erSolidInfill:              return "internal_solid_infill";
+                case erTopSolidInfill:           return "top_surface";
+                case erGapFill:                  return "gap_infill";
+                case erBridgeInfill:             return "bridge";
+                case erOverhangPerimeter:        return "overhang_perimeter";
+                case erBottomSurface:            return "bottom_surface";
+                case erIroning:                  return "ironing";
+                case erInternalBridgeInfill:     return "internal_bridge";
+                case erSkirt:                    return "skirt";
+                case erBrim:                     return "brim";
+                case erSupportMaterial:          return "support";
+                case erSupportMaterialInterface: return "support_interface";
+                case erSupportTransition:        return "support_transition";
+                case erWipeTower:                return "wipe_tower";
+                case erCustom:                   return "custom";
+                case erMixed:                    return "mixed";
+                default:                         return nullptr; // erNone / erCount
+            }
+        };
+        struct RoleAgg { double time_s = 0.0, max_flow = 0.0, sum_ft = 0.0; };
+        RoleAgg agg[erCount];
+        for (const auto &mv : res->moves) {
+            if (mv.type != EMoveType::Extrude) continue;
+            int r = (int) mv.extrusion_role;
+            if (r <= 0 || r >= erCount) continue;
+            double t = mv.time[0]; // Normal mode; stock 2.5 keeps a per-move duration per time mode
+            double vr = mv.volumetric_rate(); // feedrate * mm3_per_mm
+            agg[r].time_s += t;
+            agg[r].sum_ft += vr * t;
+            if (vr > agg[r].max_flow) agg[r].max_flow = vr;
+        }
+        double total_time = res->print_statistics.modes.empty() ? 0.0
+                            : (double) res->print_statistics.modes.front().time;
+        const auto &fpr = res->print_statistics.used_filaments_per_role;
+        nlohmann::json roles = nlohmann::json::array();
+        for (int r = 1; r < erCount; ++r) {
+            const char *tok = role_token(r);
+            if (tok == nullptr) continue;
+            auto it = fpr.find((ExtrusionRole) r);
+            bool has_fil = (it != fpr.end());
+            if (agg[r].time_s <= 0.0 && !has_fil) continue;
+            nlohmann::json role_j = {
+                {"role", tok},
+                {"time_s", agg[r].time_s},
+                {"time_pct", total_time > 0.0 ? 100.0 * agg[r].time_s / total_time : 0.0},
+                {"flow_mm3_s", {{"max", agg[r].max_flow},
+                                {"mean", agg[r].time_s > 0.0 ? agg[r].sum_ft / agg[r].time_s : 0.0}}}
+            };
+            if (has_fil) {
+                // used_filaments_per_role.first is METERS (GUI convention); emit mm to
+                // match top-level filament_used_mm. .second is grams.
+                role_j["filament_mm"] = it->second.first * 1000.0;
+                role_j["filament_g"]  = it->second.second;
+            }
+            roles.push_back(role_j);
+        }
+        stats["breakdown"] = {
+            {"mode", "normal"},
+            {"total_time_s", total_time},
+            {"roles", roles},
+            {"metrics", nlohmann::json::object()},
+            {"layers", nlohmann::json::array()}
+        };
+    }
+}
+
+// plates: point /slice/status at the plate that is current NOW. The stored state
+// otherwise keeps describing whichever plate was sliced last, so after a plate
+// switch get_slice_status / slice_and_wait would report another plate's time and
+// filament. GUI thread only.
+void Controller::sync_slice_state_to_current_plate(const char *event_name)
+{
+    if (slice_state().state == "slicing") return;
+    PartPlateList &plates = wxGetApp().plater()->get_partplate_list();
+    PartPlate *plate = plates.get_curr_plate();
+    if (plate != nullptr && plate->is_slice_result_valid()) {
+        nlohmann::json stats, warnings;
+        current_plate_slice_stats(stats, warnings);
+        set_slice_state([&](SliceState &s) {
+            s.state = "done"; s.percent = 100; s.message = "";
+            s.stats = stats; s.warnings = warnings;
+        }, event_name);
+    } else {
+        const std::string msg = "plate " + std::to_string(plates.get_curr_plate_index() + 1) + " is not sliced";
+        set_slice_state([&](SliceState &s) {
+            s.state = "idle"; s.percent = -1; s.message = msg;
+            s.stats = nullptr; s.warnings = nlohmann::json::array();
+        }, event_name);
+    }
 }
 
 // Tracks which Plater the slice events are bound to. A GUI recreate (language/
@@ -577,119 +1160,8 @@ void Controller::bind_plater_events()
             return;
         }
         // Success: harvest stats on the GUI thread (we ARE on it - wx handler).
-        nlohmann::json stats, warnings = nlohmann::json::array();
-        auto &plates = wxGetApp().plater()->get_partplate_list();
-        const PrintStatistics &ps = plates.get_current_fff_print().print_statistics();
-        stats = {
-            {"estimated_time", ps.estimated_normal_print_time},
-            {"filament_used_mm", ps.total_used_filament},
-            {"filament_used_g", ps.total_weight},
-            {"total_cost", ps.total_cost}
-        };
-        if (GCodeProcessorResult *res = plates.get_curr_plate()->get_slice_result()) {
-            if (!res->print_statistics.modes.empty())
-                stats["estimated_time_seconds"] = res->print_statistics.modes.front().time;
-            for (const auto &w : res->warnings)
-                warnings.push_back({{"level", w.level}, {"message", w.msg}, {"code", w.error_code}});
-            // The "toolpath goes beyond the plate boundaries" warning is a GUI plater
-            // notification (GLCanvas3D), computed from the gcode viewer's bed-containment
-            // check - so it never reaches res->warnings and was invisible to the API.
-            // Recompute it here from the same data the viewer uses (BuildVolume::
-            // all_paths_inside over the extrude moves) and surface it in warnings[].
-            BoundingBoxf3 paths_bbox;
-            bool any_path = false;
-            for (const auto &mv : res->moves) {
-                if (mv.type == EMoveType::Extrude && mv.extrusion_role != erCustom &&
-                    mv.width != 0.f && mv.height != 0.f) {
-                    paths_bbox.merge(mv.position.cast<double>());
-                    any_path = true;
-                }
-            }
-            if (any_path && !wxGetApp().plater()->build_volume().all_paths_inside(*res, paths_bbox))
-                warnings.push_back({{"level", 3},
-                                    {"message", "A G-code path goes beyond the plate boundaries."},
-                                    {"code", "TOOLPATH_OUTSIDE"}});
-
-            // F14: per-feature (extrusion-role) breakdown for the slice-analytics MCP.
-            // PrintEstimatedStatistics has no per-role TIME, so sum it per role from the
-            // moves (Normal mode, index 0 - matches estimated_time_seconds). Filament comes
-            // from used_filaments_per_role; flow is the COMMANDED volumetric rate
-            // (feedrate * mm3_per_mm), the right basis for detecting flow-ceiling clamping.
-            // Role keys are STABLE Orca config-feature tokens (NOT localized role_to_string)
-            // so the MCP predicted_flows keys match by string - see the fork-breakdown plan.
-            auto role_token = [](int r) -> const char* {
-                switch (r) {
-                    case erExternalPerimeter:        return "outer_wall";
-                    case erPerimeter:                return "inner_wall";
-                    case erInternalInfill:           return "sparse_infill";
-                    case erSolidInfill:              return "internal_solid_infill";
-                    case erTopSolidInfill:           return "top_surface";
-                    case erGapFill:                  return "gap_infill";
-                    case erBridgeInfill:             return "bridge";
-                    case erOverhangPerimeter:        return "overhang_perimeter";
-                    case erBottomSurface:            return "bottom_surface";
-                    case erIroning:                  return "ironing";
-                    case erInternalBridgeInfill:     return "internal_bridge";
-                    case erSkirt:                    return "skirt";
-                    case erBrim:                     return "brim";
-                    case erSupportMaterial:          return "support";
-                    case erSupportMaterialInterface: return "support_interface";
-                    case erSupportTransition:        return "support_transition";
-                    case erWipeTower:                return "wipe_tower";
-                    case erCustom:                   return "custom";
-                    case erMixed:                    return "mixed";
-                    default:                         return nullptr; // erNone / erCount
-                }
-            };
-            struct RoleAgg { double time_s = 0.0, max_flow = 0.0, sum_ft = 0.0, weight_s = 0.0; };
-            RoleAgg agg[erCount];
-            // Stock 2.5 has no per-role time estimate (Snapmaker's PrintEstimatedStatistics::Mode::roles_times),
-            // so per-role time is approximated below as commanded length / feedrate; the Snapmaker layer can
-            // restore the slicer's own figure.
-            for (const auto &mv : res->moves) {
-                if (mv.type != EMoveType::Extrude || mv.feedrate <= 0.f) continue;
-                int r = (int) mv.extrusion_role;
-                if (r <= 0 || r >= erCount) continue;
-                double t  = mv.travel_dist / mv.feedrate;
-                double vr = mv.volumetric_rate(); // feedrate * mm3_per_mm
-                agg[r].weight_s += t;
-                agg[r].sum_ft   += vr * t;
-                if (vr > agg[r].max_flow) agg[r].max_flow = vr;
-            }
-            for (int r = 1; r < erCount; ++r) agg[r].time_s = agg[r].weight_s;
-            double total_time = res->print_statistics.modes.empty() ? 0.0
-                                : (double) res->print_statistics.modes.front().time;
-            const auto &fpr = res->print_statistics.used_filaments_per_role;
-            nlohmann::json roles = nlohmann::json::array();
-            for (int r = 1; r < erCount; ++r) {
-                const char *tok = role_token(r);
-                if (tok == nullptr) continue;
-                auto it = fpr.find((ExtrusionRole) r);
-                bool has_fil = (it != fpr.end());
-                if (agg[r].time_s <= 0.0 && !has_fil) continue;
-                nlohmann::json role_j = {
-                    {"role", tok},
-                    {"time_s", agg[r].time_s},
-                    {"time_pct", total_time > 0.0 ? 100.0 * agg[r].time_s / total_time : 0.0},
-                    {"flow_mm3_s", {{"max", agg[r].max_flow},
-                                    {"mean", agg[r].weight_s > 0.0 ? agg[r].sum_ft / agg[r].weight_s : 0.0}}}
-                };
-                if (has_fil) {
-                    // used_filaments_per_role.first is METERS (GUI convention); emit mm to
-                    // match top-level filament_used_mm. .second is grams.
-                    role_j["filament_mm"] = it->second.first * 1000.0;
-                    role_j["filament_g"]  = it->second.second;
-                }
-                roles.push_back(role_j);
-            }
-            stats["breakdown"] = {
-                {"mode", "normal"},
-                {"total_time_s", total_time},
-                {"roles", roles},
-                {"metrics", nlohmann::json::object()},
-                {"layers", nlohmann::json::array()}
-            };
-        }
+        nlohmann::json stats, warnings;
+        current_plate_slice_stats(stats, warnings);
         set_slice_state([&](SliceState &s) {
             s.state = "done"; s.percent = 100; s.message = "";
             s.stats = stats; s.warnings = warnings;
@@ -720,8 +1192,12 @@ Response Controller::handle_slice()
         plater->update(false, /*force_background_processing_update=*/true);
         // reslice() no-ops on an already-valid plate -> no completion event ->
         // status would stick at "slicing". Report the existing result instead.
-        if (plater->get_partplate_list().get_curr_plate()->is_slice_result_valid())
+        if (plater->get_partplate_list().get_curr_plate()->is_slice_result_valid()) {
+            // plates: the stored state may describe another plate, sliced after this
+            // one; report this plate's own result with the reply.
+            sync_slice_state_to_current_plate("slice.done");
             return {{"started", false}, {"already_valid", true}};
+        }
         set_slice_state([](SliceState &s) {
             s.state = "slicing"; s.percent = 0; s.message = "starting";
             s.stats = nullptr; s.warnings = nlohmann::json::array();
@@ -948,13 +1424,24 @@ Response Controller::handle_select_preset(const std::string &body)
         // pops a modal UnsavedChangesDialog that would wedge the GUI thread with no
         // remote way to dismiss it. Discarding is acceptable for an automation API
         // (callers apply changes deliberately via PUT /config).
-        auto discard_if_dirty = [](PresetCollection &c) {
-            if (c.current_is_dirty()) c.discard_current_changes();
+        //
+        // It is, however, a bigger side effect than "switch this group" suggests: a
+        // filament switch also drops unsaved print/printer edits, including ones made
+        // by hand in the GUI. Narrowing it to the selected collection is not an option
+        // (that is exactly the modal deadlock above), so instead report every group we
+        // discarded, and name them in the on-screen notification, so the loss is
+        // visible to both the caller and whoever is at the machine.
+        nlohmann::json discarded = nlohmann::json::array();
+        auto discard_if_dirty = [&discarded](PresetCollection &c, const char *group) {
+            if (c.current_is_dirty()) {
+                c.discard_current_changes();
+                discarded.push_back(group);
+            }
         };
-        discard_if_dirty(bundle->prints);
-        discard_if_dirty(bundle->filaments);
-        discard_if_dirty(bundle->sla_materials);
-        discard_if_dirty(bundle->printers);
+        discard_if_dirty(bundle->prints, "print");
+        discard_if_dirty(bundle->filaments, "filament");
+        discard_if_dirty(bundle->sla_materials, "sla_material");
+        discard_if_dirty(bundle->printers, "printer");
         if (type == Preset::TYPE_FILAMENT) {
             // Selecting in the collection alone leaves every slot unchanged on a multi-extruder printer, so apply it
             // to the slot the way the GUI's filament combo does, then refresh the dependent panels.
@@ -974,7 +1461,7 @@ Response Controller::handle_select_preset(const std::string &body)
         }
         bool ok = tab->select_preset(name, false, "", /*force_select=*/true);
         if (!ok) return {{"error", "select_cancelled"}};
-        return {{"selected", name}};
+        return {{"selected", name}, {"discarded_changes", discarded}};
     });
     if (r.contains("error")) {
         if (r["error"] == "unknown_preset") {
@@ -985,7 +1472,13 @@ Response Controller::handle_select_preset(const std::string &body)
             return { 422, r };
         return { 500, r };
     }
-    api_notify("Switched to " + type_s + " preset '" + name + "'");
+    std::string msg = "Switched to " + type_s + " preset '" + name + "'";
+    if (r.contains("discarded_changes") && ! r["discarded_changes"].empty()) {
+        msg += " - discarded unsaved changes in:";
+        for (const auto &g : r["discarded_changes"])
+            msg += " " + g.get<std::string>();
+    }
+    api_notify(msg);
     return { 200, r };
 }
 
@@ -1220,8 +1713,14 @@ Response Controller::handle_get_preset_config(const std::string &body)
         const Preset *p = presets->find_preset(name, false);
         if (p == nullptr) return {{"error", "unknown_preset"}};
         nlohmann::json cfg = nlohmann::json::object();
-        for (const std::string &k : p->config.keys())
-            cfg[k] = is_secret_read_key(k) ? std::string(REDACTED_VALUE) : p->config.opt_serialize(k);
+        for (const std::string &k : p->config.keys()) {
+            std::string v = p->config.opt_serialize(k);
+            if (is_credential_key(k) && !v.empty())
+                v = k_redacted;
+            else if (is_host_url_key(k))
+                v = strip_url_userinfo(v);
+            cfg[k] = v;
+        }
         return {{"name", p->name}, {"system", p->is_system}, {"config", cfg}};
     });
     if (r.contains("error")) {
@@ -1407,6 +1906,9 @@ Response Controller::handle_get_objects()
                 {"name", mo->name},
                 {"size_mm", {sz.x(), sz.y(), sz.z()}},
                 {"instances", (unsigned) mo->instances.size()},
+                // plates: 0-based index of the plate holding instance 0, -1 when it
+                // sits off every plate (parked beside the bed, or on a deleted plate).
+                {"plate", plater->get_partplate_list().find_instance((int) i, 0)},
             };
             if (!mo->instances.empty()) {
                 const ModelInstance *mi = mo->instances.front();
@@ -1501,7 +2003,16 @@ Response Controller::handle_transform_object(uint64_t id, const std::string &bod
         if (has_t) mi->set_offset(mi->get_offset() + tr);
         if (has_r) mi->set_rotation(mi->get_rotation() + ro * 0.017453292519943295); // deg->rad
         if (has_s) mi->set_scaling_factor(sc);
+        mo->invalidate_bounding_box();
+        // plates: re-check which plate the instance sits on, as a drag in the window
+        // does (GLCanvas3D::do_move/do_rotate/do_scale). Without it an object moved
+        // onto another plate by coordinates stayed in its old plate's list: that plate
+        // kept trying to slice it and the new one ignored it. is_new=true: a plate in
+        // spiral-vase mode applies its vase settings to the object without the drag's
+        // question dialog, which nothing could answer from an API call.
+        wxGetApp().plater()->get_partplate_list().notify_instance_update(idx, 0, true);
         plater->changed_object(idx);
+        wxGetApp().obj_list()->update_plate_values_for_items();
         api_notify(std::string(has_t ? "Moved" : (has_r ? "Rotated" : "Resized")) + " '" + mo->name + "'");
         auto off = mi->get_offset(); auto rot = mi->get_rotation(); auto scl = mi->get_scaling_factor();
         return {{"id", id}, {"transform", {
@@ -1525,7 +2036,10 @@ Response Controller::handle_duplicate_object(uint64_t id)
         const ModelInstance *src = mo->instances.front();
         Vec3d off = src->get_offset() + Vec3d(10.0, 10.0, 0.0);
         mo->add_instance(off, src->get_scaling_factor(), src->get_rotation(), src->get_mirror());
+        // plates: give the new copy to the plate it landed on (see handle_transform_object).
+        wxGetApp().plater()->get_partplate_list().notify_instance_update(idx, (int) mo->instances.size() - 1, true);
         plater->changed_object(idx);
+        wxGetApp().obj_list()->update_plate_values_for_items();
         api_notify("Duplicated '" + mo->name + "'");
         return {{"duplicated", true}, {"id", id}, {"instances", (unsigned) mo->instances.size()}};
     });
@@ -1546,10 +2060,17 @@ Response Controller::handle_put_object_config(uint64_t id, const std::string &bo
         DynamicPrintConfig cfg = mo->config.get(); // copy of existing per-object overrides
         nlohmann::json applied = nlohmann::json::array();
         nlohmann::json errors  = nlohmann::json::object();
+        const bool allow_sensitive = sensitive_writes_allowed();
         for (auto it = in.begin(); it != in.end(); ++it) {
             const std::string &key = it.key();
             if (is_forbidden_write_key(key)) { errors[key] = "forbidden_key"; continue; }
             if (print_config_def.get(key) == nullptr) { errors[key] = "unknown_key"; continue; }
+            // Same policy as PUT /config; a per-object override of these is never a
+            // slicing need, so there is no write-back exemption here.
+            if (!allow_sensitive && is_sensitive_config_key(key)) {
+                errors[key] = "blocked_by_remote_api_policy";
+                continue;
+            }
             try {
                 cfg.set_deserialize_strict(key, json_value_to_config_string(it.value()));
                 applied.push_back(key);
@@ -1561,6 +2082,26 @@ Response Controller::handle_put_object_config(uint64_t id, const std::string &bo
         }
         mo->config.assign_config(std::move(cfg));
         plater->changed_object(idx);
+        // changed_object() reschedules the background slice and repaints the 3D scene, but
+        // it does not touch the object list's filament column. That column is written by
+        // ObjectList itself (set_extruder_for_selected_items / update_filament_values_for_items
+        // both do SetExtruder + Refresh), so an extruder set through this endpoint sliced
+        // with the new filament while the list still showed the old one - the API and the
+        // window disagreed with no way to tell which was right. Mirror what the GUI does.
+        if (in.contains("extruder") && mo->config.has("extruder")) {
+            ObjectList *obj_list = wxGetApp().obj_list();
+            ObjectDataViewModel *om = obj_list == nullptr ? nullptr : obj_list->GetModel();
+            if (om != nullptr) {
+                wxDataViewItem item = om->GetItemById(idx);
+                if (item.IsOk()) {
+                    // 0 means "use the object/printer default" and the list spells that
+                    // out rather than showing a slot number (ObjectDataViewModel.cpp).
+                    const int ext = mo->config.extruder();
+                    om->SetExtruder(ext == 0 ? _L("default") : wxString::Format("%d", ext), item);
+                    obj_list->Refresh(); // BBS: repaint the filament column
+                }
+            }
+        }
         if (!applied.empty())
             api_notify("Updated " + std::to_string(applied.size()) + " setting(s) on '" + mo->name + "'");
         return {{"applied", applied}, {"errors", errors}, {"object", mo->name}};
@@ -1603,6 +2144,260 @@ Response Controller::handle_jobs_status()
         Plater *plater = wxGetApp().plater();
         return {{"idle", plater->get_ui_job_worker().is_idle()}};
     });
+    return { 200, r };
+}
+
+// --- plates ------------------------------------------------------------------
+// GET /plates, POST /plates, POST /plates/{i}/select, DELETE /plates/{i} and
+// POST /objects/{id}/plate. Every mutation goes through the same Plater /
+// PartPlateList calls the toolbar uses (Plater::priv::on_action_add_plate,
+// Plater::select_plate, Plater::delete_plate), so undo snapshots, the sidebar
+// plate list, the background process and the preview follow the change exactly
+// as they do for a click.
+
+// One plate as JSON. `objects` is read back through PartPlate::contain_instance,
+// i.e. from the plate's own bookkeeping, not from positions.
+static nlohmann::json plate_json(PartPlateList &plates, int index, const Model &model)
+{
+    PartPlate *p = plates.get_plate(index);
+    nlohmann::json objs = nlohmann::json::array();
+    for (size_t oi = 0; oi < model.objects.size(); ++oi) {
+        const ModelObject *mo = model.objects[oi];
+        for (size_t ii = 0; ii < mo->instances.size(); ++ii)
+            if (p->contain_instance((int) oi, (int) ii))
+                objs.push_back({{"id", (uint64_t) mo->id().id}, {"instance", ii}, {"name", mo->name}});
+    }
+    const BoundingBoxf3 bb  = p->get_build_volume();
+    const Vec3d         org = p->get_origin();
+    return {
+        {"index", index},
+        {"name", p->get_plate_name()},
+        {"current", index == plates.get_curr_plate_index()},
+        {"locked", p->is_locked()},
+        {"empty", p->empty()},
+        {"slice_result_valid", p->is_slice_result_valid()},
+        {"origin", {org.x(), org.y(), org.z()}},
+        {"bbox_min", {bb.min.x(), bb.min.y(), bb.min.z()}},
+        {"bbox_max", {bb.max.x(), bb.max.y(), bb.max.z()}},
+        {"objects", objs},
+    };
+}
+
+Response Controller::handle_get_plates()
+{
+    nlohmann::json r = run_on_ui([]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        PartPlateList &plates = plater->get_partplate_list();
+        nlohmann::json arr = nlohmann::json::array();
+        for (int i = 0; i < plates.get_plate_count(); ++i)
+            arr.push_back(plate_json(plates, i, plater->model()));
+        return {{"plates", arr},
+                {"count", plates.get_plate_count()},
+                {"current", plates.get_curr_plate_index()},
+                {"max", (int) PartPlateList::MAX_PLATES_COUNT},
+                {"can_add", plater->can_add_plate()},
+                {"can_delete", plater->can_delete_plate()}};
+    });
+    return { 200, r };
+}
+
+// POST /plates  body (optional) {"select": true}
+Response Controller::handle_create_plate(const std::string &body)
+{
+    bool select = true;
+    if (!body.empty()) {
+        nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
+        if (!in.is_object()) return { 400, {{"error", "body_must_be_object"}} };
+        if (in.contains("select")) {
+            if (!in["select"].is_boolean()) return { 400, {{"error", "select_must_be_boolean"}} };
+            select = in["select"].get<bool>();
+        }
+    }
+    nlohmann::json r = run_on_ui([this, select]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        PartPlateList &plates = plater->get_partplate_list();
+        if (!plater->can_add_plate()) {
+            if (plater->is_background_process_slicing()) return {{"error", "slicing"}};
+            return {{"error", "max_plates"}, {"max", (int) PartPlateList::MAX_PLATES_COUNT}};
+        }
+        // Same steps as the toolbar's "Add plate" (Plater::priv::on_action_add_plate).
+        plater->take_snapshot("add partplate");
+        const int idx = plates.create_plate();
+        if (idx < 0) return {{"error", "max_plates"}, {"max", (int) PartPlateList::MAX_PLATES_COUNT}};
+        if (select) plater->select_plate(idx, false);
+        plater->update();
+        plater->get_camera().requires_zoom_to_plate = REQUIRES_ZOOM_TO_ALL_PLATE;
+        if (select) sync_slice_state_to_current_plate("slice.plate_changed");
+        api_notify("Added plate " + std::to_string(idx + 1));
+        return {{"created", true}, {"index", idx},
+                {"count", plates.get_plate_count()},
+                {"current", plates.get_curr_plate_index()},
+                {"plate", plate_json(plates, idx, plater->model())}};
+    });
+    if (r.contains("error")) return { r["error"] == "slicing" ? 409 : 422, r };
+    return { 200, r };
+}
+
+// POST /plates/{i}/select - makes plate i the one slice, gcode, plate/render and
+// jobs/status act on, exactly like clicking it.
+Response Controller::handle_select_plate(int index)
+{
+    nlohmann::json r = run_on_ui([this, index]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        PartPlateList &plates = plater->get_partplate_list();
+        if (index < 0 || index >= plates.get_plate_count())
+            return {{"error", "unknown_plate"}, {"count", plates.get_plate_count()}};
+        if (plater->is_background_process_slicing()) return {{"error", "slicing"}};
+        if (plates.get_curr_plate_index() != index) {
+            if (plater->select_plate(index, false) != 0) return {{"error", "select_failed"}};
+            api_notify("Selected plate " + std::to_string(index + 1));
+        }
+        sync_slice_state_to_current_plate("slice.plate_changed");
+        return {{"selected", true},
+                {"current", plates.get_curr_plate_index()},
+                {"plate", plate_json(plates, index, plater->model())}};
+    });
+    if (r.contains("error")) {
+        if (r["error"] == "unknown_plate") return { 404, r };
+        if (r["error"] == "slicing")       return { 409, r };
+        return { 422, r };
+    }
+    return { 200, r };
+}
+
+// DELETE /plates/{i} - the objects it held are not deleted: Plater::delete_plate
+// parks them beside the bed, as the toolbar does. The count is reported back.
+Response Controller::handle_delete_plate(int index)
+{
+    nlohmann::json r = run_on_ui([this, index]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        PartPlateList &plates = plater->get_partplate_list();
+        if (index < 0 || index >= plates.get_plate_count())
+            return {{"error", "unknown_plate"}, {"count", plates.get_plate_count()}};
+        if (!plater->can_delete_plate()) return {{"error", "last_plate"}};
+        if (plater->is_background_process_slicing()) return {{"error", "slicing"}};
+        int held = 0;
+        {
+            PartPlate *p = plates.get_plate(index);
+            const Model &model = plater->model();
+            for (size_t oi = 0; oi < model.objects.size(); ++oi)
+                for (size_t ii = 0; ii < model.objects[oi]->instances.size(); ++ii)
+                    if (p->contain_instance((int) oi, (int) ii)) ++held;
+        }
+        if (plater->delete_plate(index) != 0) return {{"error", "delete_failed"}};
+        sync_slice_state_to_current_plate("slice.plate_changed");
+        api_notify("Deleted plate " + std::to_string(index + 1) +
+                   (held > 0 ? " (" + std::to_string(held) + " object(s) moved off-plate)" : std::string()));
+        return {{"deleted", true}, {"index", index},
+                {"count", plates.get_plate_count()},
+                {"current", plates.get_curr_plate_index()},
+                {"objects_moved_off_plate", held}};
+    });
+    if (r.contains("error")) {
+        if (r["error"] == "unknown_plate") return { 404, r };
+        if (r["error"] == "slicing")       return { 409, r };
+        return { 422, r };
+    }
+    return { 200, r };
+}
+
+// POST /objects/{id}/plate  body {"plate": <index>, "instance": 0}
+// Moves one instance onto a plate. Coming from another plate it keeps its
+// position relative to that plate (front-left of plate 1 -> front-left of
+// plate 2); coming from off-plate it lands at the target's centre, which is
+// what PartPlateList::add_to_plate does on its own.
+Response Controller::handle_put_object_plate(uint64_t id, const std::string &body)
+{
+    nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
+    if (!in.is_object() || !in.contains("plate") || !in["plate"].is_number_integer())
+        return { 400, {{"error", "missing_plate"},
+                       {"detail", "body {\"plate\": <0-based index from GET /plates>, \"instance\": 0}"}} };
+    const int plate_idx = in["plate"].get<int>();
+    if (in.contains("instance") && !in["instance"].is_number_integer())
+        return { 400, {{"error", "instance_must_be_integer"}} };
+    const int inst_idx = in.value("instance", 0);
+    if (plate_idx < 0 || inst_idx < 0) return { 400, {{"error", "negative_index"}} };
+
+    nlohmann::json r = run_on_ui([this, id, plate_idx, inst_idx]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        PartPlateList &plates = plater->get_partplate_list();
+        const int oi = find_object_index(plater->model(), id);
+        if (oi < 0) { api_notify("Object not found", true); return {{"error", "unknown_object"}}; }
+        ModelObject *mo = plater->model().objects[oi];
+        if (inst_idx >= (int) mo->instances.size())
+            return {{"error", "unknown_instance"}, {"instances", (unsigned) mo->instances.size()}};
+        PartPlate *target = plates.get_plate(plate_idx);
+        if (target == nullptr) return {{"error", "unknown_plate"}, {"count", plates.get_plate_count()}};
+        if (target->is_locked()) return {{"error", "plate_locked"}, {"plate", plate_idx}};
+        if (plater->is_background_process_slicing()) return {{"error", "slicing"}};
+
+        const int from = plates.find_instance(oi, inst_idx);   // -1: off every plate
+        PartPlate *source = from >= 0 ? plates.get_plate(from) : nullptr;
+        // The window does not let an object be dragged off a locked plate either.
+        if (source != nullptr && from != plate_idx && source->is_locked())
+            return {{"error", "plate_locked"}, {"plate", from}};
+        ModelInstance *mi = mo->instances[inst_idx];
+        if (from == plate_idx) {
+            auto off = mi->get_offset();
+            return {{"moved", false}, {"already_on_plate", true}, {"id", id}, {"instance", inst_idx},
+                    {"plate", plate_idx}, {"offset", {off.x(), off.y(), off.z()}}};
+        }
+        plater->take_snapshot("move to plate");
+        // Keep the position relative to the old plate only when the object really sits
+        // on it (a plate's list can lag behind its geometry, e.g. after a GUI edit).
+        Vec3d keep = mi->get_offset();
+        bool relative = false;
+        if (source != nullptr) {
+            const BoundingBoxf3 sb = source->get_build_volume();
+            relative = keep.x() >= sb.min.x() && keep.x() <= sb.max.x() &&
+                       keep.y() >= sb.min.y() && keep.y() <= sb.max.y();
+        }
+        if (relative) keep -= source->get_origin();
+        if (plates.add_to_plate(oi, inst_idx, plate_idx) != 0) return {{"error", "move_failed"}};
+        if (relative) {
+            mi->set_offset(target->get_origin() + keep);
+            mo->invalidate_bounding_box();
+        }
+        // add_to_plate only drops the instance from the old plate's list. Dragging an
+        // object away in the window also marks that plate's slice stale and its
+        // thumbnails dirty (PartPlateList::notify_instance_update); without this,
+        // GET /gcode on the old plate would still return G-code that prints the
+        // object that just left it.
+        if (source != nullptr) {
+            source->update_slice_result_valid_state(false);
+            source->thumbnail_data.reset();
+            source->no_light_thumbnail_data.reset();
+            source->top_thumbnail_data.reset();
+            source->pick_thumbnail_data.reset();
+        }
+        // Re-check inside/outside on the new plate. is_new=true for the same reason as
+        // in handle_transform_object: no spiral-vase question dialog from an API call.
+        plates.notify_instance_update(oi, inst_idx, true);
+        if (plates.find_instance(oi, inst_idx) != plate_idx) {
+            // The relative position put it outside the target (it straddled the old
+            // plate's edge): centre it on the target instead.
+            Vec3d c = target->get_center_origin();
+            c.z() = mi->get_offset().z();
+            mi->set_offset(c);
+            mo->invalidate_bounding_box();
+            plates.notify_instance_update(oi, inst_idx, true);
+        }
+        plater->changed_object(oi);
+        // The sidebar object list groups objects by plate; a drag refreshes it the same way.
+        wxGetApp().obj_list()->update_plate_values_for_items();
+        sync_slice_state_to_current_plate("slice.plate_changed");
+        api_notify("Moved '" + mo->name + "' to plate " + std::to_string(plate_idx + 1));
+        auto off = mi->get_offset();
+        return {{"moved", true}, {"id", id}, {"instance", inst_idx},
+                {"plate", plates.find_instance(oi, inst_idx)}, {"from_plate", from},
+                {"offset", {off.x(), off.y(), off.z()}}};
+    });
+    if (r.contains("error")) {
+        const std::string e = r["error"].get<std::string>();
+        if (e == "unknown_object" || e == "unknown_plate" || e == "unknown_instance") return { 404, r };
+        if (e == "slicing") return { 409, r };
+        return { 422, r };
+    }
     return { 200, r };
 }
 
@@ -1671,6 +2466,33 @@ Response Controller::dispatch(const Request &req)
         if (is("POST", "/api/v1/arrange"))      return handle_arrange();
         if (is("POST", "/api/v1/orient"))       return handle_orient();
         if (is("GET",  "/api/v1/jobs/status"))  return handle_jobs_status();
+        if (is("GET",  "/api/v1/plates"))       return handle_get_plates();
+        if (is("POST", "/api/v1/plates")) {
+            try { return handle_create_plate(req.body); }
+            catch (const nlohmann::json::parse_error &) { return { 400, {{"error", "invalid_json"}} }; }
+        }
+        {
+            // plate sub-routes: /api/v1/plates/<index> and /api/v1/plates/<index>/<action>
+            // ("plates/", distinct from the GET /api/v1/plate/render route above)
+            static const std::string pfx = "/api/v1/plates/";
+            std::string path = t.substr(0, t.find('?'));
+            if (path.size() > pfx.size() && path.compare(0, pfx.size(), pfx) == 0) {
+                std::string rest = path.substr(pfx.size());
+                size_t slash = rest.find('/');
+                std::string idx_str = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+                std::string action  = (slash == std::string::npos) ? std::string() : rest.substr(slash + 1);
+                int idx = -1;
+                try {
+                    size_t used = 0;
+                    idx = std::stoi(idx_str, &used);
+                    if (used != idx_str.size() || idx < 0) idx = -1;
+                } catch (...) { idx = -1; }
+                if (idx < 0) return { 400, {{"error", "bad_plate_index"}} };
+                if (req.method == "DELETE" && action.empty())  return handle_delete_plate(idx);
+                if (req.method == "POST"   && action == "select") return handle_select_plate(idx);
+                return { 404, {{"error", "not_found"}} };
+            }
+        }
         {
             // M4b object sub-routes: /api/v1/objects/<id> and /api/v1/objects/<id>/<action>
             static const std::string pfx = "/api/v1/objects/";
@@ -1691,6 +2513,10 @@ Response Controller::dispatch(const Request &req)
                 }
                 if (req.method == "POST" && action == "duplicate")
                     return handle_duplicate_object(oid);
+                if (req.method == "POST" && action == "plate") {
+                    try { return handle_put_object_plate(oid, req.body); }
+                    catch (const nlohmann::json::parse_error &) { return { 400, {{"error", "invalid_json"}} }; }
+                }
                 if (req.method == "PUT" && action == "config") {
                     try { return handle_put_object_config(oid, req.body); }
                     catch (const nlohmann::json::parse_error &) { return { 400, {{"error", "invalid_json"}} }; }
