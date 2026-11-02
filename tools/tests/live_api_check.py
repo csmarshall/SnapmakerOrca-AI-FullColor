@@ -117,6 +117,14 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
         check("control: policy-gated key written back unchanged passes", "printer_agent" in r.get("applied", []),
               f"HTTP {status} {json.dumps(r)[:120]}")
 
+    # control: a *_gcode SWITCH is not code; only text-valued *_gcode templates are blocked
+    _, cur = api.j("GET", "/config?keys=emit_machine_limits_to_gcode")
+    emit = cur.get("config", {}).get("emit_machine_limits_to_gcode")
+    if emit is not None:
+        status, r = api.j("PUT", "/config", {"emit_machine_limits_to_gcode": emit})
+        check("control: a *_gcode switch is not blocked as code", "emit_machine_limits_to_gcode" in r.get("applied", []),
+              f"HTTP {status} {json.dumps(r)[:120]}")
+
     # control: an idempotent write must go through, so a refuse-everything bug cannot pass the checks above
     _, cur = api.j("GET", "/config?keys=layer_height")
     value = cur.get("config", {}).get("layer_height")

@@ -258,18 +258,11 @@ static bool is_print_host_key(const std::string &key)
            key == "bbl_use_printhost" || key == "host_type";
 }
 
+// The list itself is shared with the plugin host (libslic3r is_automation_write_blocked_key), so
+// the API and plugins can never drift apart on what is code.
 static bool is_forbidden_write_key(const std::string &key)
 {
-    // bed_custom_* hold file paths the app opens, so they carry the same UNC/arbitrary-file risk as loadModel.
-    static const std::set<std::string> exact = { "post_process", "printer_model", "filename_format",
-                                                 "gcode_substitutions", "bed_custom_texture", "bed_custom_model" };
-    static const std::string gcode_suffix = "_gcode";
-    // Anything Orca itself flags as code (custom G-code / script fields), whatever it is named.
-    const ConfigOptionDef *def = print_config_def.get(key);
-    if (def != nullptr && def->is_code) return true;
-    return exact.count(key) != 0 || is_print_host_key(key) ||
-           (key.size() > gcode_suffix.size() &&
-            key.compare(key.size() - gcode_suffix.size(), gcode_suffix.size(), gcode_suffix) == 0);
+    return is_automation_write_blocked_key(key);
 }
 
 // Print-host values are never returned by reads: print_host / print_host_webui can carry

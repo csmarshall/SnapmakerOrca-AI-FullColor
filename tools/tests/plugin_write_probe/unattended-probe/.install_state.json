@@ -1,0 +1,8 @@
+{
+  "installed_from": "local",
+  "installed_version": "0.1.0",
+  "plugin_name": "Unattended Probe",
+  "enabled": true,
+  "permissions": {"fs_read": [], "fs_readwrite": [], "network_http": [], "network_socket": [], "process": [], "threading": ["thread"], "events": []},
+  "capabilities": [{"unattended-probe": true}]
+}
