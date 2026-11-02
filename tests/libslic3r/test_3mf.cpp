@@ -2652,3 +2652,130 @@ SCENARIO("a rendered no-light thumbnail does not suppress the plate thumbnail", 
         }
     }
 }
+
+// Stores a two-object project with one object on each of two plates.
+static void store_two_plate_project(const std::string& path, const std::vector<double>& second_object_profile = {})
+{
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject* object = model.add_object();
+        object->add_volume(make_cube(10., 10., 10.));
+        object->add_instance();
+    }
+    if (!second_object_profile.empty())
+        model.objects[1]->layer_height_profile.set(second_object_profile);
+
+    ScopedTemporaryDir backup_dir("orca_two_plate_src");
+    model.set_backup_path(backup_dir.string());
+    DynamicPrintConfig cfg;
+    PlateData          plate0, plate1;
+    plate0.plate_index = 0;
+    plate0.objects_and_instances.emplace_back(0, 0);
+    plate1.plate_index = 1;
+    plate1.objects_and_instances.emplace_back(1, 0);
+    StoreParams sp;
+    sp.path     = path.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    sp.plate_data_list.push_back(&plate0);
+    sp.plate_data_list.push_back(&plate1);
+    REQUIRE(store_bbs_3mf(sp));
+}
+
+TEST_CASE("Snapmaker Orca project keeps its plates", "[3mf][snapmaker]")
+{
+    ScopedTemporaryFile file(".3mf");
+    const std::string   path = file.string();
+    store_two_plate_project(path);
+
+    // Make the archive look like one written by Snapmaker Orca 2.4.1: its own Application value and
+    // version key, and no OrcaSlicer version tag.
+    REQUIRE(replace_in_3mf_entry(path, "3D/3dmodel.model", "OrcaSlicer\">", "Snapmaker_Unrelated\">"));
+    REQUIRE(replace_in_3mf_entry(path, "3D/3dmodel.model", "name=\"BambuStudio:3mfVersion\"", "name=\"Snapmaker_Orca:3mfVersion\""));
+    {
+        std::string model_xml;
+        REQUIRE(read_cad_recipe_entry(path, model_xml, "3D/3dmodel.model"));
+        const size_t app = model_xml.find("name=\"Application\">");
+        REQUIRE(app != std::string::npos);
+        const size_t end = model_xml.find('<', app);
+        REQUIRE(replace_in_3mf_entry(path, "3D/3dmodel.model", model_xml.substr(app, end - app), "name=\"Application\">Snapmaker_Orca-2.4.1"));
+    }
+
+    Model                     model;
+    ScopedTemporaryDir        backup_dir("orca_two_plate_dst");
+    model.set_backup_path(backup_dir.string());
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Enable };
+    PlateDataPtrs             plates;
+    std::vector<Preset*>      project_presets;
+    bool   is_bbl_3mf = false, is_orca_3mf = false;
+    Semver file_version;
+    REQUIRE(load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plates, &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+
+    CHECK(is_bbl_3mf);
+    CHECK(is_orca_3mf);
+    CHECK(file_version == Semver(2, 4, 1));
+    REQUIRE(plates.size() == 2);
+    for (size_t i = 0; i < plates.size(); ++i) {
+        REQUIRE(plates[i]->objects_and_instances.size() == 1);
+        CHECK(plates[i]->objects_and_instances.front().first == int(i));
+    }
+    release_PlateData_list(plates);
+}
+
+TEST_CASE("Layer height profile keyed by 3MF object id", "[3mf][snapmaker]")
+{
+    const std::vector<double> profile{ 0., 0.2, 1., 0.1, 2., 0.3, 3., 0.2 };
+    ScopedTemporaryFile file(".3mf");
+    const std::string   path = file.string();
+    store_two_plate_project(path, profile);
+
+    SECTION("legacy 1-based keys still bind to the right object")
+    {
+        Model              model;
+        ScopedTemporaryDir backup_dir("orca_lhp_legacy");
+        REQUIRE(load_project(path, model, backup_dir));
+        REQUIRE(model.objects.size() == 2);
+        CHECK(model.objects[0]->layer_height_profile.get().empty());
+        CHECK(model.objects[1]->layer_height_profile.get() == profile);
+    }
+
+    SECTION("format version 2 keys are 3MF object ids")
+    {
+        // The id of the second build item is its 3MF object id, which differs from its 1-based index.
+        std::string model_xml;
+        REQUIRE(read_cad_recipe_entry(path, model_xml, "3D/3dmodel.model"));
+        size_t pos = model_xml.find("<build");
+        REQUIRE(pos != std::string::npos);
+        pos = model_xml.find("<item objectid=\"", pos);
+        REQUIRE(pos != std::string::npos);
+        pos = model_xml.find("<item objectid=\"", pos + 1);
+        REQUIRE(pos != std::string::npos);
+        const int id = std::atoi(model_xml.c_str() + pos + (sizeof("<item objectid=\"") - 1));
+        REQUIRE(id > 0);
+
+        std::string text = "layer_heights_profile_format_version=2\nobject_id=" + std::to_string(id) + "|";
+        for (size_t i = 0; i < profile.size(); ++i)
+            text += (i ? ";" : "") + std::to_string(profile[i]);
+        text += "\n";
+        bool replaced = false;
+        rewrite_3mf_entries(path, [&](std::string& name, std::string& data) {
+            if (name != "Metadata/layer_heights_profile.txt") return false;
+            data     = text;
+            replaced = true;
+            return true;
+        });
+        REQUIRE(replaced);
+
+        Model              model;
+        ScopedTemporaryDir backup_dir("orca_lhp_v2");
+        REQUIRE(load_project(path, model, backup_dir));
+        REQUIRE(model.objects.size() == 2);
+        CHECK(model.objects[0]->layer_height_profile.get().empty());
+        REQUIRE(model.objects[1]->layer_height_profile.get().size() == profile.size());
+        for (size_t i = 0; i < profile.size(); ++i)
+            CHECK(std::abs(model.objects[1]->layer_height_profile.get()[i] - profile[i]) < 1e-5);
+    }
+}
