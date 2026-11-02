@@ -8,7 +8,7 @@ Natural-language control of a running OrcaSlicer (FullSpectrum build) through it
 2. `python3 -m orca_ai --init-config` writes `~/.config/orca-ai/config.json`. Edit model names. Keys are read from the environment variables the config names, never stored.
 3. Run from `tools/`: `python3 -m orca_ai "review this model; it is a bracket that carries 5 kg, make it stronger"`.
 
-Needs `requests` and `pyyaml`. Pin the interpreter in unattended scripts (see the toad `python3` note in CLAUDE.md).
+Needs `requests` and `pyyaml`. Pin the interpreter in unattended scripts.
 
 ## Use from Claude Code / Claude Desktop (MCP)
 

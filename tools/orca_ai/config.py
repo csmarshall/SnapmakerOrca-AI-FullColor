@@ -13,7 +13,7 @@ EXAMPLE_CONFIG: dict[str, Any] = {
     "providers": {
         "claude": {"kind": "anthropic", "model": "claude-sonnet-5-5", "api_key_env": "ANTHROPIC_API_KEY"},
         "openai": {"kind": "openai", "model": "gpt-5", "api_key_env": "OPENAI_API_KEY", "vision": True},
-        "rosa": {"kind": "openai", "base_url": "http://192.168.1.10:11434/v1", "model": "<local model name>",
+        "local": {"kind": "openai", "base_url": "http://127.0.0.1:11434/v1", "model": "<local model name>",
                  "api_key_env": None, "vision": False},
     },
 }
