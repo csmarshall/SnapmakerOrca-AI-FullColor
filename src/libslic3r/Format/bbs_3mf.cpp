@@ -728,6 +728,56 @@ bool bbs_is_valid_object_type(const std::string& type)
 
 namespace Slic3r {
 
+// Snapmaker Orca stores a filament that supports a high-flow nozzle as two columns (standard and
+// high_flow) in every per-filament vector, and names each column in filament_flow_support. This
+// build names columns with filament_extruder_variant and maps them to slots with
+// filament_self_index, and only splits multi-column vectors when extruder_variant_list is present.
+// Without the translation the 6-wide vectors of a 4-filament project were read with the wrong
+// column-to-slot mapping (temperatures, fans, retraction and ramming landed on the wrong slots).
+// Returns false and changes nothing when the project does not have that shape.
+// This build does not define filament_flow_support, so the config loader drops it: the importer reads it
+// from the raw project file and passes it in.
+static bool map_snapmaker_flow_columns(DynamicPrintConfig &config, const std::vector<std::string> &flow)
+{
+    const auto *ids = config.option<ConfigOptionStrings>("filament_settings_id");
+    if (ids == nullptr || flow.empty())
+        return false;
+    // The project config sits on top of the full defaults, so filament_extruder_variant is always
+    // present; only a list as wide as the columns means the file already describes them.
+    if (const auto *existing = config.option<ConfigOptionStrings>("filament_extruder_variant");
+        existing != nullptr && existing->values.size() == flow.size())
+        return false;
+    // A new filament starts whenever the column's flow type already appeared in the current run.
+    std::vector<int>         self_index;
+    std::vector<std::string> variant;
+    std::set<std::string>    seen;
+    int                      filament = 0;
+    for (const std::string &f : flow) {
+        if (f != "standard" && f != "high_flow")
+            return false;
+        if (filament == 0 || seen.count(f) != 0) {
+            ++filament;
+            seen.clear();
+        }
+        seen.insert(f);
+        self_index.push_back(filament);
+        variant.emplace_back(f == "high_flow" ? "Direct Drive High Flow" : "Direct Drive Standard");
+    }
+    if (filament != int(ids->values.size()))
+        return false;
+    config.set_key_value("filament_self_index", new ConfigOptionInts(self_index));
+    config.set_key_value("filament_extruder_variant", new ConfigOptionStrings(variant));
+    if (const auto *list = config.option<ConfigOptionStrings>("extruder_variant_list");
+        list == nullptr || std::none_of(list->values.begin(), list->values.end(),
+                                        [](const std::string &v) { return v.find("High Flow") != std::string::npos; })) {
+        const auto  *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+        const size_t count   = nozzles != nullptr && !nozzles->values.empty() ? nozzles->values.size() : 1;
+        config.set_key_value("extruder_variant_list",
+                             new ConfigOptionStrings(std::vector<std::string>(count, "Direct Drive Standard,Direct Drive High Flow")));
+    }
+    return true;
+}
+
 std::vector<std::string> keep_snapmaker_project_printer_gcode(DynamicPrintConfig &config)
 {
     std::vector<std::string> added;
@@ -1271,6 +1321,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         //BBS: plater related structures
         bool m_is_bbl_3mf { false };
         bool m_is_snapmaker_orca { false };
+        // filament_flow_support from a Snapmaker Orca project file, which this build does not define
+        std::vector<std::string> m_project_flow_support;
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1570,6 +1622,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         }
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, project, plate_id);
         if (result && m_is_snapmaker_orca) {
+            if (map_snapmaker_flow_columns(config, m_project_flow_support))
+                BOOST_LOG_TRIVIAL(info) << "Snapmaker_Orca project: mapped filament_flow_support columns to filament variants";
             const std::vector<std::string> kept = keep_snapmaker_project_printer_gcode(config);
             if (!kept.empty())
                 BOOST_LOG_TRIVIAL(info) << "Snapmaker_Orca project: keeping its own printer G-code for " << kept.size() << " key(s)";
@@ -2853,6 +2907,20 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 return;
             }
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", load project config file successfully from %1%\n") %dest_file;
+
+            m_project_flow_support.clear();
+            try {
+                boost::nowide::ifstream raw(dest_file);
+                const nlohmann::json   j = nlohmann::json::parse(raw);
+                const auto             it = j.find("filament_flow_support");
+                if (it != j.end() && it->is_array())
+                    for (const auto &v : *it)
+                        if (v.is_string())
+                            m_project_flow_support.push_back(v.get<std::string>());
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read filament_flow_support: " << e.what();
+                m_project_flow_support.clear();
+            }
 
             // Heal any gradient-curve slots corrupted by the legacy "|" separator collision
             // (see FilamentMixer::sanitize_mixed_gradient_curve_array). The 3MF JSON itself
