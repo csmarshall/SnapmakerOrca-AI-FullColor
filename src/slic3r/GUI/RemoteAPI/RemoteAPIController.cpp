@@ -325,7 +325,7 @@ Response Controller::handle_status()
             {"plates", {{"count", plates.get_plate_count()}, {"current", plates.get_curr_plate_index()}}},
             {"app_version", SLIC3R_VERSION},
             {"api_version", "1.0"},
-            {"capabilities", {"status", "config", "slice", "events", "model", "preset", "gcode", "objects", "arrange", "orient", "object_config", "slice_breakdown", "plate_render", "preset_discard", "sensitive_key_policy", "plates"}},
+            {"capabilities", {"status", "config", "slice", "events", "model", "preset", "gcode", "objects", "arrange", "orient", "object_config", "slice_breakdown", "plate_render", "preset_discard", "sensitive_key_policy", "plates", "volumes"}},
             {"sensitive_keys_allowed", sensitive_writes_allowed()},
             {"project", plater->get_project_filename().ToUTF8().data()},
             {"objects", objects},
@@ -2101,7 +2101,7 @@ Response Controller::handle_get_objects()
             {
                 const DynamicPrintConfig ocfg = mo->config.get();
                 nlohmann::json cfgj = nlohmann::json::object();
-                for (const std::string &k : ocfg.keys()) cfgj[k] = ocfg.opt_serialize(k);
+                cfgj = config_to_json(ocfg, nullptr); // applies print-host read redaction
                 o["config"] = cfgj;
                 o["custom_layer_profile"] = !mo->layer_height_profile.empty();
                 nlohmann::json rngs = nlohmann::json::array();
@@ -2141,28 +2141,37 @@ Response Controller::handle_delete_object(uint64_t id)
     return { 200, r };
 }
 
+// Limits shared by the transform and modifier handlers.
+static constexpr double MAX_TRANSLATE_MM = 10000.0, MAX_ROTATE_DEG = 3600.0;
+static constexpr double MIN_SCALE = 1e-4, MAX_SCALE = 1000.0;
+static constexpr double MIN_PRIMITIVE_MM = 0.1, MAX_PRIMITIVE_MM = 1000.0;
+
+// Reads in[k] as three finite numbers within [lo, hi]. Sets `present`; on a bad value sets `err`.
+static Vec3d read_vec3(const nlohmann::json &in, const char *k, bool &present, double lo, double hi, std::string &err)
+{
+    present = in.contains(k);
+    if (!present) return Vec3d(0, 0, 0);
+    const auto &a = in[k];
+    if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) {
+        err = std::string(k) + " must be an array of three numbers";
+        return Vec3d(0, 0, 0);
+    }
+    Vec3d v(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(v[i]) || v[i] < lo || v[i] > hi)
+            err = std::string(k) + " values must be between " + std::to_string(lo) + " and " + std::to_string(hi);
+    return v;
+}
+
 Response Controller::handle_transform_object(uint64_t id, const std::string &body)
 {
     nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
     if (!in.is_object()) return { 400, {{"error", "body_must_be_object"}} };
     // Each vector must be three finite numbers in a sane range: a zero scale makes a degenerate
     // instance, and a huge offset overflows the scaled integer coordinates at slice time.
-    static constexpr double MAX_TRANSLATE_MM = 10000.0, MAX_ROTATE_DEG = 3600.0;
-    static constexpr double MIN_SCALE = 1e-4, MAX_SCALE = 1000.0;
     std::string vec_error;
     auto read_vec = [&in, &vec_error](const char *k, bool &present, double lo, double hi) -> Vec3d {
-        present = in.contains(k);
-        if (!present) return Vec3d(0, 0, 0);
-        const auto &a = in[k];
-        if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) {
-            vec_error = std::string(k) + " must be an array of three numbers";
-            return Vec3d(0, 0, 0);
-        }
-        Vec3d v(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
-        for (int i = 0; i < 3; ++i)
-            if (!std::isfinite(v[i]) || v[i] < lo || v[i] > hi)
-                vec_error = std::string(k) + " values must be between " + std::to_string(lo) + " and " + std::to_string(hi);
-        return v;
+        return read_vec3(in, k, present, lo, hi, vec_error);
     };
     bool has_t = false, has_r = false, has_s = false;
     Vec3d tr = read_vec("translate", has_t, -MAX_TRANSLATE_MM, MAX_TRANSLATE_MM);
@@ -2234,6 +2243,30 @@ Response Controller::handle_duplicate_object(uint64_t id)
     return { 200, r };
 }
 
+// The one place a set of {key: value} overrides is checked, for an object or for a volume, so the
+// guard order cannot drift between them: forbidden_key, unknown_key, the policy gate, strict deserialize.
+// Fills `cfg` (a copy of the target's existing overrides), `applied` and `errors`; the caller applies
+// cfg only when `errors` is empty (atomic).
+static void validate_overrides(const nlohmann::json &in, DynamicPrintConfig &cfg, nlohmann::json &applied, nlohmann::json &errors)
+{
+    const bool allow_sensitive = sensitive_writes_allowed();
+    for (auto it = in.begin(); it != in.end(); ++it) {
+        const std::string &key = it.key();
+        if (is_forbidden_write_key(key)) { errors[key] = "forbidden_key"; continue; }
+        if (print_config_def.get(key) == nullptr) { errors[key] = "unknown_key"; continue; }
+        // Same policy as PUT /config; a per-object or per-volume override of these is never a
+        // slicing need, so there is no write-back exemption here.
+        if (!allow_sensitive && is_sensitive_config_key(key)) {
+            errors[key] = "blocked_by_remote_api_policy";
+            continue;
+        }
+        try {
+            cfg.set_deserialize_strict(key, json_value_to_config_string(it.value()));
+            applied.push_back(key);
+        } catch (const std::exception &e) { errors[key] = e.what(); }
+    }
+}
+
 Response Controller::handle_put_object_config(uint64_t id, const std::string &body)
 {
     nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
@@ -2247,22 +2280,7 @@ Response Controller::handle_put_object_config(uint64_t id, const std::string &bo
         DynamicPrintConfig cfg = mo->config.get(); // copy of existing per-object overrides
         nlohmann::json applied = nlohmann::json::array();
         nlohmann::json errors  = nlohmann::json::object();
-        const bool allow_sensitive = sensitive_writes_allowed();
-        for (auto it = in.begin(); it != in.end(); ++it) {
-            const std::string &key = it.key();
-            if (is_forbidden_write_key(key)) { errors[key] = "forbidden_key"; continue; }
-            if (print_config_def.get(key) == nullptr) { errors[key] = "unknown_key"; continue; }
-            // Same policy as PUT /config; a per-object override of these is never a
-            // slicing need, so there is no write-back exemption here.
-            if (!allow_sensitive && is_sensitive_config_key(key)) {
-                errors[key] = "blocked_by_remote_api_policy";
-                continue;
-            }
-            try {
-                cfg.set_deserialize_strict(key, json_value_to_config_string(it.value()));
-                applied.push_back(key);
-            } catch (const std::exception &e) { errors[key] = e.what(); }
-        }
+        validate_overrides(in, cfg, applied, errors);
         if (!errors.empty()) { // atomic: apply nothing on any error
             api_notify(std::string("Couldn't set object settings on '") + mo->name + "'", true);
             return {{"applied", nlohmann::json::array()}, {"errors", errors}};
@@ -2295,6 +2313,245 @@ Response Controller::handle_put_object_config(uint64_t id, const std::string &bo
     });
     if (r.contains("error")) return { 404, r };
     return { r["errors"].empty() ? 200 : 422, r };
+}
+
+// ---- Part-level (ModelVolume) settings and modifier volumes ----------------------------------
+// Every mutation goes through the calls the window itself uses (Plater::take_snapshot, changed_object,
+// ObjectList::reorder_volumes_and_get_selection / del_subobject_from_object). ObjectList::load_generic_subobject
+// is deliberately NOT called: it ends in a modal tips dialog that would block the UI thread until the API
+// request times out. The delete handler pre-checks so the two modal branches of
+// del_subobject_from_object (last solid part, cut object) cannot be reached.
+
+static const char *volume_type_name(ModelVolumeType t)
+{
+    switch (t) {
+    case ModelVolumeType::MODEL_PART:        return "part";
+    case ModelVolumeType::NEGATIVE_VOLUME:   return "negative";
+    case ModelVolumeType::PARAMETER_MODIFIER:return "modifier";
+    case ModelVolumeType::SUPPORT_BLOCKER:   return "support_blocker";
+    case ModelVolumeType::SUPPORT_ENFORCER:  return "support_enforcer";
+    default:                                 return "unknown";
+    }
+}
+
+static nlohmann::json volume_json(const ModelVolume *mv, size_t index)
+{
+    const DynamicPrintConfig &vcfg = mv->config.get();
+    nlohmann::json cfgj = config_to_json(vcfg, nullptr); // applies print-host read redaction
+    return {{"index", index},
+            {"id", (uint64_t) mv->id().id},
+            {"name", mv->name},
+            {"type", volume_type_name(mv->type())},
+            {"extruder", mv->config.has("extruder") ? mv->config.extruder() : 0},
+            {"config", cfgj}};
+}
+
+// Angle step that keeps a circle of this radius within 0.002 mm of true, in 16 to 720 segments.
+static double api_primitive_angle_step(double radius)
+{
+    const double step = 2. * std::acos(1. - std::min(1., 0.002 / radius));
+    return std::clamp(step, 2. * PI / 720., 2. * PI / 16.);
+}
+
+// "volumes/<n>" or "volumes/<n>/config" -> n; -1 when the index is not a plain non-negative integer.
+static int parse_volume_index(const std::string &s)
+{
+    if (s.empty() || s.size() > 6) return -1;
+    for (char c : s) if (c < '0' || c > '9') return -1;
+    return std::stoi(s);
+}
+
+Response Controller::handle_get_object(uint64_t id)
+{
+    nlohmann::json r = run_on_ui([id]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        int idx = find_object_index(plater->model(), id);
+        if (idx < 0) return {{"error", "unknown_object"}};
+        const ModelObject *mo = plater->model().objects[idx];
+        const DynamicPrintConfig ocfg = mo->config.get();
+        nlohmann::json cfgj = nlohmann::json::object();
+        cfgj = config_to_json(ocfg, nullptr); // applies print-host read redaction
+        nlohmann::json vols = nlohmann::json::array();
+        for (size_t i = 0; i < mo->volumes.size(); ++i) vols.push_back(volume_json(mo->volumes[i], i));
+        return {{"id", id}, {"index", idx}, {"name", mo->name}, {"config", cfgj}, {"volumes", vols}};
+    });
+    if (r.contains("error")) return { 404, r };
+    return { 200, r };
+}
+
+Response Controller::handle_put_volume_config(uint64_t id, int vol, const std::string &body)
+{
+    nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
+    if (!in.is_object())
+        return { 400, {{"error", "body_must_be_object"}} };
+    nlohmann::json r = run_on_ui([id, vol, in]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        int idx = find_object_index(plater->model(), id);
+        if (idx < 0) return {{"error", "unknown_object"}};
+        ModelObject *mo = plater->model().objects[idx];
+        if (vol < 0 || (size_t) vol >= mo->volumes.size())
+            return {{"error", "unknown_volume"}, {"volumes", mo->volumes.size()}};
+        ModelVolume *mv = mo->volumes[vol];
+        DynamicPrintConfig cfg = mv->config.get(); // copy of the volume's existing overrides
+        nlohmann::json applied = nlohmann::json::array();
+        nlohmann::json errors  = nlohmann::json::object();
+        validate_overrides(in, cfg, applied, errors);
+        if (!errors.empty()) { // atomic: apply nothing on any error
+            api_notify(std::string("Couldn't set part settings on '") + mv->name + "'", true);
+            return {{"applied", nlohmann::json::array()}, {"errors", errors}};
+        }
+        plater->take_snapshot("Remote API: part settings");
+        mv->config.assign_config(std::move(cfg));
+        plater->changed_object(idx);
+        ObjectList *obj_list = wxGetApp().obj_list();
+        ObjectDataViewModel *om = obj_list == nullptr ? nullptr : obj_list->GetModel();
+        // With a single volume the list shows no volume row (its settings are the object's), so there is nothing to refresh.
+        if (om != nullptr && mo->volumes.size() > 1) {
+            wxDataViewItem item = om->GetItemByVolumeId(idx, vol);
+            if (item.IsOk()) {
+                obj_list->add_settings_item(item, &mv->config.get());
+                if (in.contains("extruder") && mv->config.has("extruder")) {
+                    const int ext = mv->config.extruder();
+                    om->SetExtruder(ext == 0 ? _L("default") : wxString::Format("%d", ext), item);
+                    obj_list->Refresh();
+                }
+            }
+        }
+        if (!applied.empty())
+            api_notify("Updated " + std::to_string(applied.size()) + " setting(s) on '" + mv->name + "'");
+        return {{"applied", applied}, {"errors", errors}, {"object", mo->name}, {"volume", volume_json(mv, vol)}};
+    });
+    if (r.contains("error")) return { r["error"] == "unknown_object" || r["error"] == "unknown_volume" ? 404 : 422, r };
+    return { r["errors"].empty() ? 200 : 422, r };
+}
+
+// POST /objects/{id}/modifiers  body {"shape":"box"|"cylinder","size":[...],"offset":[x,y,z],"type":...,"config":{...}}
+Response Controller::handle_add_modifier(uint64_t id, const std::string &body)
+{
+    nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
+    if (!in.is_object())
+        return { 400, {{"error", "body_must_be_object"}} };
+    auto bad = [](const std::string &detail) -> Response { return { 400, {{"error", "bad_modifier"}, {"detail", detail}} }; };
+
+    // value() throws type_error on a non-string, so test the type before reading it.
+    if (!in.contains("shape") || !in["shape"].is_string())
+        return bad("shape must be \"box\" or \"cylinder\"");
+    const std::string shape = in["shape"].get<std::string>();
+    if (shape != "box" && shape != "cylinder")
+        return bad("shape must be \"box\" or \"cylinder\"");
+    const size_t want = shape == "box" ? 3 : 2;
+    if (!in.contains("size") || !in["size"].is_array() || in["size"].size() != want)
+        return bad(shape == "box" ? "size must be [x, y, z] in mm" : "size must be [diameter, height] in mm");
+    double size[3] = {0, 0, 0};
+    for (size_t i = 0; i < want; ++i) {
+        const auto &n = in["size"][i];
+        if (!n.is_number()) return bad("size values must be numbers");
+        size[i] = n.get<double>();
+        if (!std::isfinite(size[i]) || size[i] < MIN_PRIMITIVE_MM || size[i] > MAX_PRIMITIVE_MM)
+            return bad("size values must be between " + std::to_string(MIN_PRIMITIVE_MM) + " and " + std::to_string(MAX_PRIMITIVE_MM) + " mm");
+    }
+    std::string vec_error;
+    bool has_offset = false;
+    const Vec3d offset = read_vec3(in, "offset", has_offset, -MAX_TRANSLATE_MM, MAX_TRANSLATE_MM, vec_error);
+    if (!vec_error.empty()) return bad(vec_error);
+    ModelVolumeType vtype = ModelVolumeType::PARAMETER_MODIFIER;
+    if (in.contains("type")) {
+        const std::string t = in["type"].is_string() ? in["type"].get<std::string>() : std::string();
+        if (t == "modifier") vtype = ModelVolumeType::PARAMETER_MODIFIER;
+        else if (t == "support_blocker") vtype = ModelVolumeType::SUPPORT_BLOCKER;
+        else if (t == "support_enforcer") vtype = ModelVolumeType::SUPPORT_ENFORCER;
+        else return bad("type must be modifier, support_blocker or support_enforcer");
+    }
+    if (in.contains("config") && !in["config"].is_object())
+        return bad("config must be an object");
+    const nlohmann::json cfg_in = in.contains("config") ? in["config"] : nlohmann::json::object();
+
+    nlohmann::json r = run_on_ui([id, shape, size, offset, vtype, cfg_in]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        int idx = find_object_index(plater->model(), id);
+        if (idx < 0) return {{"error", "unknown_object"}};
+        ModelObject *mo = plater->model().objects[idx];
+        if (mo->instances.empty()) return {{"error", "no_instance"}};
+        // Validate the initial config first: on any error nothing is added.
+        DynamicPrintConfig init;
+        nlohmann::json applied = nlohmann::json::array();
+        nlohmann::json errors  = nlohmann::json::object();
+        validate_overrides(cfg_in, init, applied, errors);
+        if (!errors.empty()) {
+            api_notify(std::string("Couldn't add a modifier to '") + mo->name + "'", true);
+            return {{"applied", nlohmann::json::array()}, {"errors", errors}};
+        }
+        const ModelInstance *inst = mo->instances.front();
+        const BoundingBoxf3 bb = mo->instance_bounding_box(*inst, false);
+        if (!bb.defined) return {{"error", "no_geometry"}};
+
+        plater->take_snapshot("Remote API: add modifier");
+        TriangleMesh mesh = shape == "box"
+            ? TriangleMesh(its_make_cube(size[0], size[1], size[2]))
+            : TriangleMesh(its_make_cylinder(0.5 * size[0], size[1], api_primitive_angle_step(0.5 * size[0])));
+        // The mesh is centred on load. As the window does, undo the instance's rotation/scale so the
+        // primitive stays axis-aligned in the world, and place its centre at the object's bbox centre + offset.
+        ModelVolume *nv = mo->add_volume(std::move(mesh), vtype);
+        const Transform3d inv = inst->get_matrix_no_offset().inverse();
+        nv->set_transformation(inv);
+        nv->set_offset(inv * (bb.center() + offset - inst->get_offset()));
+        Slic3r::save_object_mesh(*mo);
+        nv->name = shape == "box" ? "API-Box" : "API-Cylinder";
+        if (!init.has("extruder")) init.set_key_value("extruder", new ConfigOptionInt(0));
+        nv->config.assign_config(std::move(init));
+        nv->source.is_from_builtin_objects = true;
+
+        // Sorts the volumes (so indices change) and rebuilds the list rows. The returned selection items are
+        // ignored on purpose: an API call must not steal the user's selection. No switch_to_object, no tips dialog.
+        ObjectList *obj_list = wxGetApp().obj_list();
+        if (obj_list != nullptr) {
+            obj_list->reorder_volumes_and_get_selection(idx, [nv](const ModelVolume *v) { return v == nv; });
+            obj_list->notify_instance_updated(idx);
+        }
+        size_t at = 0;
+        for (size_t i = 0; i < mo->volumes.size(); ++i) if (mo->volumes[i] == nv) at = i;
+        api_notify("Added a " + shape + " modifier to '" + mo->name + "'");
+        return {{"added", true}, {"volume", volume_json(nv, at)}, {"volumes", mo->volumes.size()}};
+    });
+    if (r.contains("error")) return { r["error"] == "unknown_object" ? 404 : 422, r };
+    if (r.contains("errors")) return { 422, r };
+    return { 200, r };
+}
+
+// DELETE /objects/{id}/volumes/{v}. Only non-part volumes, so the last solid part cannot go.
+Response Controller::handle_delete_volume(uint64_t id, int vol)
+{
+    nlohmann::json r = run_on_ui([id, vol]() -> nlohmann::json {
+        Plater *plater = wxGetApp().plater();
+        int idx = find_object_index(plater->model(), id);
+        if (idx < 0) return {{"error", "unknown_object"}};
+        ModelObject *mo = plater->model().objects[idx];
+        if (vol < 0 || (size_t) vol >= mo->volumes.size())
+            return {{"error", "unknown_volume"}, {"volumes", mo->volumes.size()}};
+        const ModelVolume *mv = mo->volumes[vol];
+        // These checks keep both modal branches of del_subobject_from_object unreachable.
+        if (mv->type() == ModelVolumeType::MODEL_PART)
+            return {{"error", "cannot_delete_part"}, {"detail", "only modifiers, support blockers/enforcers and negative volumes can be deleted"}};
+        if (mo->is_cut() && mv->type() == ModelVolumeType::NEGATIVE_VOLUME)
+            return {{"error", "cut_object"}};
+        ObjectList *obj_list = wxGetApp().obj_list();
+        if (obj_list == nullptr) return {{"error", "no_object_list"}};
+        ObjectDataViewModel *om = obj_list->GetModel();
+        wxDataViewItem item = om->GetItemByVolumeId(idx, vol);
+        const std::string vname = mv->name;
+        if (!obj_list->del_subobject_from_object(idx, vol, itVolume))
+            return {{"error", "delete_failed"}};
+        // The list row goes the way ObjectList::del_subobject_item removes it, without touching the selection.
+        if (item.IsOk() && (om->GetItemType(item) & itVolume)) om->Delete(item);
+        obj_list->update_info_items(idx);
+        api_notify("Deleted '" + vname + "' from '" + mo->name + "'");
+        return {{"deleted", true}, {"volumes", mo->volumes.size()}};
+    });
+    if (r.contains("error")) {
+        const std::string e = r["error"].get<std::string>();
+        return { (e == "unknown_object" || e == "unknown_volume") ? 404 : 422, r };
+    }
+    return { 200, r };
 }
 
 // POST /arrange  body (optional) {"spacing": <mm, 0..100>, "rotate": <bool>}
@@ -2727,6 +2984,25 @@ Response Controller::dispatch(const Request &req)
                 uint64_t oid = 0;
                 try { oid = std::stoull(id_str); }
                 catch (...) { return { 400, {{"error", "bad_object_id"}} }; }
+                if (req.method == "GET" && action.empty())
+                    return handle_get_object(oid);
+                if (req.method == "POST" && action == "modifiers") {
+                    try { return handle_add_modifier(oid, req.body); }
+                    catch (const nlohmann::json::parse_error &) { return { 400, {{"error", "invalid_json"}} }; }
+                }
+                if (action.compare(0, 8, "volumes/") == 0 && (req.method == "PUT" || req.method == "DELETE")) {
+                    // volumes/<n>/config (PUT) or volumes/<n> (DELETE)
+                    std::string tail = action.substr(8);
+                    const bool is_cfg = tail.size() > 7 && tail.compare(tail.size() - 7, 7, "/config") == 0;
+                    if (req.method == "PUT" && is_cfg) tail.resize(tail.size() - 7);
+                    if ((req.method == "PUT") == is_cfg) {
+                        const int v = parse_volume_index(tail);
+                        if (v < 0) return { 400, {{"error", "bad_volume_index"}} };
+                        if (req.method == "DELETE") return handle_delete_volume(oid, v);
+                        try { return handle_put_volume_config(oid, v, req.body); }
+                        catch (const nlohmann::json::parse_error &) { return { 400, {{"error", "invalid_json"}} }; }
+                    }
+                }
                 if (req.method == "DELETE" && action.empty())
                     return handle_delete_object(oid);
                 if (req.method == "POST" && action == "transform") {

@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from orca_ai.agent import forbidden_keys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orca_ai.agent import Agent  # noqa: E402
@@ -87,6 +88,28 @@ class SpecTests(Base):
         t = self.tools["transformObject"]
         self.assertEqual(t.path_params, ("id",)); self.assertIn("translate", t.body_params)
         self.assertEqual(self.tools["putConfig"].body_params, ("settings",))
+
+
+class PartSettingsSpecTests(Base):
+    def test_part_level_tools_exist_with_the_right_flags(self):
+        for name in ("getObject", "putObjectVolumeConfig", "addObjectModifier", "deleteObjectVolume"):
+            self.assertIn(name, self.tools)
+        self.assertTrue(self.tools["deleteObjectVolume"].destructive)
+        for name in ("putObjectVolumeConfig", "addObjectModifier"):
+            self.assertFalse(self.tools[name].destructive, name)
+            self.assertTrue(self.tools[name].mutating, name)
+        self.assertFalse(self.tools["getObject"].mutating)
+        self.assertEqual(self.tools["putObjectVolumeConfig"].path_params, ("id", "v"))
+
+    def test_volume_config_url_has_both_path_parameters(self):
+        self.client.call(self.tools["putObjectVolumeConfig"], {"id": 7, "v": 2, "settings": {"wall_loops": 4}})
+        self.assertEqual(SEEN[0], ("PUT", "/api/v1/objects/7/volumes/2/config", "tok", {"wall_loops": 4}))
+
+    def test_forbidden_keys_are_refused_before_a_volume_or_modifier_write(self):
+        cases = (("putObjectVolumeConfig", {"id": 1, "v": 0, "settings": {"post_process": "x"}}),
+                 ("addObjectModifier", {"id": 1, "shape": "box", "size": [5, 5, 5], "config": {"post_process": "x"}}))
+        for name, args in cases:
+            self.assertEqual(forbidden_keys(self.tools[name], args), ["post_process"], name)
 
 
 class ClientTests(Base):

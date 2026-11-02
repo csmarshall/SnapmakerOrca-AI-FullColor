@@ -33,15 +33,18 @@ def is_forbidden_key(key: str) -> bool:
             or ("gcode" in key and key not in NON_TEXT_GCODE_KEYS))
 
 
-SETTING_WRITE_TOOLS = frozenset({"putConfig", "putObjectConfig"})
+SETTING_WRITE_TOOLS = frozenset({"putConfig", "putObjectConfig", "putObjectVolumeConfig"})
+# Tools whose settings travel in a differently named argument.
+SETTING_ARG = {"addObjectModifier": "config"}
 
 
 def forbidden_keys(tool: Tool, args: dict) -> list[str]:
-    if tool.name not in SETTING_WRITE_TOOLS:
+    if tool.name not in SETTING_WRITE_TOOLS and tool.name not in SETTING_ARG:
         return []
-    settings = args.get("settings") or {}
+    arg = SETTING_ARG.get(tool.name, "settings")
+    settings = args.get(arg) or {}
     if not isinstance(settings, dict):
-        return ["settings (must be an object of key: value)"]
+        return [f"{arg} (must be an object of key: value)"]
     return sorted(str(k) for k in settings if not isinstance(k, str) or is_forbidden_key(k))
 
 
