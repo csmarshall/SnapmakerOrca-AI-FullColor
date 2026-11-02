@@ -547,6 +547,57 @@ class AdvisoryTests(unittest.TestCase):
         self.assertAlmostEqual(r["data"]["maxVonMises"], 6.0, delta=0.6)
 
 
+class LiveApiCheckTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import live_api_check
+        cls.live = live_api_check
+
+    def test_selftest_passes_both_fakes(self):
+        self.assertEqual(self.live.selftest(), 0)
+
+    def test_selftest_fails_when_a_guard_check_cannot_fail(self):
+        # A checker whose guard check always passes would make the accept-everything run pass too many checks.
+        real = self.live.run_checks
+        def lenient(api):
+            return [(n, True, d) for n, _, d in real(api)]
+        with mock.patch.object(self.live, "run_checks", lenient), mock.patch("builtins.print"):
+            self.assertEqual(self.live.selftest(), 1)
+
+    def test_unexpected_response_shape_exits_2_not_1(self):
+        class Odd(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"app": "x", "presets": {"filaments": ["F"]}}'   # no "print" entry: run_checks indexes into it
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            do_PUT = do_POST = do_GET
+            def log_message(self, *a): pass
+        server, url = _serve(Odd)
+        try:
+            with mock.patch.dict(os.environ, {"ORCA_API_TOKEN": "t"}), mock.patch("sys.stderr"):
+                self.assertEqual(self.live.main(["--url", url]), 2)
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_a_refused_write_that_was_applied_anyway_is_put_back(self):
+        writes = []
+        class Leaky(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"config": {"post_process": "orig"}}'
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            def do_PUT(self):
+                writes.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                body = b'{"applied": ["post_process"], "errors": {}}'
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            def log_message(self, *a): pass
+        server, url = _serve(Leaky)
+        try:
+            self.live.guarded_write(self.live.Api(url, "t"), {"post_process": "1"})
+        finally:
+            server.shutdown(); server.server_close()
+        self.assertEqual(writes, [{"post_process": "1"}, {"post_process": "orig"}])
+
+
 class ProbeVerdictTests(unittest.TestCase):
     """run_probe.verdict decides the probe's exit code; it is exercised on canned probe output, never an app."""
     @classmethod
