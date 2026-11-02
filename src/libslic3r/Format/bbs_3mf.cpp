@@ -728,6 +728,29 @@ bool bbs_is_valid_object_type(const std::string& type)
 
 namespace Slic3r {
 
+std::vector<std::string> keep_snapmaker_project_printer_gcode(DynamicPrintConfig &config)
+{
+    std::vector<std::string> added;
+    auto *different = config.option<ConfigOptionStrings>("different_settings_to_system");
+    if (different == nullptr || different->values.empty())
+        return added;
+    std::string &printer_column = different->values.back();
+    std::vector<std::string> listed;
+    unescape_strings_cstyle(printer_column, listed);
+    const std::set<std::string> already(listed.begin(), listed.end());
+    for (const std::string &key : Preset::printer_options()) {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        if (def == nullptr || def->type != coString || key.find("gcode") == std::string::npos)
+            continue;
+        if (!config.has(key) || already.count(key) != 0)
+            continue;
+        added.push_back(key);
+    }
+    for (const std::string &key : added)
+        printer_column += (printer_column.empty() ? "" : ";") + key;
+    return added;
+}
+
 bool is_published_3mf_flag(const std::string &value)
 {
     return value == "1";
@@ -1546,6 +1569,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             m_backup_path = model.get_backup_path();
         }
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, project, plate_id);
+        if (result && m_is_snapmaker_orca) {
+            const std::vector<std::string> kept = keep_snapmaker_project_printer_gcode(config);
+            if (!kept.empty())
+                BOOST_LOG_TRIVIAL(info) << "Snapmaker_Orca project: keeping its own printer G-code for " << kept.size() << " key(s)";
+        }
         if (is_bbl_3mf) {
             *is_bbl_3mf = m_is_bbl_3mf;
         }

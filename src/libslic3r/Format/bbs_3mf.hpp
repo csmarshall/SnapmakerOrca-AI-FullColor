@@ -173,6 +173,16 @@ inline constexpr const char *ORCA_PUBLISHED_CONFIG_TAG   = "orca_published_confi
 // exact value, so a "0"/"false"/unknown value is rejected consistently.
 bool is_published_3mf_flag(const std::string &value);
 
+// Snapmaker Orca keeps a project's own printer G-code (start, end, tool change...) when it opens
+// the project; Orca keeps only the keys the project lists in different_settings_to_system and
+// takes the rest from the current system preset, so a Snapmaker project silently picked up the
+// stack's own templates. For a Snapmaker_Orca project, add every printer G-code template the
+// file carries to the printer column (the last entry) of that list. Only string keys whose name
+// contains "gcode" are added: per-extruder vectors have a different layout in this build and must
+// keep going through the normal merge. No-op when the list is absent (callers then keep every
+// project value already). Returns the keys it added.
+std::vector<std::string> keep_snapmaker_project_printer_gcode(DynamicPrintConfig &config);
+
 enum {
     brim_points_format_version = 0
 };
