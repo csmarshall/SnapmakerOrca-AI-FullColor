@@ -591,9 +591,19 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/PresetRef" }
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/PresetRef" }
+                - type: object
+                  properties:
+                    discard:
+                      type: boolean
+                      default: false
+                      description: Drop unsaved edits in EVERY settings group (not just the named type) before selecting. Without it, unsaved edits make the call fail with 409 unsaved_changes naming the dirty groups.
       responses:
         "200": { $ref: "#/components/responses/Json" }
+        "400": { description: "bad_discard (discard is not a boolean) or another bad field" }
+        "409": { description: "unsaved_changes; the body's dirty array names the modified groups" }
     delete:
       summary: Delete a user preset
       operationId: deletePreset
@@ -606,6 +616,26 @@ paths:
             schema: { $ref: "#/components/schemas/PresetRef" }
       responses:
         "200": { $ref: "#/components/responses/Json" }
+  /preset/discard:
+    post:
+      summary: Drop a collection's unsaved edits
+      description: Reverts the collection to its saved preset through the tab's own "back to saved values" path (no dialog) and refreshes the tab and sidebar. Responds {type, preset, discarded, dropped_keys}; discarded is false and dropped_keys empty when nothing was modified. Printer discards can change the number of filament slots, as in the GUI.
+      operationId: discardPreset
+      x-mutating: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string, enum: [print, filament, printer] }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+        "400": { description: "missing_fields, unknown_type or invalid_json" }
+        "409": { description: "filament_editor_open: the sidebar filament editor is open, close it first" }
+        "500": { description: "tab_unavailable or discard_failed" }
   /preset/save:
     post:
       summary: Save the current edits as a user preset
@@ -622,8 +652,10 @@ paths:
                 - type: object
                   properties:
                     detach: { type: boolean, default: false }
+      description: For type=filament the 200 body also carries previous_preset (the edited preset's name before the save), repointed_slots (0-based slots whose preset changed) and slots_using_saved_preset (every slot on the saved name afterwards). A save-as moves exactly the slots that used the old name to the new one; saving under the same name moves none. Saving over a different existing user preset changes the settings of any slot already using that name.
       responses:
         "200": { $ref: "#/components/responses/Json" }
+        "500": { description: "slot_repoint_unexpected: a slot moved to a name other than the saved one; the body lists the slots" }
   /preset/config:
     post:
       summary: Read the full config of a named preset
