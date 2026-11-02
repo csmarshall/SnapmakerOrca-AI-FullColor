@@ -130,6 +130,10 @@ def _volumes(api: Api, oid) -> list[dict]:
     return vols if isinstance(vols, list) else []
 
 
+def _is_host_key(k: str) -> bool:
+    return k.startswith(("print_host", "printhost_")) or k in ("bbl_use_printhost", "host_type")
+
+
 def _object_checks(api: Api, check) -> None:
     """Part-level settings and modifier volumes. Needs one object on the plate; every write restores in `finally`."""
     status, r = api.j("GET", "/objects")
@@ -173,6 +177,16 @@ def _object_checks(api: Api, check) -> None:
             for v in _volumes(api, oid):
                 if v.get("id") == (r.get("volume") or {}).get("id"):
                     api.j("DELETE", f"{base}/{v.get('index')}")
+    for label, shape in (("number", 5), ("null", None), ("list", []), ("object", {})):
+        status, r = api.j("POST", f"/objects/{oid}/modifiers", {"shape": shape, "size": [1, 1, 1]})
+        check(f"modifier with a {label} shape is 400 bad_modifier", status == 400 and r.get("error") == "bad_modifier", f"HTTP {status} {json.dumps(r)[:120]}")
+        if status == 200:
+            for v in _volumes(api, oid)[len(before):]:
+                api.j("DELETE", f"{base}/{v.get('index')}")
+    status, r = api.j("GET", f"/objects/{oid}")
+    held = [r.get("config") or {}] + [(v.get("config") or {}) for v in (r.get("volumes") or [])] if status == 200 and isinstance(r, dict) else [{}]
+    leaked = sorted({k for c in held for k, v in c.items() if _is_host_key(k) and v != "<redacted>"})
+    check("object and volume reads redact print-host keys", status == 200 and not leaked, f"HTTP {status} unredacted {leaked[:4]}")
     status, r = api.j("POST", f"/objects/{oid}/modifiers", {"shape": "box", "size": [5, 5, 5], "config": {"post_process": "x"}})
     after = _volumes(api, oid)
     check("modifier with a forbidden initial key refused and nothing added", status == 422 and len(after) == len(before),
@@ -326,6 +340,7 @@ _STATUS = {"app": "fake", "presets": {"printer": "P", "print": "Q", "filaments":
 
 class _Fake(BaseHTTPRequestHandler):
     """Shared plumbing for the fake slicers."""
+    HOST_VALUE = "<redacted>"
     def _send(self, status: int, body: dict):
         data = json.dumps(body).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(data)))
@@ -344,7 +359,7 @@ class _Fake(BaseHTTPRequestHandler):
         if self.path.startswith("/api/v1/objects"):
             if self.path.rstrip("/").endswith("/objects"):
                 return self._send(200, {"objects": [{"id": 7, "name": "cube"}], "count": 1})
-            return self._send(200, {"id": 7, "volumes": self._vols()})
+            return self._send(200, {"id": 7, "config": {"print_host": self.HOST_VALUE}, "volumes": self._vols()})
         if self.path.startswith("/api/v1/config"):
             keys = (self.path.split("keys=", 1) + [""])[1].split(",")
             return self._send(200, {"config": {k: _CONFIG[k] for k in keys if k in _CONFIG}})
@@ -356,6 +371,7 @@ class _Fake(BaseHTTPRequestHandler):
 
 class _AcceptEverything(_Fake):
     """A broken 'slicer' that applies every write and accepts every token: the guard checks must fail against it."""
+    HOST_VALUE = "http://u:p@h"
     def do_GET(self):
         if self._get_common() is None:
             self._send(200, {"printer": [], "filament": [], "print": []})
@@ -433,6 +449,8 @@ class _RefuseEverything(_Fake):
         body = self._body()
         if self.path.endswith("/modifiers"):
             size = body.get("size", [])
+            if not isinstance(body.get("shape"), str):
+                return self._deny(400, "bad_modifier")
             if not size or any(not 0.1 <= n <= 1000 for n in size):
                 return self._deny(400, "bad_modifier")
             return self._deny(422 if "post_process" in body.get("config", {}) else 403, "refused")

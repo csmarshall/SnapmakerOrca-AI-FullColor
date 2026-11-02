@@ -2023,7 +2023,7 @@ Response Controller::handle_get_objects()
             {
                 const DynamicPrintConfig ocfg = mo->config.get();
                 nlohmann::json cfgj = nlohmann::json::object();
-                for (const std::string &k : ocfg.keys()) cfgj[k] = ocfg.opt_serialize(k);
+                cfgj = config_to_json(ocfg, nullptr); // applies print-host read redaction
                 o["config"] = cfgj;
                 o["custom_layer_profile"] = !mo->layer_height_profile.empty();
                 nlohmann::json rngs = nlohmann::json::array();
@@ -2259,8 +2259,7 @@ static const char *volume_type_name(ModelVolumeType t)
 static nlohmann::json volume_json(const ModelVolume *mv, size_t index)
 {
     const DynamicPrintConfig &vcfg = mv->config.get();
-    nlohmann::json cfgj = nlohmann::json::object();
-    for (const std::string &k : vcfg.keys()) cfgj[k] = vcfg.opt_serialize(k);
+    nlohmann::json cfgj = config_to_json(vcfg, nullptr); // applies print-host read redaction
     return {{"index", index},
             {"id", (uint64_t) mv->id().id},
             {"name", mv->name},
@@ -2293,7 +2292,7 @@ Response Controller::handle_get_object(uint64_t id)
         const ModelObject *mo = plater->model().objects[idx];
         const DynamicPrintConfig ocfg = mo->config.get();
         nlohmann::json cfgj = nlohmann::json::object();
-        for (const std::string &k : ocfg.keys()) cfgj[k] = ocfg.opt_serialize(k);
+        cfgj = config_to_json(ocfg, nullptr); // applies print-host read redaction
         nlohmann::json vols = nlohmann::json::array();
         for (size_t i = 0; i < mo->volumes.size(); ++i) vols.push_back(volume_json(mo->volumes[i], i));
         return {{"id", id}, {"index", idx}, {"name", mo->name}, {"config", cfgj}, {"volumes", vols}};
@@ -2356,8 +2355,11 @@ Response Controller::handle_add_modifier(uint64_t id, const std::string &body)
         return { 400, {{"error", "body_must_be_object"}} };
     auto bad = [](const std::string &detail) -> Response { return { 400, {{"error", "bad_modifier"}, {"detail", detail}} }; };
 
-    const std::string shape = in.value("shape", std::string());
-    if (!in.contains("shape") || !in["shape"].is_string() || (shape != "box" && shape != "cylinder"))
+    // value() throws type_error on a non-string, so test the type before reading it.
+    if (!in.contains("shape") || !in["shape"].is_string())
+        return bad("shape must be \"box\" or \"cylinder\"");
+    const std::string shape = in["shape"].get<std::string>();
+    if (shape != "box" && shape != "cylinder")
         return bad("shape must be \"box\" or \"cylinder\"");
     const size_t want = shape == "box" ? 3 : 2;
     if (!in.contains("size") || !in["size"].is_array() || in["size"].size() != want)
