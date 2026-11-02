@@ -61,6 +61,7 @@ private:
     Response handle_load_model(const std::string &body);   // M4a: POST /model
     Response handle_select_preset(const std::string &body); // M4a: PUT /preset
     Response handle_save_preset(const std::string &body);   // POST /preset/save
+    Response handle_discard_preset(const std::string &body); // POST /preset/discard
     Response handle_get_presets(const std::string &target); // GET /presets[?type=&visible=1]
     Response handle_get_preset_config(const std::string &body); // POST /preset/config (read named preset)
     Response handle_delete_preset(const std::string &body);      // DELETE /preset
