@@ -14478,6 +14478,29 @@ bool is_XL_printer(const PrintConfig &cfg)
 {
     return is_XL_printer(cfg.printer_notes.value);
 }
+
+bool is_automation_write_blocked_key(const std::string &opt_key)
+{
+    // bed_custom_* hold file paths the app opens; filename_format names the file export writes;
+    // printer_model moves the app onto another printer's code paths.
+    static const std::set<std::string> exact = { "post_process", "printer_model", "filename_format",
+                                                 "gcode_substitutions", "bed_custom_texture", "bed_custom_model",
+                                                 "bbl_use_printhost", "host_type" };
+    if (exact.count(opt_key) != 0)
+        return true;
+    // Every print-host key by prefix, so one added later is covered too.
+    if (boost::starts_with(opt_key, "print_host") || boost::starts_with(opt_key, "printhost_"))
+        return true;
+    const ConfigOptionDef *def = print_config_def.get(opt_key);
+    // Anything the config itself flags as code, whatever it is named.
+    if (def != nullptr && def->is_code)
+        return true;
+    // A *_gcode template is text; a *_gcode switch (emit_machine_limits_to_gcode) is not code.
+    // An unknown key keeps the suffix rule, so a template this build does not know is still refused.
+    if (!boost::ends_with(opt_key, "_gcode") || opt_key == "_gcode")
+        return false;
+    return def == nullptr || def->type == coString || def->type == coStrings;
+}
 } // namespace Slic3r
 
 #include <cereal/types/polymorphic.hpp>

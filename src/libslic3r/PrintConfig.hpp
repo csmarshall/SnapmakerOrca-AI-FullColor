@@ -2545,6 +2545,14 @@ private:
 bool is_XL_printer(const DynamicPrintConfig &cfg);
 bool is_XL_printer(const PrintConfig &cfg);
 
+// True for a setting that automation (a plugin, a remote API client) must never change, because
+// changing it amounts to running code or redirecting output rather than tuning a print:
+// post_process runs host commands after export, the custom G-code templates (every option
+// flagged is_code, plus any text-valued *_gcode key) are sent to the printer, the print-host
+// keys decide where a job goes and with which credentials, and a few keys name files the app
+// opens or writes. A person editing the setting in the GUI is not affected.
+bool is_automation_write_blocked_key(const std::string &opt_key);
+
 Polygon get_shared_poly(const std::vector<Pointfs>& extruder_polys);
 Points get_bed_shape(const DynamicPrintConfig &cfg, bool use_share = true);
 Points get_bed_shape(const PrintConfig &cfg, bool use_share = false);
