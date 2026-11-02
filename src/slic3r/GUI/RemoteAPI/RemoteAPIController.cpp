@@ -2063,28 +2063,37 @@ Response Controller::handle_delete_object(uint64_t id)
     return { 200, r };
 }
 
+// Limits shared by the transform and modifier handlers.
+static constexpr double MAX_TRANSLATE_MM = 10000.0, MAX_ROTATE_DEG = 3600.0;
+static constexpr double MIN_SCALE = 1e-4, MAX_SCALE = 1000.0;
+static constexpr double MIN_PRIMITIVE_MM = 0.1, MAX_PRIMITIVE_MM = 1000.0;
+
+// Reads in[k] as three finite numbers within [lo, hi]. Sets `present`; on a bad value sets `err`.
+static Vec3d read_vec3(const nlohmann::json &in, const char *k, bool &present, double lo, double hi, std::string &err)
+{
+    present = in.contains(k);
+    if (!present) return Vec3d(0, 0, 0);
+    const auto &a = in[k];
+    if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) {
+        err = std::string(k) + " must be an array of three numbers";
+        return Vec3d(0, 0, 0);
+    }
+    Vec3d v(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(v[i]) || v[i] < lo || v[i] > hi)
+            err = std::string(k) + " values must be between " + std::to_string(lo) + " and " + std::to_string(hi);
+    return v;
+}
+
 Response Controller::handle_transform_object(uint64_t id, const std::string &body)
 {
     nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
     if (!in.is_object()) return { 400, {{"error", "body_must_be_object"}} };
     // Each vector must be three finite numbers in a sane range: a zero scale makes a degenerate
     // instance, and a huge offset overflows the scaled integer coordinates at slice time.
-    static constexpr double MAX_TRANSLATE_MM = 10000.0, MAX_ROTATE_DEG = 3600.0;
-    static constexpr double MIN_SCALE = 1e-4, MAX_SCALE = 1000.0;
     std::string vec_error;
     auto read_vec = [&in, &vec_error](const char *k, bool &present, double lo, double hi) -> Vec3d {
-        present = in.contains(k);
-        if (!present) return Vec3d(0, 0, 0);
-        const auto &a = in[k];
-        if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) {
-            vec_error = std::string(k) + " must be an array of three numbers";
-            return Vec3d(0, 0, 0);
-        }
-        Vec3d v(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
-        for (int i = 0; i < 3; ++i)
-            if (!std::isfinite(v[i]) || v[i] < lo || v[i] > hi)
-                vec_error = std::string(k) + " values must be between " + std::to_string(lo) + " and " + std::to_string(hi);
-        return v;
+        return read_vec3(in, k, present, lo, hi, vec_error);
     };
     bool has_t = false, has_r = false, has_s = false;
     Vec3d tr = read_vec("translate", has_t, -MAX_TRANSLATE_MM, MAX_TRANSLATE_MM);
@@ -2156,6 +2165,30 @@ Response Controller::handle_duplicate_object(uint64_t id)
     return { 200, r };
 }
 
+// The one place a set of {key: value} overrides is checked, for an object or for a volume, so the
+// guard order cannot drift between them: forbidden_key, unknown_key, the policy gate, strict deserialize.
+// Fills `cfg` (a copy of the target's existing overrides), `applied` and `errors`; the caller applies
+// cfg only when `errors` is empty (atomic).
+static void validate_overrides(const nlohmann::json &in, DynamicPrintConfig &cfg, nlohmann::json &applied, nlohmann::json &errors)
+{
+    const bool allow_sensitive = sensitive_writes_allowed();
+    for (auto it = in.begin(); it != in.end(); ++it) {
+        const std::string &key = it.key();
+        if (is_forbidden_write_key(key)) { errors[key] = "forbidden_key"; continue; }
+        if (print_config_def.get(key) == nullptr) { errors[key] = "unknown_key"; continue; }
+        // Same policy as PUT /config; a per-object or per-volume override of these is never a
+        // slicing need, so there is no write-back exemption here.
+        if (!allow_sensitive && is_sensitive_config_key(key)) {
+            errors[key] = "blocked_by_remote_api_policy";
+            continue;
+        }
+        try {
+            cfg.set_deserialize_strict(key, json_value_to_config_string(it.value()));
+            applied.push_back(key);
+        } catch (const std::exception &e) { errors[key] = e.what(); }
+    }
+}
+
 Response Controller::handle_put_object_config(uint64_t id, const std::string &body)
 {
     nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
@@ -2169,22 +2202,7 @@ Response Controller::handle_put_object_config(uint64_t id, const std::string &bo
         DynamicPrintConfig cfg = mo->config.get(); // copy of existing per-object overrides
         nlohmann::json applied = nlohmann::json::array();
         nlohmann::json errors  = nlohmann::json::object();
-        const bool allow_sensitive = sensitive_writes_allowed();
-        for (auto it = in.begin(); it != in.end(); ++it) {
-            const std::string &key = it.key();
-            if (is_forbidden_write_key(key)) { errors[key] = "forbidden_key"; continue; }
-            if (print_config_def.get(key) == nullptr) { errors[key] = "unknown_key"; continue; }
-            // Same policy as PUT /config; a per-object override of these is never a
-            // slicing need, so there is no write-back exemption here.
-            if (!allow_sensitive && is_sensitive_config_key(key)) {
-                errors[key] = "blocked_by_remote_api_policy";
-                continue;
-            }
-            try {
-                cfg.set_deserialize_strict(key, json_value_to_config_string(it.value()));
-                applied.push_back(key);
-            } catch (const std::exception &e) { errors[key] = e.what(); }
-        }
+        validate_overrides(in, cfg, applied, errors);
         if (!errors.empty()) { // atomic: apply nothing on any error
             api_notify(std::string("Couldn't set object settings on '") + mo->name + "'", true);
             return {{"applied", nlohmann::json::array()}, {"errors", errors}};
