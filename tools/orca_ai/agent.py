@@ -15,18 +15,22 @@ ConfirmFn = Callable[[Tool, dict], bool]
 # Settings a model must never write: `post_process` runs arbitrary commands on the next slice, and the
 # print-host keys redirect where G-code is sent / expose credentials. Text the model reads (object names,
 # 3MF metadata, G-code comments) is attacker-controllable, so these are blocked in code, not by prompt.
-# Mirrors is_forbidden_write_key() in RemoteAPIController.cpp: print-host keys by prefix,
-# plus keys that run host commands or inject G-code into the job.
+# Mirrors is_automation_write_blocked_key() in libslic3r/PrintConfig.cpp (which the slicer enforces;
+# this is the second check): print-host keys by prefix, keys that run host commands or name files, and
+# every G-code template, i.e. any setting with "gcode" in its name. The slicer tells templates from
+# switches by option type; this side cannot see types, so the known non-text "gcode" settings are listed.
 FORBIDDEN_SETTING_KEYS = frozenset({"post_process", "printer_model", "filename_format",
                                     "bbl_use_printhost", "host_type", "gcode_substitutions",
                                     "bed_custom_texture", "bed_custom_model"})
 FORBIDDEN_KEY_PREFIXES = ("print_host", "printhost_")
-FORBIDDEN_KEY_SUFFIXES = ("_gcode",)
+NON_TEXT_GCODE_KEYS = frozenset({"emit_machine_limits_to_gcode", "export_gcode", "gcode_add_line_number",
+                                 "gcode_comments", "gcode_flavor", "gcode_label_objects", "gcode_skip_config_block",
+                                 "gcodeviewer", "high_precision_gcode", "skip_modified_gcodes"})
 
 
 def is_forbidden_key(key: str) -> bool:
     return (key in FORBIDDEN_SETTING_KEYS or key.startswith(FORBIDDEN_KEY_PREFIXES)
-            or key.endswith(FORBIDDEN_KEY_SUFFIXES))
+            or ("gcode" in key and key not in NON_TEXT_GCODE_KEYS))
 
 
 SETTING_WRITE_TOOLS = frozenset({"putConfig", "putObjectConfig"})
@@ -35,7 +39,10 @@ SETTING_WRITE_TOOLS = frozenset({"putConfig", "putObjectConfig"})
 def forbidden_keys(tool: Tool, args: dict) -> list[str]:
     if tool.name not in SETTING_WRITE_TOOLS:
         return []
-    return sorted(k for k in (args.get("settings") or {}) if is_forbidden_key(k))
+    settings = args.get("settings") or {}
+    if not isinstance(settings, dict):
+        return ["settings (must be an object of key: value)"]
+    return sorted(str(k) for k in settings if not isinstance(k, str) or is_forbidden_key(k))
 
 
 class Agent:

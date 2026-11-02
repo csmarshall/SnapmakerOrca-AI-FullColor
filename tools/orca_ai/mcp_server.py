@@ -41,7 +41,14 @@ def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bo
     for line in sys.stdin:
         if not line.strip():
             continue
-        msg = json.loads(line)
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            reply(None, error={"code": -32700, "message": "parse error"})
+            continue
+        if not isinstance(msg, dict):
+            reply(None, error={"code": -32600, "message": "invalid request"})
+            continue
         method, msg_id = msg.get("method"), msg.get("id")
         if msg_id is None:  # notification (e.g. notifications/initialized): no reply
             continue
@@ -52,15 +59,27 @@ def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bo
             reply(msg_id, {"tools": [{"name": t.name, "description": t.description,
                                       "inputSchema": t.input_schema} for t in tools.values()]})
         elif method == "tools/call":
-            params = msg.get("params", {})
-            tool = tools.get(params.get("name"))
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            tool = tools.get(params.get("name")) if isinstance(params.get("name"), str) else None
             if tool is None:
                 reply(msg_id, error={"code": -32602, "message": f"unknown tool {params.get('name')!r}"})
                 continue
             arguments = params.get("arguments") or {}
-            blocked = forbidden_keys(tool, arguments)
-            result = (ToolResult(f"Refused: {', '.join(blocked)} cannot be changed by the assistant.", is_error=True)
-                      if blocked else client.call(tool, arguments))
+            if not isinstance(arguments, dict):
+                reply(msg_id, error={"code": -32602, "message": "arguments must be an object"})
+                continue
+            missing = [k for k in tool.input_schema.get("required", []) if k not in arguments]
+            # One malformed call must not end the stdio loop: every later call would fail until restart.
+            try:
+                blocked = forbidden_keys(tool, arguments)
+                if missing:
+                    result = ToolResult(f"Missing required argument(s): {', '.join(missing)}", is_error=True)
+                elif blocked:
+                    result = ToolResult(f"Refused: {', '.join(blocked)} cannot be changed by the assistant.", is_error=True)
+                else:
+                    result = client.call(tool, arguments)
+            except Exception as exc:
+                result = ToolResult(f"{tool.name} failed: {type(exc).__name__}: {exc}", is_error=True)
             content: list[dict] = [{"type": "text", "text": result.text}]
             if result.image_png_b64:
                 content.append({"type": "image", "data": result.image_png_b64, "mimeType": "image/png"})

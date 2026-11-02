@@ -54,15 +54,31 @@ def save_gcode(args: dict[str, Any]) -> ToolResult:
         path = _target(directory, str(args["filename"]))
     except (ValueError, KeyError) as exc:
         return ToolResult(str(exc), is_error=True)
+    token = os.environ.get("ORCA_API_TOKEN")
+    if not token:
+        return ToolResult("No Remote API token: set ORCA_API_TOKEN", is_error=True)
     base = os.environ.get("ORCA_API_URL", "http://127.0.0.1:13130").rstrip("/") + "/api/v1"
-    with requests.get(base + "/gcode", headers={"X-Api-Token": os.environ["ORCA_API_TOKEN"]}, stream=True, timeout=120) as response:
-        if not response.ok:
-            return ToolResult(f"HTTP {response.status_code}: {response.text[:300]} (slice first, then export)", is_error=True)
-        written = 0
-        with open(path, "xb") as out:          # "x": fail rather than overwrite if the name was taken meanwhile
-            for chunk in response.iter_content(CHUNK_BYTES):
-                out.write(chunk)
-                written += len(chunk)
+    # Stream into a hidden .part file and give it the final name only once the whole body arrived, so a
+    # dropped connection or timeout never leaves a truncated .gcode that looks finished.
+    part = path.with_name("." + path.name + ".part")
+    written = 0
+    try:
+        with requests.get(base + "/gcode", headers={"X-Api-Token": token}, stream=True, timeout=120,
+                          allow_redirects=False) as response:
+            if not response.ok:
+                return ToolResult(f"HTTP {response.status_code}: {response.text[:300]} (slice first, then export)", is_error=True)
+            expected = response.headers.get("Content-Length")
+            with open(part, "xb") as out:      # "x": fail rather than overwrite
+                for chunk in response.iter_content(CHUNK_BYTES):
+                    out.write(chunk)
+                    written += len(chunk)
+            if expected is not None and expected.isdigit() and int(expected) != written:
+                return ToolResult(f"Export incomplete: got {written} of {expected} bytes; nothing saved", is_error=True)
+        os.link(part, path)                    # fails rather than overwrite if the name was taken meanwhile
+    except (requests.RequestException, OSError) as exc:
+        return ToolResult(f"Export failed, nothing saved: {type(exc).__name__}: {exc}", is_error=True)
+    finally:
+        part.unlink(missing_ok=True)
     log.info("saved %d bytes of G-code to %s", written, path)
     return ToolResult(f"Saved {written} bytes to {path}")
 

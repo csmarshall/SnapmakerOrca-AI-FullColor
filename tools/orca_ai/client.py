@@ -42,6 +42,9 @@ class RemoteAPIClient:
             except Exception as exc:  # one bad tool must not take down the agent loop or the MCP server
                 return ToolResult(f"{tool.name} failed: {type(exc).__name__}: {exc}", is_error=True)
         path = tool.path
+        missing = [name for name in tool.path_params if name not in args]
+        if missing:
+            return ToolResult(f"Missing required argument(s): {', '.join(missing)}", is_error=True)
         for name in tool.path_params:
             path = path.replace("{" + name + "}", quote(str(args[name]), safe=""))
         params = {k: args[k] for k in tool.query_params if k in args}
@@ -52,8 +55,9 @@ class RemoteAPIClient:
             body = {k: args[k] for k in tool.body_params if k in args}
         log.debug("%s %s params=%s body=%s", tool.method, path, params, body)
         try:
+            # No redirects: requests strips Authorization on a cross-host redirect but not X-Api-Token.
             response = self.session.request(tool.method, self.base + path, params=params,
-                                            json=body, timeout=self.timeout)
+                                            json=body, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as exc:
             return ToolResult(f"Remote API unreachable: {exc}", is_error=True)
         if tool.returns_image and response.ok and response.headers.get("Content-Type", "").startswith("image/"):
@@ -66,5 +70,7 @@ class RemoteAPIClient:
                 detail = json.dumps(response.json())
             except ValueError:
                 detail = text
+            if len(detail) > MAX_TEXT_RESULT_CHARS:
+                detail = detail[:MAX_TEXT_RESULT_CHARS] + f"\n...[truncated, {len(detail)} chars total]"
             return ToolResult(f"HTTP {response.status_code}: {detail}", is_error=True)
         return ToolResult(text)
