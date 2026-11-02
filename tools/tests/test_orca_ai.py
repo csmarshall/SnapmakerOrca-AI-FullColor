@@ -315,6 +315,34 @@ class LoadModelConfinementTests(Base):
         r = p.seen[1][-1].results[0][1]
         self.assertTrue(r.is_error); self.assertIn("--model-dir", r.text); self.assertEqual(SEEN, [])
 
+    def test_no_explicit_dirs_refuses_even_when_cwd_holds_the_file(self):
+        here = os.getcwd()
+        os.chdir(self.models)
+        try:
+            r = self.agent_result(str(self.models / "ok.stl"), None)   # ORCA_AI_MODEL_DIRS unset: cwd must not count
+        finally:
+            os.chdir(here)
+        self.assertTrue(r.is_error); self.assertIn("--model-dir", r.text); self.assertEqual(SEEN, [])
+        env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin",
+               "PYTHONPATH": str(Path(__file__).resolve().parents[1])}   # cwd is the model dir, so find orca_ai this way
+        replies, _ = mcp_lines([rpc(1, "tools/call", {"name": "loadModel", "arguments": {"path": str(self.models / "ok.stl")}})],
+                               "--no-advisory", env=env, cwd=self.models.__str__())
+        self.assertTrue(replies[0]["result"]["isError"]); self.assertEqual(SEEN, [])
+
+    def test_non_model_suffix_inside_an_allowed_dir_is_refused(self):
+        (self.models / "notes.txt").write_text("hi")
+        (self.models / "sneaky.gcode").write_text("G1")
+        (self.models / "UPPER.STL").write_text("solid s\nendsolid s\n")
+        for name in ("notes.txt", "sneaky.gcode"):
+            r = self.agent_result(str(self.models / name), str(self.models))
+            self.assertTrue(r.is_error, name)
+        self.assertEqual(SEEN, [])
+        self.assertFalse(self.agent_result(str(self.models / "UPPER.STL"), str(self.models)).is_error)   # control: case-insensitive
+
+    def test_symlink_inside_an_allowed_dir_pointing_outside_is_refused(self):
+        r = self.agent_result(str(self.models / "link.stl"), str(self.models))
+        self.assertTrue(r.is_error); self.assertIn("outside", r.text); self.assertEqual(SEEN, [])
+
     def test_mcp_path_applies_the_same_confinement(self):
         env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin", "ORCA_AI_MODEL_DIRS": str(self.models)}
         calls = [rpc(i, "tools/call", {"name": "loadModel", "arguments": {"path": path}}) for i, path in

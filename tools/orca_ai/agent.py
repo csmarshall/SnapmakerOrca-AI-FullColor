@@ -56,8 +56,8 @@ def vet_call(tool: Tool, args: dict) -> tuple[dict, ToolResult | None]:
         return args, ToolResult(f"Refused: {', '.join(blocked)} cannot be changed by the assistant "
                                 "(it can run commands or redirect output). Ask the user to change it in the UI.", is_error=True)
     if tool.name == "loadModel":
-        from .advisory import confine_to_model_dirs
-        resolved, reason = confine_to_model_dirs(args.get("path"))
+        from .advisory import LOAD_SUFFIXES, confine_to_model_dirs
+        resolved, reason = confine_to_model_dirs(args.get("path"), explicit_only=True, suffixes=LOAD_SUFFIXES)
         if resolved is None:
             return args, ToolResult(f"Refused: {reason}", is_error=True)
         return {**args, "path": str(resolved)}, None

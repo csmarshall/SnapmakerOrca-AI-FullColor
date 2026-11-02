@@ -42,13 +42,23 @@ def allowed_dirs() -> list[Path]:
     return [] if cwd in (Path(cwd.anchor), Path.home().resolve()) else [cwd]
 
 
-def confine_to_model_dirs(path: Any) -> tuple[Path | None, str | None]:
+LOAD_SUFFIXES = frozenset({".stl", ".3mf", ".obj", ".step", ".stp", ".amf"})
+
+
+def explicit_model_dirs() -> list[Path]:
+    """Directories named by --model-dir / ORCA_AI_MODEL_DIRS only; never the cwd fallback."""
+    raw = os.environ.get("ORCA_AI_MODEL_DIRS")
+    return [Path(d).resolve() for d in raw.split(os.pathsep) if d] if raw else []
+
+
+def confine_to_model_dirs(path: Any, explicit_only: bool = False,
+                          suffixes: frozenset[str] | None = None) -> tuple[Path | None, str | None]:
     """Resolve `path` (symlinks followed) and require it to sit under an allowed model directory.
 
     Returns (resolved path, None) or (None, reason). Shared by the advisory analysers and loadModel, so a
     steered model cannot reach files outside the directories the user named.
     """
-    dirs = allowed_dirs()
+    dirs = explicit_model_dirs() if explicit_only else allowed_dirs()
     if not dirs:
         return None, ("No model directory is configured, so files cannot be loaded: "
                       "start with --model-dir DIR (or set ORCA_AI_MODEL_DIRS).")
@@ -60,6 +70,8 @@ def confine_to_model_dirs(path: Any) -> tuple[Path | None, str | None]:
         return None, f"cannot resolve path: {exc}"
     if not any(resolved == d or d in resolved.parents for d in dirs):
         return None, f"{resolved} is outside the allowed model directories (set --model-dir / ORCA_AI_MODEL_DIRS)"
+    if suffixes is not None and resolved.suffix.lower() not in suffixes:
+        return None, f"{resolved.name}: only {', '.join(sorted(suffixes))} model files can be loaded"
     return resolved, None
 
 
