@@ -236,6 +236,10 @@ const std::string BBS_MODEL_CONFIG_RELS_FILE = "Metadata/_rels/model_settings.co
 const std::string SLICE_INFO_CONFIG_FILE = "Metadata/slice_info.config";
 const std::string FILAMENT_SEQUENCE_FILE = "Metadata/filament_sequence.json";
 const std::string BBS_LAYER_HEIGHTS_PROFILE_FILE = "Metadata/layer_heights_profile.txt";
+// Header line of a layer heights profile file. From format version 2 on, the "object_id=" keys are 3MF
+// object ids (as written by Snapmaker Orca 2.4.x); without the header they are legacy 1 based object indexes.
+const std::string LAYER_HEIGHTS_PROFILE_FORMAT_VERSION_KEY = "layer_heights_profile_format_version";
+const int LAYER_HEIGHTS_PROFILE_FORMAT_VERSION_OBJECT_IDS = 2;
 const std::string ORCA_CAD_RECIPE_FILE = "Metadata/orca_cad.bin";
 // Read-only: the recipe entry's pre-rename name. A reader that knows only the new one drops the
 // feature tree of every project written before the move, without a word. Never written.
@@ -1214,6 +1218,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         std::set<int>   m_items_auto_drop_off; // object ids with a build item auto_drop="0" (2.4.x layout)
         IdToCutObjectInfoMap       m_cut_object_infos;
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
+        // True when the layer heights profile file declares format version >= 2, i.e. its entries are keyed
+        // by 3MF object ids instead of 1 based Model::objects indexes.
+        bool m_layer_heights_profiles_keyed_by_object_id{false};
         IdToLayerConfigRangesMap m_layer_config_ranges;
         IdToBrimPointsMap m_brim_ear_points;
         /*IdToSlaSupportPointsMap m_sla_support_points;
@@ -1510,6 +1517,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_objects_metadata.clear();
         m_items_auto_drop_off.clear();
         m_layer_heights_profiles.clear();
+        m_layer_heights_profiles_keyed_by_object_id = false;
         m_layer_config_ranges.clear();
         m_brim_ear_points.clear();
         //m_sla_support_points.clear();
@@ -2231,8 +2239,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 return false;
             }*/
 
-            // m_layer_heights_profiles are indexed by a 1 based model object index.
-            IdToLayerHeightsProfileMap::iterator obj_layer_heights_profile = m_layer_heights_profiles.find(object.second + 1);
+            // Layer height profiles are keyed either by the 3MF object id (files declaring layer heights
+            // profile format version >= 2) or, for legacy files, by a 1 based model object index. The mode
+            // comes from the file header only: mixing both lookups per object would misbind legacy entries
+            // whenever another object's 3MF id collides with a 1 based index.
+            IdToLayerHeightsProfileMap::iterator obj_layer_heights_profile = m_layer_heights_profiles.find(
+                m_layer_heights_profiles_keyed_by_object_id ? object.first.second : object.second + 1);
             if (obj_layer_heights_profile != m_layer_heights_profiles.end())
                 model_object->layer_height_profile.set(std::move(obj_layer_heights_profile->second));
 
@@ -3007,6 +3019,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             std::vector<std::string> objects;
             boost::split(objects, buffer, boost::is_any_of("\n"), boost::token_compress_off);
+
+            // Newer files start with a format version header line telling how the object_id keys below are
+            // meant; legacy files start with an "object_id=" entry right away.
+            if (!objects.empty() && boost::algorithm::starts_with(objects.front(), LAYER_HEIGHTS_PROFILE_FORMAT_VERSION_KEY + "=")) {
+                std::vector<std::string> header_data;
+                boost::split(header_data, objects.front(), boost::is_any_of("="), boost::token_compress_off);
+                const int format_version = (header_data.size() == 2) ? std::atoi(header_data[1].c_str()) : 0;
+                m_layer_heights_profiles_keyed_by_object_id = (format_version >= LAYER_HEIGHTS_PROFILE_FORMAT_VERSION_OBJECT_IDS);
+                objects.erase(objects.begin());
+            }
 
             for (const std::string& object : objects)             {
                 std::vector<std::string> object_data;
