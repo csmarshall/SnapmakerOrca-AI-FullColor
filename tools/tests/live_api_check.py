@@ -145,7 +145,11 @@ def _transform_guards(api: Api) -> list[tuple[str, bool, str]]:
 def _dirty_print_checks(api: Api, st: dict) -> list[tuple[str, bool, str]]:
     """PUT /preset discard:true drops unsaved edits in EVERY group, so refuse to run while anything is modified."""
     out: list[tuple[str, bool, str]] = []
-    modified = {g: v for g, v in (st.get("modified") or {}).items() if v}
+    # extruder_nozzle_stats#N is the app's own per-extruder count of nozzle types, derived from the printer setup;
+    # the app marks it modified on load, so it is not a person's unsaved work and does not block these checks.
+    modified = {g: [k for k in v if not str(k).startswith("extruder_nozzle_stats")]
+                for g, v in (st.get("modified") or {}).items()}
+    modified = {g: v for g, v in modified.items() if v}
     names = ["PUT /preset refuses to drop unsaved edits (409 unsaved_changes)", "PUT /preset rejects a non-boolean discard (400 bad_discard)",
              "control: PUT /preset discard:true drops the print edit and restores the saved value",
              "POST /preset/discard rejects an unknown type (400 unknown_type)",
