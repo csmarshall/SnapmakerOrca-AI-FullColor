@@ -186,6 +186,7 @@ struct UiTask : std::enable_shared_from_this<UiTask>
     void run(); // defined after the gate statics below
 };
 
+std::atomic<bool> s_ui_stopping { false };
 int  s_api_ui_task_depth  = 0;
 bool s_backup_in_progress = false;
 std::deque<std::shared_ptr<UiTask>> s_deferred_ui_tasks;
@@ -235,12 +236,24 @@ nlohmann::json Controller::run_on_ui(std::function<nlohmann::json()> fn, int tim
     task->fn        = std::move(fn);
     auto future     = task->promise->get_future();
     task->schedule();
-    if (future.wait_for(std::chrono::seconds(timeout_s)) != std::future_status::ready) {
-        task->cancelled->store(true);
-        throw std::runtime_error("ui_timeout");
+    // Wait in short slices so a server stop is not held up for the whole timeout: the GUI thread
+    // that stops the server joins this io thread, and while it is joining it cannot run the task
+    // this thread is waiting for. set_stopping(true) makes the wait give up at once.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+    while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
+        if (s_ui_stopping.load()) {
+            task->cancelled->store(true);
+            throw std::runtime_error("server_stopping");
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            task->cancelled->store(true);
+            throw std::runtime_error("ui_timeout");
+        }
     }
     return future.get(); // rethrows GUI-side exceptions
 }
+
+void Controller::set_stopping(bool stopping) { s_ui_stopping.store(stopping); }
 
 // Keys a caller must not WRITE through the API. post_process runs as a host command on the
 // next slice, *_gcode is injected into the printer's job, and the print-host keys redirect
@@ -411,16 +424,14 @@ static std::string json_value_to_config_string(const nlohmann::json &v)
 // ---------------------------------------------------------------------------
 // Sensitive keys
 //
-// PUT /config reaches every preset key, and some of them are not slicing settings:
-// post_process runs shell commands after export, the *_gcode templates go straight to
-// the printer, and the physical-printer options (print_host, printhost_*, host_type,
-// printer_agent, ...) decide where and how a print is sent and with which credentials.
-// printer_model / printer_technology move OrcaSlicer onto other code paths and
-// filename_format names the exported file. An AI agent holding the token can be steered
-// by text it reads, so changing any of these is refused unless the user ticks
-// Preferences > Remote API > "Allow script, G-code and connection edits". Writing a key
-// back to the value it already has is not a change and passes. The MCP server keeps the
-// same rule in its guard.py as a second check; keep the two in step.
+// The policy gate, checked AFTER the hard block (is_forbidden_write_key, which refuses scripts,
+// G-code templates, print-host keys, printer_model and filename_format whatever the user says).
+// What is left for this gate are the physical-printer options the hard block does not cover:
+// printer_technology, printer_agent, flashforge_serial_number and the physical-printer preset
+// names. They change how and to what OrcaSlicer connects, so a change is refused unless the user
+// ticks Preferences > Remote API > "Allow printer-type and connection-agent edits". Writing a key
+// back to the value it already has is not a change and passes. The script/G-code branches below
+// are unreachable behind the hard block and kept only as a second line of defence.
 static bool is_sensitive_config_key(const std::string &key)
 {
     static const std::string gcode_suffix = "_gcode";
@@ -734,12 +745,24 @@ Response Controller::handle_put_config(const std::string &body)
                             {"detail", "the filament preset open in the Filament tab ('" +
                                        bundle->filaments.get_edited_preset().name +
                                        "') has unsaved changes; save or discard them before writing another slot"}};
+                // While the sidebar's filament editor is open, a Filament-tab selection is
+                // written into the slot being edited (Sidebar::update_presets), so switching
+                // here would silently reassign the user's slot. Refuse instead.
+                if (const int editing = wxGetApp().sidebar().editing_filament_index(); editing >= 0)
+                    return {{"error", "filament_editor_open"},
+                            {"detail", "filament slot " + std::to_string(editing) +
+                                       " is open in the filament editor; close it before writing another slot"}};
                 Tab *ftab = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
                 if (ftab == nullptr) return {{"error", "tab_unavailable"}};
+                const std::vector<std::string> slots_before = bundle->filament_presets;
                 // Not dirty, so select_preset raises no unsaved-changes dialog.
                 if (!ftab->select_preset(want, false, "", /*force_select=*/true) ||
                     bundle->filaments.get_edited_preset().name != want)
                     return {{"error", "slot_switch_failed"}, {"detail", "could not open '" + want + "' in the Filament tab"}};
+                // Belt and braces: opening a preset in the tab must never change which preset a slot uses.
+                if (bundle->filament_presets != slots_before)
+                    return {{"error", "slot_switch_failed"},
+                            {"detail", "opening '" + want + "' changed a slot's filament assignment; check the filament slots"}};
             }
             if (Tab *ftab = wxGetApp().get_tab(Preset::TYPE_FILAMENT); ftab != nullptr && ftab->get_combo_box() != nullptr)
                 ftab->get_combo_box()->set_filament_idx(filament_slot);
@@ -1003,7 +1026,7 @@ Response Controller::handle_put_config(const std::string &body)
 
     if (result.contains("error")) {
         const std::string e = result["error"].get<std::string>();
-        return { e == "unsaved_filament_edits" ? 409 : e == "bad_filament_slot" ? 422 : 500, result };
+        return { (e == "unsaved_filament_edits" || e == "filament_editor_open") ? 409 : e == "bad_filament_slot" ? 422 : 500, result };
     }
     int status = result["errors"].empty() ? 200 : 422;
     return { status, result };
@@ -1452,8 +1475,11 @@ Response Controller::handle_select_preset(const std::string &body)
             return { 400, {{"error", "bad_extruder"}, {"detail", "extruder only applies to type=filament"}} };
         extruder = in["extruder"].get<int>();
     }
+    if (in.contains("discard") && !in["discard"].is_boolean())
+        return { 400, {{"error", "bad_discard"}, {"detail", "discard must be true or false"}} };
+    const bool discard = in.value("discard", false);
 
-    nlohmann::json r = run_on_ui([type, name, extruder]() -> nlohmann::json {
+    nlohmann::json r = run_on_ui([type, name, extruder, discard]() -> nlohmann::json {
         auto *bundle = wxGetApp().preset_bundle;
         PresetCollection &presets = type == Preset::TYPE_PRINT    ? bundle->prints :
                                     type == Preset::TYPE_FILAMENT ? bundle->filaments :
@@ -1464,31 +1490,10 @@ Response Controller::handle_select_preset(const std::string &body)
             return {{"error", "unknown_preset"}};
         Tab *tab = wxGetApp().get_tab(type);
         if (tab == nullptr) return {{"error", "tab_unavailable"}};
-        // Discard un-applied GUI edits on EVERY collection Tab::select_preset may
-        // inspect. It consults dependent tabs too (switching a print/printer preset
-        // checks the filament/print collections' dirty state), and ANY dirty one
-        // pops a modal UnsavedChangesDialog that would wedge the GUI thread with no
-        // remote way to dismiss it. Discarding is acceptable for an automation API
-        // (callers apply changes deliberately via PUT /config).
-        //
-        // It is, however, a bigger side effect than "switch this group" suggests: a
-        // filament switch also drops unsaved print/printer edits, including ones made
-        // by hand in the GUI. Narrowing it to the selected collection is not an option
-        // (that is exactly the modal deadlock above), so instead report every group we
-        // discarded, and name them in the on-screen notification, so the loss is
-        // visible to both the caller and whoever is at the machine.
         nlohmann::json discarded = nlohmann::json::array();
-        auto discard_if_dirty = [&discarded](PresetCollection &c, const char *group) {
-            if (c.current_is_dirty()) {
-                c.discard_current_changes();
-                discarded.push_back(group);
-            }
-        };
-        discard_if_dirty(bundle->prints, "print");
-        discard_if_dirty(bundle->filaments, "filament");
-        discard_if_dirty(bundle->sla_materials, "sla_material");
-        discard_if_dirty(bundle->printers, "printer");
         if (type == Preset::TYPE_FILAMENT) {
+            // A filament slot is reassigned in the bundle, not through Tab::select_preset, so no
+            // unsaved-changes dialog can appear and no GUI edit needs dropping.
             // Selecting in the collection alone leaves every slot unchanged on a multi-extruder printer, so apply it
             // to the slot the way the GUI's filament combo does, then refresh the dependent panels.
             if ((size_t) extruder >= bundle->filament_presets.size())
@@ -1505,6 +1510,25 @@ Response Controller::handle_select_preset(const std::string &body)
                 return {{"error", "select_failed"}};
             return {{"selected", name}, {"extruder", extruder}};
         }
+        // Tab::select_preset consults every collection it may touch (a print or printer switch checks
+        // the filament and print collections too), and ANY dirty one pops a modal UnsavedChangesDialog
+        // that would wedge the GUI thread with no remote way to dismiss it. Unsaved edits are often a
+        // person's hand work in the GUI, so they are never dropped silently: the call is refused with
+        // 409 and the dirty groups named, unless the caller passes discard:true.
+        std::vector<std::pair<PresetCollection *, const char *>> groups = {
+            {&bundle->prints, "print"}, {&bundle->filaments, "filament"},
+            {&bundle->sla_materials, "sla_material"}, {&bundle->printers, "printer"}};
+        nlohmann::json dirty = nlohmann::json::array();
+        for (auto &g : groups)
+            if (g.first->current_is_dirty()) dirty.push_back(g.second);
+        if (!dirty.empty() && !discard)
+            return {{"error", "unsaved_changes"}, {"dirty", dirty},
+                    {"detail", "these settings groups have unsaved changes; save them, or pass discard:true to drop them"}};
+        for (auto &g : groups)
+            if (g.first->current_is_dirty()) {
+                g.first->discard_current_changes();
+                discarded.push_back(g.second);
+            }
         bool ok = tab->select_preset(name, false, "", /*force_select=*/true);
         if (!ok) return {{"error", "select_cancelled"}};
         return {{"selected", name}, {"discarded_changes", discarded}};
@@ -1516,6 +1540,8 @@ Response Controller::handle_select_preset(const std::string &body)
         }
         if (r["error"] == "bad_extruder" || r["error"] == "incompatible_preset")
             return { 422, r };
+        if (r["error"] == "unsaved_changes")
+            return { 409, r };
         return { 500, r };
     }
     std::string msg = "Switched to " + type_s + " preset '" + name + "'";
@@ -2041,15 +2067,31 @@ Response Controller::handle_transform_object(uint64_t id, const std::string &bod
 {
     nlohmann::json in = nlohmann::json::parse(body); // parse_error -> 400 in dispatch
     if (!in.is_object()) return { 400, {{"error", "body_must_be_object"}} };
-    auto read_vec = [&in](const char *k, bool &present) -> Vec3d {
-        present = in.contains(k) && in[k].is_array() && in[k].size() == 3;
+    // Each vector must be three finite numbers in a sane range: a zero scale makes a degenerate
+    // instance, and a huge offset overflows the scaled integer coordinates at slice time.
+    static constexpr double MAX_TRANSLATE_MM = 10000.0, MAX_ROTATE_DEG = 3600.0;
+    static constexpr double MIN_SCALE = 1e-4, MAX_SCALE = 1000.0;
+    std::string vec_error;
+    auto read_vec = [&in, &vec_error](const char *k, bool &present, double lo, double hi) -> Vec3d {
+        present = in.contains(k);
         if (!present) return Vec3d(0, 0, 0);
-        return Vec3d(in[k][0].get<double>(), in[k][1].get<double>(), in[k][2].get<double>());
+        const auto &a = in[k];
+        if (!a.is_array() || a.size() != 3 || !a[0].is_number() || !a[1].is_number() || !a[2].is_number()) {
+            vec_error = std::string(k) + " must be an array of three numbers";
+            return Vec3d(0, 0, 0);
+        }
+        Vec3d v(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
+        for (int i = 0; i < 3; ++i)
+            if (!std::isfinite(v[i]) || v[i] < lo || v[i] > hi)
+                vec_error = std::string(k) + " values must be between " + std::to_string(lo) + " and " + std::to_string(hi);
+        return v;
     };
     bool has_t = false, has_r = false, has_s = false;
-    Vec3d tr = read_vec("translate", has_t);
-    Vec3d ro = read_vec("rotate", has_r);   // degrees
-    Vec3d sc = read_vec("scale", has_s);     // absolute factor
+    Vec3d tr = read_vec("translate", has_t, -MAX_TRANSLATE_MM, MAX_TRANSLATE_MM);
+    Vec3d ro = read_vec("rotate", has_r, -MAX_ROTATE_DEG, MAX_ROTATE_DEG);   // degrees
+    Vec3d sc = read_vec("scale", has_s, MIN_SCALE, MAX_SCALE);                // absolute factor
+    if (!vec_error.empty())
+        return { 400, {{"error", "bad_transform"}, {"detail", vec_error}} };
     if (!has_t && !has_r && !has_s)
         return { 400, {{"error", "no_transform"},
                        {"detail", "provide translate (mm), rotate (deg), and/or scale (factor)"}} };
@@ -2631,6 +2673,8 @@ Response Controller::dispatch(const Request &req)
     } catch (const std::exception &e) {
         if (std::string(e.what()) == "ui_timeout")
             return { 504, {{"error", "ui_timeout"}} };
+        if (std::string(e.what()) == "server_stopping")
+            return { 503, {{"error", "server_stopping"}} };
         return { 500, {{"error", "internal"}, {"detail", e.what()}} };
     }
 }

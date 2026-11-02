@@ -3925,6 +3925,11 @@ void Sidebar::update_all_preset_comboboxes()
     p_mainframe->m_tabpanel->SetSelection(p_mainframe->m_tabpanel->GetSelection());
 }
 
+int Sidebar::editing_filament_index() const
+{
+    return p->editing_filament;
+}
+
 void Sidebar::update_presets(Preset::Type preset_type)
 {
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;

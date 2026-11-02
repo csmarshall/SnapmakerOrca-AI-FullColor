@@ -198,6 +198,9 @@ public:
     void update_all_preset_comboboxes();
     //void update_partplate(PartPlateList& list);
     void update_presets(Slic3r::Preset::Type preset_type);
+    // Filament slot whose preset the Filament tab is currently editing from the sidebar, or -1. While it
+    // is >= 0, selecting another filament preset in the tab reassigns that slot (update_presets).
+    int  editing_filament_index() const;
     //BBS
     const std::vector<BedType>& get_cur_combox_bed_types() { return m_cur_combox_bed_types; }
     void update_presets_from_to(Slic3r::Preset::Type preset_type, std::string from, std::string to);

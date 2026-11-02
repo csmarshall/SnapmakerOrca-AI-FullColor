@@ -40,6 +40,8 @@ public:
     // two can interleave on the GUI thread and corrupt what is being written).
     // GUI thread only.
     static bool api_ui_task_active();          // an API task is on the stack
+    // Set while the server is stopping, so io threads waiting on the GUI thread give up at once.
+    static void set_stopping(bool stopping);
     static void set_backup_in_progress(bool);  // MainFrame brackets export_3mf;
                                                // false flushes deferred API tasks
 

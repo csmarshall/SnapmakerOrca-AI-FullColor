@@ -8335,8 +8335,11 @@ void GUI_App::start_remote_api()
 
 void GUI_App::stop_remote_api()
 {
-    if (m_remote_api_server)
-        m_remote_api_server->stop();
+    if (!m_remote_api_server)
+        return;
+    RemoteAPI::Controller::set_stopping(true);   // io threads blocked on the GUI thread bail out
+    m_remote_api_server->stop();
+    RemoteAPI::Controller::set_stopping(false);
 }
 
 void GUI_App::restart_sync_user_preset()
@@ -9190,13 +9193,18 @@ void GUI_App::open_preferences(PreferencesTab tab, const std::string& highlight_
         // the dialog needs to be destroyed before the call to recreate_GUI()
         // or sometimes the application crashes into wxDialogBase() destructor
         // so we put it into an inner scope
+        const auto api_before = RemoteAPI::Config::load();
         PreferencesDialog dlg(mainframe);
         dlg.select_tab(tab, highlight_option);
         dlg.ShowModal();
-        // Apply Remote API settings changed in the dialog. Cheap and idempotent
-        // even if nothing Remote-API-related changed.
-        stop_remote_api();
-        start_remote_api(); // no-op if remote_api_enabled is false
+        // Restart the Remote API only when a setting the server uses changed: a restart drops every
+        // event-stream client and briefly closes the port, so closing Preferences must not do it.
+        const auto api_after = RemoteAPI::Config::load();
+        if (api_after.enabled != api_before.enabled || api_after.port != api_before.port ||
+            api_after.bind_lan != api_before.bind_lan || api_after.token != api_before.token) {
+            stop_remote_api();
+            start_remote_api(); // no-op if remote_api_enabled is false
+        }
         need_recreate_gui = dlg.recreate_GUI();
         pending_language = dlg.pending_language();
         if (!need_recreate_gui) {

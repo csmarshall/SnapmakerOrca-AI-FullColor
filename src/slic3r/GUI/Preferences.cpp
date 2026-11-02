@@ -2349,7 +2349,7 @@ void PreferencesDialog::create_items()
         _L("Allow external tools (e.g. AI agents via MCP) to read and change slicer settings and trigger slicing on this machine."),
         "remote_api_enabled"));
     g_sizer->Add(create_item_checkbox(_L("Allow LAN access"),
-        _L("Off: only this computer (127.0.0.1). On: other devices on your local network can control this slicer with the token."),
+        _L("Off: only this computer (127.0.0.1). On: other devices on your local network can control this slicer with the token. The connection is plain HTTP, so the token and all traffic travel unencrypted on your network."),
         "remote_api_bind_lan"));
     g_sizer->Add(create_item_checkbox(_L("Notify on API changes"),
         _L("Show a notification when an external tool changes settings, loads or edits objects, or switches presets."),
