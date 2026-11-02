@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from orca_ai.agent import forbidden_keys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from orca_ai.agent import Agent  # noqa: E402
