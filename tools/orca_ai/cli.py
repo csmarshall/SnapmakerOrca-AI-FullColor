@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("request", nargs="*", help="what you want done, in plain language")
     ap.add_argument("-p", "--provider", help="provider name from the config (default: config 'default')")
     ap.add_argument("--read-only", action="store_true", help="expose only tools that do not change anything")
-    ap.add_argument("--yes", action="store_true", help="auto-approve destructive actions (preset deletion)")
+    ap.add_argument("--yes", action="store_true", help="approve every destructive tool without asking (agent mode) / unhide them all (MCP); prefer --allow-tool NAME")
     ap.add_argument("--allow-tool", action="append", default=[], metavar="NAME",
                     help="MCP only: unhide one destructive tool by name (e.g. deleteObject) without unhiding the rest (repeatable)")
     ap.add_argument("--export-dir", help="MCP only: directory the saveGcode tool may write G-code files into (tool absent without it)")

@@ -65,7 +65,7 @@ def save_gcode(args: dict[str, Any]) -> ToolResult:
     try:
         with requests.get(base + "/gcode", headers={"X-Api-Token": token}, stream=True, timeout=120,
                           allow_redirects=False) as response:
-            if not response.ok:
+            if not 200 <= response.status_code < 300:   # .ok would accept a 3xx we refused to follow
                 return ToolResult(f"HTTP {response.status_code}: {response.text[:300]} (slice first, then export)", is_error=True)
             expected = response.headers.get("Content-Length")
             with open(part, "xb") as out:      # "x": fail rather than overwrite

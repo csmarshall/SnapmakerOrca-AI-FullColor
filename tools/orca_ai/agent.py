@@ -45,6 +45,25 @@ def forbidden_keys(tool: Tool, args: dict) -> list[str]:
     return sorted(str(k) for k in settings if not isinstance(k, str) or is_forbidden_key(k))
 
 
+def vet_call(tool: Tool, args: dict) -> tuple[dict, ToolResult | None]:
+    """The checks every entry point (agent loop, MCP server) applies before a call reaches the API.
+
+    Returns (args to send, None) or (args, an error result). loadModel gets its path confined to the model
+    directories and rewritten to the resolved path, so a symlink swapped in afterwards cannot redirect it.
+    """
+    blocked = forbidden_keys(tool, args)
+    if blocked:
+        return args, ToolResult(f"Refused: {', '.join(blocked)} cannot be changed by the assistant "
+                                "(it can run commands or redirect output). Ask the user to change it in the UI.", is_error=True)
+    if tool.name == "loadModel":
+        from .advisory import confine_to_model_dirs
+        resolved, reason = confine_to_model_dirs(args.get("path"))
+        if resolved is None:
+            return args, ToolResult(f"Refused: {reason}", is_error=True)
+        return {**args, "path": str(resolved)}, None
+    return args, None
+
+
 class Agent:
     def __init__(self, provider: Provider, client: RemoteAPIClient, tools: list[Tool],
                  confirm: ConfirmFn | None = None, max_steps: int = 40,
@@ -58,14 +77,13 @@ class Agent:
         tool = self.tools.get(call.name)
         if tool is None:
             return ToolResult(f"Unknown tool {call.name!r}", is_error=True)
-        blocked = forbidden_keys(tool, call.args)
-        if blocked:
-            return ToolResult(f"Refused: {', '.join(blocked)} cannot be changed by the assistant "
-                              "(it can run commands or redirect output). Ask the user to change it in the UI.", is_error=True)
-        if tool.destructive and not (self.confirm and self.confirm(tool, call.args)):
+        args, refusal = vet_call(tool, call.args)
+        if refusal is not None:
+            return refusal
+        if tool.destructive and not (self.confirm and self.confirm(tool, args)):
             return ToolResult("The user declined this destructive action.", is_error=True)
-        self.on_event(f"  -> {call.name} {call.args}")
-        result = self.client.call(tool, call.args)
+        self.on_event(f"  -> {call.name} {args}")
+        result = self.client.call(tool, args)
         if result.is_error:
             self.on_event(f"     !! {result.text[:200]}")
         return result

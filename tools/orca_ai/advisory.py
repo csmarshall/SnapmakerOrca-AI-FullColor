@@ -42,12 +42,34 @@ def allowed_dirs() -> list[Path]:
     return [] if cwd in (Path(cwd.anchor), Path.home().resolve()) else [cwd]
 
 
+def confine_to_model_dirs(path: Any) -> tuple[Path | None, str | None]:
+    """Resolve `path` (symlinks followed) and require it to sit under an allowed model directory.
+
+    Returns (resolved path, None) or (None, reason). Shared by the advisory analysers and loadModel, so a
+    steered model cannot reach files outside the directories the user named.
+    """
+    dirs = allowed_dirs()
+    if not dirs:
+        return None, ("No model directory is configured, so files cannot be loaded: "
+                      "start with --model-dir DIR (or set ORCA_AI_MODEL_DIRS).")
+    if not isinstance(path, str) or not path.strip():
+        return None, "path must be a non-empty string"
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"cannot resolve path: {exc}"
+    if not any(resolved == d or d in resolved.parents for d in dirs):
+        return None, f"{resolved} is outside the allowed model directories (set --model-dir / ORCA_AI_MODEL_DIRS)"
+    return resolved, None
+
+
 def _resolve_model(file: str) -> Path:
     path = Path(file).expanduser().resolve()
     if path.suffix.lower() not in ALLOWED_SUFFIXES:
         raise ValueError(f"only {', '.join(sorted(ALLOWED_SUFFIXES))} files can be analysed")
-    if not any(path == d or d in path.parents for d in allowed_dirs()):
-        raise ValueError(f"{path} is outside the allowed model directories (set ORCA_AI_MODEL_DIRS)")
+    path, reason = confine_to_model_dirs(file)
+    if path is None:
+        raise ValueError(reason)
     if not path.is_file():
         raise ValueError(f"{path} does not exist")
     return path

@@ -60,12 +60,13 @@ class RemoteAPIClient:
                                             json=body, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as exc:
             return ToolResult(f"Remote API unreachable: {exc}", is_error=True)
-        if tool.returns_image and response.ok and response.headers.get("Content-Type", "").startswith("image/"):
+        succeeded = 200 <= response.status_code < 300   # requests' .ok is true for a 3xx we refused to follow
+        if tool.returns_image and succeeded and response.headers.get("Content-Type", "").startswith("image/"):
             return ToolResult("Rendered image attached.", base64.b64encode(response.content).decode())
         text = response.text
         if len(text) > MAX_TEXT_RESULT_CHARS:
             text = text[:MAX_TEXT_RESULT_CHARS] + f"\n...[truncated, {len(response.text)} chars total]"
-        if not response.ok:
+        if not succeeded:
             try:
                 detail = json.dumps(response.json())
             except ValueError:

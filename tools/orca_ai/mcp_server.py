@@ -10,7 +10,7 @@ import os
 import sys
 from typing import Any
 
-from .agent import forbidden_keys
+from .agent import vet_call
 from .client import RemoteAPIClient, ToolResult
 from .spec import load_tools
 
@@ -71,13 +71,11 @@ def serve(read_only: bool = False, allow_destructive: bool = False, advisory: bo
             missing = [k for k in tool.input_schema.get("required", []) if k not in arguments]
             # One malformed call must not end the stdio loop: every later call would fail until restart.
             try:
-                blocked = forbidden_keys(tool, arguments)
                 if missing:
                     result = ToolResult(f"Missing required argument(s): {', '.join(missing)}", is_error=True)
-                elif blocked:
-                    result = ToolResult(f"Refused: {', '.join(blocked)} cannot be changed by the assistant.", is_error=True)
                 else:
-                    result = client.call(tool, arguments)
+                    arguments, refusal = vet_call(tool, arguments)
+                    result = refusal if refusal is not None else client.call(tool, arguments)
             except Exception as exc:
                 result = ToolResult(f"{tool.name} failed: {type(exc).__name__}: {exc}", is_error=True)
             content: list[dict] = [{"type": "text", "text": result.text}]

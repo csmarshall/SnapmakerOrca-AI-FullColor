@@ -61,11 +61,20 @@ class Base(unittest.TestCase):
 
 class SpecTests(Base):
     def test_every_operation_becomes_a_tool_except_events(self):
-        self.assertEqual(len(self.tools), 24)
+        # Count the spec's operations independently of load_tools (which drops the WebSocket `events` one) so a
+        # new endpoint does not need a hand-edited magic number here.
+        import yaml
+        from orca_ai.spec import DEFAULT_SPEC, HTTP_METHODS
+        doc = yaml.safe_load(DEFAULT_SPEC.read_text())
+        ops = {item[m]["operationId"] for item in doc["paths"].values() for m in HTTP_METHODS if m in item}
+        self.assertEqual(set(self.tools), ops - {"events"})
         self.assertNotIn("events", self.tools)
     def test_destructive_and_mutating_flags(self):
         self.assertTrue(self.tools["deletePreset"].destructive)
         self.assertTrue(self.tools["deleteObject"].destructive)  # deleting a plate object loses unsaved work
+        self.assertTrue(self.tools["savePreset"].destructive)  # overwrites a user preset on disk
+        self.assertTrue(self.tools["deletePlate"].destructive)  # drops a plate and reshuffles later indices
+        self.assertFalse(self.tools["loadModel"].destructive)
         self.assertTrue(self.tools["putConfig"].mutating)
         self.assertFalse(self.tools["getStatus"].mutating)
         self.assertFalse(self.tools["getPresetConfig"].mutating)  # POST, but read-only
@@ -168,15 +177,17 @@ class McpTests(Base):
             out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp", *flags], input="\n".join(map(json.dumps, reqs)),
                                  capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
             return {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}
+        # Visible API tools = every spec tool minus the destructive ones (hidden over MCP unless --yes/--allow-tool).
+        api_visible = len([t for t in load_tools() if not t.destructive])
         implicit = {t["name"] for t in run()[2]["result"]["tools"]}   # no model dir named: advisory tools stay off
-        self.assertEqual(len(implicit), 22); self.assertFalse(implicit & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
+        self.assertEqual(len(implicit), api_visible); self.assertFalse(implicit & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
         env["ORCA_AI_MODEL_DIRS"] = str(Path(__file__).resolve().parents[1])
         replies = run()
         names = {t["name"] for t in replies[2]["result"]["tools"]}
-        self.assertEqual(len(names), 25)  # 22 API tools (destructive ones hidden) + 3 phyx3d advisory tools
+        self.assertEqual(len(names), api_visible + 3)  # API tools (destructive ones hidden) + 3 phyx3d advisory tools
         self.assertTrue({"analyzePrintability", "analyzeStrength", "rankOrientations"} <= names)  # reachable over MCP by default
         bare = {t["name"] for t in run("--no-advisory")[2]["result"]["tools"]}
-        self.assertEqual(len(bare), 22); self.assertFalse(bare & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
+        self.assertEqual(len(bare), api_visible); self.assertFalse(bare & {"analyzePrintability", "analyzeStrength", "rankOrientations"})
         self.assertEqual(replies[3]["result"]["isError"], False)
         self.assertIn("error", replies[4])  # hidden tool cannot be called
 
@@ -205,29 +216,215 @@ class ExportAndAllowToolTests(Base):
             self.assertFalse((Path(d).parent / "escape.gcode").exists())
             self.assertTrue(save_gcode({"filename": "ok name-1.v2"}).is_error is False)   # control: a plain name still works
 
+    def test_export_dir_flag_adds_saveGcode_and_read_only_removes_it(self):
+        env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin"}
+        def names(*flags):
+            replies, _ = mcp_lines([rpc(1, "tools/list")], "--no-advisory", *flags, env=env)
+            return {t["name"] for t in replies[0]["result"]["tools"]}
+        with tempfile.TemporaryDirectory() as d:
+            self.assertNotIn("saveGcode", names())
+            self.assertIn("saveGcode", names("--export-dir", d))
+            self.assertNotIn("saveGcode", names("--export-dir", d, "--read-only"))
+
     def test_saveGcode_with_a_bad_token_is_an_error_and_leaves_no_file(self):
         with tempfile.TemporaryDirectory() as d, self._env(d, token="wrong"):
             self.assertTrue(save_gcode({"filename": "leg"}).is_error)
             self.assertEqual(list(Path(d).iterdir()), [])
 
     def test_allow_tool_unhides_only_the_named_destructive_tool(self):
-        env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin"}
+        exports = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(exports, ignore_errors=True))
+        # ORCA_AI_EXPORT_DIR makes saveGcode exist, so the "absent" assertions below can fail if gating breaks.
+        env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin", "ORCA_AI_EXPORT_DIR": exports}
         def names(*flags):
             req = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
             out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp", "--no-advisory", *flags], input="\n".join(map(json.dumps, req)),
                                  capture_output=True, text=True, env=env, cwd=Path(__file__).resolve().parents[1], timeout=30)
             return {t["name"] for t in {r["id"]: r for r in map(json.loads, out.stdout.splitlines())}[2]["result"]["tools"]}, out.stderr
         default, _ = names()
-        self.assertFalse(default & {"deleteObject", "deletePreset", "saveGcode"})
+        self.assertFalse(default & {"deleteObject", "deletePreset", "savePreset", "deletePlate"})
+        self.assertIn("saveGcode", default)   # control: the export env is live, so a hidden tool would be a real gate
+        self.assertIn("getStatus", default)
         allowed, _ = names("--allow-tool", "deleteObject")
-        self.assertIn("deleteObject", allowed); self.assertNotIn("deletePreset", allowed)
+        self.assertIn("deleteObject", allowed); self.assertNotIn("deletePreset", allowed); self.assertNotIn("savePreset", allowed)
+        everything, _ = names("--yes")
+        self.assertTrue({"deleteObject", "deletePreset", "savePreset", "deletePlate"} <= everything)
         bogus, err = names("--allow-tool", "nonsense")
         self.assertEqual(bogus, default); self.assertIn("nonsense", err)
-        with tempfile.TemporaryDirectory() as d:
-            exporting, _ = names("--export-dir", d)
-            self.assertIn("saveGcode", exporting)
-            readonly, _ = names("--export-dir", d, "--read-only")
-            self.assertNotIn("saveGcode", readonly)
+        readonly, _ = names("--read-only")
+        self.assertNotIn("saveGcode", readonly)
+        self.assertIn("getStatus", readonly)
+
+
+def _serve(handler):
+    """Start `handler` on an ephemeral port; returns (server, base_url). Caller shuts it down."""
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def mcp_lines(lines, *flags, env=None, cwd=None):
+    """Feed raw stdin lines to `orca_ai --mcp`; returns (list of decoded reply objects, stderr)."""
+    out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--mcp", *flags], input="\n".join(lines) + "\n",
+                         capture_output=True, text=True, env=env, cwd=cwd or Path(__file__).resolve().parents[1], timeout=30)
+    return [json.loads(r) for r in out.stdout.splitlines()], out.stderr
+
+
+def rpc(msg_id, method, params=None):
+    return json.dumps({"jsonrpc": "2.0", "id": msg_id, "method": method, "params": params or {}})
+
+
+class LoadModelConfinementTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.models = Path(tempfile.mkdtemp()).resolve()
+        self.outside = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.models, ignore_errors=True))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.outside, ignore_errors=True))
+        (self.models / "ok.stl").write_text("solid s\nendsolid s\n")
+        (self.outside / "secret.stl").write_text("solid s\nendsolid s\n")
+        (self.models / "link.stl").symlink_to(self.outside / "secret.stl")
+        (self.models / "linkdir").symlink_to(self.outside, target_is_directory=True)
+
+    def agent_result(self, path, dirs):
+        env = {"ORCA_AI_MODEL_DIRS": dirs} if dirs is not None else {}
+        with mock.patch.dict(os.environ, env):
+            if dirs is None:
+                os.environ.pop("ORCA_AI_MODEL_DIRS", None)
+            p = Scripted([Turn(tool_calls=[ToolCall("1", "loadModel", {"path": path})]), Turn(text="ok")])
+            Agent(p, self.client, list(self.tools.values()), on_event=lambda s: None).run("go")
+            return p.seen[1][-1].results[0][1]
+
+    def test_path_inside_a_model_dir_is_loaded_with_its_resolved_path(self):
+        r = self.agent_result(str(self.models / "ok.stl"), str(self.models))
+        self.assertFalse(r.is_error, r.text)
+        self.assertEqual(SEEN[0][:2], ("POST", "/api/v1/model"))
+        self.assertEqual(SEEN[0][3], {"path": str(self.models / "ok.stl")})
+
+    def test_paths_outside_or_escaping_the_model_dirs_are_refused_as_results(self):
+        for path in (str(self.outside / "secret.stl"), str(self.models / ".." / self.outside.name / "secret.stl"),
+                     str(self.models / "link.stl"), str(self.models / "linkdir" / "secret.stl"), "/etc/hosts", 5, ""):
+            SEEN.clear()
+            r = self.agent_result(path, str(self.models))
+            self.assertTrue(r.is_error, path); self.assertEqual(SEEN, [], path)
+
+    def test_without_model_dirs_loadModel_is_refused_with_a_clear_message(self):
+        with mock.patch("orca_ai.advisory.allowed_dirs", return_value=[]):
+            p = Scripted([Turn(tool_calls=[ToolCall("1", "loadModel", {"path": str(self.models / "ok.stl")})]), Turn(text="ok")])
+            Agent(p, self.client, list(self.tools.values()), on_event=lambda s: None).run("go")
+        r = p.seen[1][-1].results[0][1]
+        self.assertTrue(r.is_error); self.assertIn("--model-dir", r.text); self.assertEqual(SEEN, [])
+
+    def test_mcp_path_applies_the_same_confinement(self):
+        env = {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin", "ORCA_AI_MODEL_DIRS": str(self.models)}
+        calls = [rpc(i, "tools/call", {"name": "loadModel", "arguments": {"path": path}}) for i, path in
+                 enumerate([str(self.models / "ok.stl"), str(self.outside / "secret.stl"), str(self.models / "link.stl")], start=1)]
+        replies = {r["id"]: r for r in mcp_lines(calls, "--no-advisory", env=env)[0]}
+        self.assertFalse(replies[1]["result"]["isError"], replies[1])
+        self.assertTrue(replies[2]["result"]["isError"]); self.assertTrue(replies[3]["result"]["isError"])
+        self.assertEqual([x[3]["path"] for x in SEEN], [str(self.models / "ok.stl")])   # only the allowed one reached the API
+
+
+class McpRobustnessTests(Base):
+    def env(self):
+        return {"ORCA_API_URL": self.url, "ORCA_API_TOKEN": "tok", "PATH": "/usr/bin:/bin"}
+
+    def test_malformed_input_gets_an_error_and_the_server_keeps_answering(self):
+        lines = ["this is not json",
+                 rpc(1, "tools/call", {"name": "transformObject", "arguments": "not-an-object"}),
+                 rpc(2, "tools/call", {"name": "transformObject", "arguments": {"translate": [1, 2, 3]}}),   # missing required id
+                 rpc(3, "tools/call", {"name": "putConfig", "arguments": {"settings": "wall_loops=3"}}),
+                 rpc(4, "tools/call", {"name": "putConfig", "arguments": {}}),                              # missing settings
+                 rpc(5, "tools/call", {"name": "putConfig", "arguments": {"settings": ["post_process"]}}),
+                 rpc(6, "tools/call", {"name": "getStatus", "arguments": {}})]                            # must still be answered
+        replies, _ = mcp_lines(lines, "--no-advisory", env=self.env())
+        by_id = {r["id"]: r for r in replies}
+        self.assertEqual(replies[0]["error"]["code"], -32700)          # the non-JSON line
+        self.assertIn("error", by_id[1])                                # arguments not an object
+        for i in (2, 3, 4, 5):
+            self.assertTrue(by_id[i].get("error") or by_id[i]["result"]["isError"], i)
+        self.assertFalse(by_id[6]["result"]["isError"])
+        self.assertEqual([x[1] for x in SEEN], ["/api/v1/status"])      # none of the bad calls reached the API
+
+    def test_forbidden_keys_are_refused_over_mcp(self):
+        lines = [rpc(i, "tools/call", {"name": "putConfig", "arguments": {"settings": {key: "x", "wall_loops": 3}}})
+                 for i, key in enumerate(["imex_mode_gcodes", "post_process", "machine_start_gcode", "printhost_port"], start=1)]
+        lines.append(rpc(9, "tools/call", {"name": "putObjectConfig", "arguments": {"id": 1, "settings": {"post_process": "x"}}}))
+        lines.append(rpc(10, "tools/call", {"name": "putConfig", "arguments": {"settings": {"wall_loops": 3}}}))   # control
+        by_id = {r["id"]: r for r in mcp_lines(lines, "--no-advisory", env=self.env())[0]}
+        for i in (1, 2, 3, 4, 9):
+            self.assertTrue(by_id[i]["result"]["isError"], i); self.assertIn("Refused", by_id[i]["result"]["content"][0]["text"])
+        self.assertFalse(by_id[10]["result"]["isError"])
+        self.assertEqual([x[3] for x in SEEN], [{"wall_loops": 3}])
+
+    def test_yes_help_says_it_approves_every_destructive_tool(self):
+        out = subprocess.run([sys.executable, "-W", "ignore", "-m", "orca_ai", "--help"], capture_output=True, text=True,
+                             cwd=Path(__file__).resolve().parents[1], timeout=30, env={**os.environ, "COLUMNS": "400"}).stdout
+        flat = " ".join(out.split())
+        self.assertIn("--yes", flat)
+        self.assertIn("approve every destructive tool", flat)
+
+
+class ShortBodyHandler(BaseHTTPRequestHandler):
+    """Promises 1000 bytes of G-code, sends 10, then drops the connection."""
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "1000"); self.end_headers()
+        self.wfile.write(b"G1 X0 Y0\n\n"); self.wfile.flush()
+        self.close_connection = True
+        self.connection.close()
+    def log_message(self, *a): pass
+
+
+class ChunkedDropHandler(BaseHTTPRequestHandler):
+    """No Content-Length: sends part of a body and resets the connection."""
+    protocol_version = "HTTP/1.0"
+    def do_GET(self):
+        self.send_response(200); self.end_headers()
+        self.wfile.write(b"G1 X0 Y0\n"); self.wfile.flush()
+        import socket, struct
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))   # RST, not a clean FIN
+        self.connection.close()
+    def log_message(self, *a): pass
+
+
+class ExportFailureTests(unittest.TestCase):
+    def test_a_body_shorter_than_its_content_length_leaves_no_gcode_and_no_part_file(self):
+        for handler in (ShortBodyHandler, ChunkedDropHandler):
+            server, url = _serve(handler)
+            try:
+                with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"ORCA_AI_EXPORT_DIR": d, "ORCA_API_URL": url, "ORCA_API_TOKEN": "tok"}):
+                    result = save_gcode({"filename": "leg"})
+                    self.assertTrue(result.is_error, handler.__name__)
+                    self.assertEqual(os.listdir(d), [], handler.__name__)   # no leg.gcode and no hidden .part either
+            finally:
+                server.shutdown(); server.server_close()
+
+
+class RedirectTests(unittest.TestCase):
+    def test_a_redirect_is_not_followed_so_the_token_never_reaches_the_other_host(self):
+        landed = []
+        class Target(BaseHTTPRequestHandler):
+            def do_GET(self):
+                landed.append(self.headers.get("X-Api-Token")); self.send_response(200); self.end_headers(); self.wfile.write(b"x")
+            def log_message(self, *a): pass
+        target, target_url = _serve(Target)
+        class Redirector(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302); self.send_header("Location", target_url + "/stolen"); self.end_headers()
+            do_POST = do_PUT = do_DELETE = do_GET
+            def log_message(self, *a): pass
+        redirector, url = _serve(Redirector)
+        try:
+            tools = {t.name: t for t in load_tools()}
+            result = RemoteAPIClient(url, "secret-token").call(tools["getStatus"], {})
+            self.assertTrue(result.is_error)
+            with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"ORCA_AI_EXPORT_DIR": d, "ORCA_API_URL": url, "ORCA_API_TOKEN": "secret-token"}):
+                self.assertTrue(save_gcode({"filename": "leg"}).is_error)
+                self.assertEqual(os.listdir(d), [])
+            self.assertEqual(landed, [])   # the redirect target was never contacted, with or without the token
+        finally:
+            for srv in (target, redirector):
+                srv.shutdown(); srv.server_close()
 
 
 def _stl(path, boxes):

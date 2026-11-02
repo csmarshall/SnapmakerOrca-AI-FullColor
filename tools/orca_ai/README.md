@@ -24,7 +24,8 @@ Needs `requests` and `pyyaml`. Pin the interpreter in unattended scripts.
 
 ## Safety
 
-- `--read-only` exposes only tools that change nothing. Destructive tools (`deletePreset`) are hidden from MCP unless `--yes`, and require terminal confirmation in agent mode.
+- `loadModel` only loads files under the `--model-dir` / `ORCA_AI_MODEL_DIRS` directories (symlinks followed); with none configured it is refused.
+- `--read-only` exposes only tools that change nothing. Destructive tools (`deleteObject`, `deletePreset`, `deletePlate`, `savePreset`) are hidden from MCP unless `--yes`, and require terminal confirmation in agent mode.
 - Edits go through the GUI's own edit path, so they appear as modified presets and can be undone by discarding changes. Slicing and rendering are the only checks; nothing here proves a part is strong.
 
 ## Tests

@@ -248,6 +248,7 @@ paths:
     delete:
       summary: Delete a plate
       operationId: deletePlate
+      x-destructive: true
       description: |
         Removes plate `index`. The objects it held are not deleted: they are parked
         beside the bed, as the toolbar's delete does, and `objects_moved_off_plate`
@@ -610,6 +611,7 @@ paths:
       summary: Save the current edits as a user preset
       operationId: savePreset
       x-mutating: true
+      x-destructive: true
       requestBody:
         required: true
         content:
