@@ -2547,8 +2547,8 @@ bool is_XL_printer(const PrintConfig &cfg);
 
 // True for a setting that automation (a plugin, a remote API client) must never change, because
 // changing it amounts to running code or redirecting output rather than tuning a print:
-// post_process runs host commands after export, the custom G-code templates (every option
-// flagged is_code, plus any text-valued *_gcode key) are sent to the printer, the print-host
+// post_process runs host commands after export, the custom G-code templates (every text-valued
+// setting with "gcode" in its name) are sent to the printer, the print-host
 // keys decide where a job goes and with which credentials, and a few keys name files the app
 // opens or writes. A person editing the setting in the GUI is not affected.
 bool is_automation_write_blocked_key(const std::string &opt_key);

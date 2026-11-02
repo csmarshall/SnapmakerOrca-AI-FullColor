@@ -14491,14 +14491,15 @@ bool is_automation_write_blocked_key(const std::string &opt_key)
     // Every print-host key by prefix, so one added later is covered too.
     if (boost::starts_with(opt_key, "print_host") || boost::starts_with(opt_key, "printhost_"))
         return true;
-    const ConfigOptionDef *def = print_config_def.get(opt_key);
-    // Anything the config itself flags as code, whatever it is named.
-    if (def != nullptr && def->is_code)
-        return true;
-    // A *_gcode template is text; a *_gcode switch (emit_machine_limits_to_gcode) is not code.
-    // An unknown key keeps the suffix rule, so a template this build does not know is still refused.
-    if (!boost::ends_with(opt_key, "_gcode") || opt_key == "_gcode")
+    // G-code templates: every text-valued setting with "gcode" in its name (machine_start_gcode,
+    // filament_start_gcode, imex_mode_gcodes, load_custom_gcodes, ...). Switches such as
+    // emit_machine_limits_to_gcode are not text, so they stay writable. ConfigOptionDef::is_code is
+    // not usable here: only the GUI sets it, on its own copies of the definitions, so it is always
+    // false in print_config_def. A key this build does not define is refused whenever its name
+    // mentions gcode, so a template added later is covered before anyone lists it.
+    if (opt_key.find("gcode") == std::string::npos)
         return false;
+    const ConfigOptionDef *def = print_config_def.get(opt_key);
     return def == nullptr || def->type == coString || def->type == coStrings;
 }
 } // namespace Slic3r

@@ -289,7 +289,10 @@ void PresetTransaction::set(const std::string& key, const std::string& value)
     // begin_update().set()), so this is the one place that keeps plugins away from settings that
     // run code or redirect output. Refused even when the value would not change, and before
     // anything is staged, so the rest of the transaction stays usable.
-    if (is_automation_write_blocked_key(key))
+    // The physical-printer options (printer_agent, printer_technology, ...) decide how and to what
+    // OrcaSlicer connects; a plugin has no user-facing switch that could grant them, so they are refused too.
+    const std::vector<std::string>& physical = PhysicalPrinter::printer_options();
+    if (is_automation_write_blocked_key(key) || std::find(physical.begin(), physical.end(), key) != physical.end())
         throw std::invalid_argument("Setting \"" + key + "\" cannot be changed by a plugin: it runs commands, is sent "
                                     "to the printer as G-code, or decides where and how a print is sent. "
                                     "Change it in OrcaSlicer's settings instead");
