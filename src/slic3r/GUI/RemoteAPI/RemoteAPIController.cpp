@@ -11,6 +11,7 @@
 #include "slic3r/GUI/NotificationManager.hpp" // in-app change notifications
 #include "libslic3r/AppConfig.hpp"             // remote_api_notify toggle
 #include "slic3r/GUI/Tab.hpp"
+#include "slic3r/GUI/PresetComboBoxes.hpp"
 #include "slic3r/GUI/BackgroundSlicingProcess.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Print.hpp"
@@ -696,6 +697,18 @@ Response Controller::handle_put_config(const std::string &body)
     if (!in.is_object())
         return { 400, {{"error", "body_must_be_object"}} };
 
+    // filament_slot (0-based, same numbering as POST /preset/select's extruder) picks
+    // which slot's filament preset the filament keys in this batch are written to. It is
+    // a routing parameter, not a config key, so it is taken out before the key loop.
+    int filament_slot = -1;
+    if (in.contains("filament_slot")) {
+        const auto &fs = in["filament_slot"];
+        if (!fs.is_number_integer() || fs.get<long long>() < 0 || fs.get<long long>() > 255)
+            return { 400, {{"error", "bad_filament_slot"}, {"detail", "filament_slot must be an integer from 0 to 255"}} };
+        filament_slot = fs.get<int>();
+        in.erase("filament_slot");
+    }
+
     // NOTE (Task 8 lesson applied): `in` is captured BY VALUE (moved) into the
     // run_on_ui lambda, never by reference. run_on_ui blocks the calling (io)
     // thread up to 10s via future.wait_for and THROWS on timeout without
@@ -705,9 +718,43 @@ Response Controller::handle_put_config(const std::string &body)
     // against freed memory - exactly the use-after-free that Task 8 hit.
     // Capturing by value/move means the lambda owns its own copy, independent
     // of this function's stack lifetime.
-    nlohmann::json result = run_on_ui([in = std::move(in)]() -> nlohmann::json {
+    nlohmann::json result = run_on_ui([in = std::move(in), filament_slot]() -> nlohmann::json {
         auto *bundle = wxGetApp().preset_bundle;
         const bool allow_sensitive = sensitive_writes_allowed();
+
+        // Filament keys land in the ONE preset open in the Filament tab (the collection's
+        // edited preset). To write a given slot, open that slot's preset there first, the
+        // way the slot's edit button does (PlaterPresetComboBox::switch_to_tab). Every slot
+        // that uses the same preset sees the change too, so those slots are reported.
+        nlohmann::json slot_info;
+        if (filament_slot >= 0) {
+            if ((size_t) filament_slot >= bundle->filament_presets.size())
+                return {{"error", "bad_filament_slot"},
+                        {"detail", "this printer has " + std::to_string(bundle->filament_presets.size()) + " filament slots"}};
+            const std::string want = bundle->filament_presets[(size_t) filament_slot];
+            if (bundle->filaments.get_edited_preset().name != want) {
+                // Switching drops the open preset's unsaved edits (one edited preset per
+                // collection). Refuse rather than lose them silently: the caller or the
+                // person at the machine saves or discards them first.
+                if (bundle->filaments.current_is_dirty())
+                    return {{"error", "unsaved_filament_edits"},
+                            {"detail", "the filament preset open in the Filament tab ('" +
+                                       bundle->filaments.get_edited_preset().name +
+                                       "') has unsaved changes; save or discard them before writing another slot"}};
+                Tab *ftab = wxGetApp().get_tab(Preset::TYPE_FILAMENT);
+                if (ftab == nullptr) return {{"error", "tab_unavailable"}};
+                // Not dirty, so select_preset raises no unsaved-changes dialog.
+                if (!ftab->select_preset(want, false, "", /*force_select=*/true) ||
+                    bundle->filaments.get_edited_preset().name != want)
+                    return {{"error", "slot_switch_failed"}, {"detail", "could not open '" + want + "' in the Filament tab"}};
+            }
+            if (Tab *ftab = wxGetApp().get_tab(Preset::TYPE_FILAMENT); ftab != nullptr && ftab->get_combo_box() != nullptr)
+                ftab->get_combo_box()->set_filament_idx(filament_slot);
+            nlohmann::json sharing = nlohmann::json::array();
+            for (size_t i = 0; i < bundle->filament_presets.size(); ++i)
+                if (bundle->filament_presets[i] == want) sharing.push_back(i);
+            slot_info = {{"filament_slot", filament_slot}, {"preset", want}, {"slots_sharing_preset", sharing}};
+        }
 
         struct Target {
             Preset::Type        type;
@@ -956,9 +1003,15 @@ Response Controller::handle_put_config(const std::string &body)
             api_notify(msg, false);
         }
 
-        return {{"applied", applied}, {"errors", errors}};
+        nlohmann::json out = {{"applied", applied}, {"errors", errors}};
+        if (!slot_info.is_null()) out["filament_slot"] = slot_info;
+        return out;
     });
 
+    if (result.contains("error")) {
+        const std::string e = result["error"].get<std::string>();
+        return { e == "unsaved_filament_edits" ? 409 : e == "bad_filament_slot" ? 422 : 500, result };
+    }
     int status = result["errors"].empty() ? 200 : 422;
     return { status, result };
 }

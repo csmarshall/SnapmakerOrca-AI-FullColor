@@ -110,9 +110,31 @@ rejected**:
 { "applied": [], "errors": { "hot_plate_temp": "per_filament_length_mismatch: the filament preset open in the Filament tab holds 1 value(s), got 5. ..." } }
 ```
 
-Pass only that preset's own value (`{"hot_plate_temp": 70}`), and change the other
-slots by selecting their presets in turn. Writing a key back unchanged still works
-on a single-filament setup, where merged and per-preset shapes coincide.
+Pass only that preset's own value (`{"hot_plate_temp": 70}`), and pick the slot with
+`filament_slot` (0-based, the same numbering as `PUT /preset`'s `extruder`):
+
+```json
+{ "filament_slot": 2, "nozzle_temperature": "240,240,240,240,240" }
+```
+
+That opens slot 2's preset in the Filament tab (as the slot's edit button does) and
+writes it. The edit is to the **preset**, so every slot using that preset changes; the
+response lists them:
+
+```json
+{ "applied": ["nozzle_temperature"], "errors": {},
+  "filament_slot": { "filament_slot": 2, "preset": "Generic PETG @U1 0.4 nozzle", "slots_sharing_preset": [1, 2] } }
+```
+
+Errors: `400 bad_filament_slot` (not an integer 0-255), `422 bad_filament_slot` (no
+such slot), `409 unsaved_filament_edits` (another preset is open in the Filament tab
+with unsaved changes; switching would drop them, so nothing is done). The switch
+happens before the keys are validated, so a batch refused with `422` may still leave
+the Filament tab showing the requested slot's preset. Written values stay unsaved
+edits, like a change typed in the GUI, so writing a second slot that uses a different
+preset gets `409` until the first is saved or discarded. Without `filament_slot`, the
+preset already open in the Filament tab is written. Writing a key back unchanged
+still works on a single-filament setup, where merged and per-preset shapes coincide.
 
 Earlier builds accepted the merged string and stored all of it in the one preset.
 The next merge then spliced that whole list in at *every* slot using that preset,

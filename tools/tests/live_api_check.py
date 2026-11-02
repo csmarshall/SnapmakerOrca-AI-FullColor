@@ -46,6 +46,50 @@ class Api:
             return status, {"_raw": text[:200]}
 
 
+def _slot_runs(api: Api, key: str, n_slots: int) -> list[list[str]] | None:
+    """Split GET /config's merged per-filament value into one run per slot. Runs are NOT equal
+    width: each slot contributes one value per extruder variant of its preset, and
+    filament_self_index (1-based slot per merged position) says which position is whose."""
+    _, cur = api.j("GET", f"/config?keys={key},filament_self_index")
+    cfg = cur.get("config", {})
+    vals = str(cfg.get(key, "")).split(",")
+    owner = [int(x) for x in str(cfg.get("filament_self_index", "")).split(",") if x.strip()]
+    if len(owner) != len(vals):
+        return None
+    runs: list[list[str]] = [[] for _ in range(n_slots)]
+    for v, o in zip(vals, owner):
+        if not 1 <= o <= n_slots:
+            return None
+        runs[o - 1].append(v)
+    return runs
+
+
+def _filament_slot_write(api: Api, slots: list[str]) -> list[tuple[str, bool, str]]:
+    """Write nozzle_temperature to the LAST slot via filament_slot: exactly the slots sharing its
+    preset must change, the rest must not; then write the old value back."""
+    key, target = "nozzle_temperature", len(slots) - 1
+    before = _slot_runs(api, key, len(slots))
+    if before is None:
+        return [("filament_slot write changes only the slots sharing that preset", False, "merged value does not split per slot")]
+    sharing = [i for i, s in enumerate(slots) if s == slots[target]]
+    # The write takes the preset's own vector (one value per extruder variant), not the merged run.
+    _, pc = api.j("POST", "/preset/config", {"type": "filament", "name": slots[target]})
+    old = str(pc.get("config", {}).get(key, ""))
+    new = ",".join(str(int(float(v)) + 1) for v in old.split(","))
+    status, r = api.j("PUT", "/config", {"filament_slot": target, key: new})
+    after = _slot_runs(api, key, len(slots)) or []
+    changed = [i for i in range(len(slots)) if after and after[i] != before[i]]
+    rs, rr = api.j("PUT", "/config", {"filament_slot": target, key: old})
+    restored = _slot_runs(api, key, len(slots)) == before
+    info = r.get("filament_slot", {})
+    return [
+        ("filament_slot write changes only the slots sharing that preset",
+         status == 200 and changed == sharing and info.get("slots_sharing_preset") == sharing and info.get("preset") == slots[target],
+         f"HTTP {status} changed {changed} expected {sharing} info {info}"),
+        ("filament_slot write restored", rs == 200 and restored, f"HTTP {rs} {json.dumps(rr)[:100]}"),
+    ]
+
+
 def run_checks(api: Api) -> list[tuple[str, bool, str]]:
     out: list[tuple[str, bool, str]] = []
 
@@ -94,6 +138,12 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
         check("negative filament slot refused", status == 400 and r.get("error") == "bad_extruder", f"HTTP {status} {r}")
         status, r = api.j("PUT", "/preset", {"type": "print", "name": st["presets"]["print"], "extruder": 1})
         check("extruder on a non-filament type refused", status == 400 and r.get("error") == "bad_extruder", f"HTTP {status} {r}")
+    if slots:
+        status, r = api.j("PUT", "/config", {"filament_slot": "1"})
+        check("filament_slot of the wrong type refused", status == 400 and r.get("error") == "bad_filament_slot", f"HTTP {status} {r}")
+        status, r = api.j("PUT", "/config", {"filament_slot": len(slots)})
+        check("filament_slot out of range refused", status == 422 and r.get("error") == "bad_filament_slot", f"HTTP {status} {r}")
+        out.extend(_filament_slot_write(api, slots))
     status, r = api.j("PUT", "/preset", {"type": "filament", "name": "No Such Filament Preset"})
     check("unknown preset refused", status == 422 and r.get("error") == "unknown_preset", f"HTTP {status} {r}")
 
