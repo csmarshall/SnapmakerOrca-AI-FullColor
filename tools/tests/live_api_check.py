@@ -124,6 +124,84 @@ def restore_selection(api: Api, st: dict) -> None:
         api.j("PUT", "/preset", {"type": "filament", "name": name, "extruder": i})
 
 
+def _volumes(api: Api, oid) -> list[dict]:
+    status, r = api.j("GET", f"/objects/{oid}")
+    vols = r.get("volumes") if status == 200 and isinstance(r, dict) else None
+    return vols if isinstance(vols, list) else []
+
+
+def _object_checks(api: Api, check) -> None:
+    """Part-level settings and modifier volumes. Needs one object on the plate; every write restores in `finally`."""
+    status, r = api.j("GET", "/objects")
+    objects = r.get("objects", []) if status == 200 and isinstance(r, dict) else []
+    check("fixture: an object is loaded", len(objects) >= 1, f"HTTP {status} count {len(objects)}")
+    if not objects:
+        return
+    oid = objects[0]["id"]
+    before = _volumes(api, oid)
+    parts = [v for v in before if v.get("type") == "part"]
+    check("object lists its volumes", bool(parts), f"{len(before)} volumes")
+    base = f"/objects/{oid}/volumes"
+    part = parts[0].get("index", 0) if parts else 0
+
+    def volume_write(path: str, body: dict) -> tuple[int, dict]:
+        prev = {k: v for k, v in (parts[0].get("config") or {}).items() if k in body} if parts else {}
+        status, r = None, {}
+        try:
+            status, r = api.j("PUT", path, body)
+        finally:
+            leaked = [k for k in _applied_keys(r) if k in prev]
+            if leaked:
+                api.j("PUT", path, {k: prev[k] for k in leaked})
+        return status, r
+
+    status, r = volume_write(f"{base}/{part}/config", {"post_process": "x"})
+    check("volume forbidden write refused", r.get("applied") == [] and r.get("errors", {}).get("post_process") == "forbidden_key",
+          f"HTTP {status} {json.dumps(r)[:120]}")
+    status, r = volume_write(f"{base}/{part}/config", {"printer_agent": "live-check-not-an-agent"})
+    check("volume policy-gated change refused", r.get("applied") == [] and r.get("errors", {}).get("printer_agent") == "blocked_by_remote_api_policy",
+          f"HTTP {status} {json.dumps(r)[:120]}")
+    status, r = api.j("PUT", f"{base}/9999/config", {"wall_loops": 2})
+    check("unknown volume is 404", status == 404 and r.get("error") == "unknown_volume", f"HTTP {status} {r}")
+    status, r = api.j("PUT", f"{base}/x/config", {"wall_loops": 2})
+    check("bad volume index is 400", status == 400 and r.get("error") == "bad_volume_index", f"HTTP {status} {r}")
+
+    for label, size in (("zero", [0, 5, 5]), ("huge", [1e9, 5, 5])):
+        status, r = api.j("POST", f"/objects/{oid}/modifiers", {"shape": "box", "size": size})
+        check(f"modifier with a {label} size refused", status == 400 and r.get("error") == "bad_modifier", f"HTTP {status} {r}")
+        if status == 200:   # the guard did not hold: take the stray volume away again
+            for v in _volumes(api, oid):
+                if v.get("id") == (r.get("volume") or {}).get("id"):
+                    api.j("DELETE", f"{base}/{v.get('index')}")
+    status, r = api.j("POST", f"/objects/{oid}/modifiers", {"shape": "box", "size": [5, 5, 5], "config": {"post_process": "x"}})
+    after = _volumes(api, oid)
+    check("modifier with a forbidden initial key refused and nothing added", status == 422 and len(after) == len(before),
+          f"HTTP {status} volumes {len(before)} -> {len(after)}")
+    if len(after) > len(before):
+        for v in after[len(before):]:
+            api.j("DELETE", f"{base}/{v.get('index')}")
+    status, r = api.j("DELETE", f"{base}/{part}")
+    check("deleting a part volume refused", status == 422 and r.get("error") == "cannot_delete_part", f"HTTP {status} {r}")
+
+    # Control: add a modifier, see it listed with its override, write the value back, delete it.
+    ok, detail, vid = False, "", None
+    try:
+        status, r = api.j("POST", f"/objects/{oid}/modifiers",
+                          {"shape": "box", "size": [5, 5, 5], "config": {"sparse_infill_density": "15%"}})
+        vid = (r.get("volume") or {}).get("id") if isinstance(r, dict) else None
+        listed = next((v for v in _volumes(api, oid) if vid is not None and v.get("id") == vid), None)
+        if status == 200 and listed and listed.get("type") == "modifier" and (listed.get("config") or {}).get("sparse_infill_density") == "15%":
+            status, r = api.j("PUT", f"{base}/{listed['index']}/config", {"sparse_infill_density": "15%"})
+            ok = status == 200 and "sparse_infill_density" in _applied_keys(r)
+        detail = f"HTTP {status} {json.dumps(r)[:120]}"
+    finally:
+        for v in _volumes(api, oid):
+            if vid is not None and v.get("id") == vid:
+                api.j("DELETE", f"{base}/{v.get('index')}")
+    ok = ok and len(_volumes(api, oid)) == len(before)
+    check("control: modifier add, list, write-back, delete round-trip", ok, detail)
+
+
 def run_checks(api: Api) -> list[tuple[str, bool, str]]:
     out: list[tuple[str, bool, str]] = []
 
@@ -218,6 +296,8 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
     status, r = api.j("GET", "/presets?type=printer")
     check("presets filter returns only the requested collection", set(r) == {"printer"}, f"keys {sorted(r)}")
 
+    _object_checks(api, check)
+
     bad = Api(api.base.rsplit("/api/v1", 1)[0], "not-the-token")
     status_bad, _ = bad.call("GET", "/status")
     check("wrong token is refused", status_bad in (401, 403), f"HTTP {status_bad}")
@@ -231,9 +311,10 @@ CONTROLS = {
     "control: policy-gated key written back unchanged passes",
     "control: a *_gcode switch is not blocked as code",
     "control: re-selecting a slot's own filament succeeds and changes nothing",
+    "control: modifier add, list, write-back, delete round-trip",
 }
 # Reads that succeed against both fakes: they say the fixture is alive, not that a guard works.
-READS_THAT_PASS_EVERYWHERE = {"status reachable", "status lists filament slots"}
+READS_THAT_PASS_EVERYWHERE = {"status reachable", "status lists filament slots", "fixture: an object is loaded", "object lists its volumes"}
 # The fakes do not model per-slot nozzle_temperature, so this write check cannot run against them (it fails on both).
 NOT_EXERCISED_BY_FAKES = {"filament_slot write changes only the slots sharing that preset"}
 EXPECTED_PASS_WHEN_ACCEPTING = CONTROLS | READS_THAT_PASS_EVERYWHERE
@@ -254,9 +335,16 @@ class _Fake(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
 
+    def _vols(self) -> list[dict]:
+        return [{"index": 0, "id": 70, "type": "part", "config": {}}]
+
     def _get_common(self):
         if self.path.startswith("/api/v1/status"):
             return self._send(200, _STATUS)
+        if self.path.startswith("/api/v1/objects"):
+            if self.path.rstrip("/").endswith("/objects"):
+                return self._send(200, {"objects": [{"id": 7, "name": "cube"}], "count": 1})
+            return self._send(200, {"id": 7, "volumes": self._vols()})
         if self.path.startswith("/api/v1/config"):
             keys = (self.path.split("keys=", 1) + [""])[1].split(",")
             return self._send(200, {"config": {k: _CONFIG[k] for k in keys if k in _CONFIG}})
@@ -272,12 +360,20 @@ class _AcceptEverything(_Fake):
         if self._get_common() is None:
             self._send(200, {"printer": [], "filament": [], "print": []})
 
+    def _vols(self) -> list[dict]:   # a modifier is always there, so the round-trip control finds it
+        return super()._vols() + [{"index": 1, "id": 71, "type": "modifier", "config": {"sparse_infill_density": "15%"}}]
+
+    def do_DELETE(self):
+        self._send(200, {"deleted": True})
+
     def do_PUT(self):
         body = self._body()
         self._send(200, {"applied": list(body), "errors": {}, "selected": body.get("name"), "extruder": body.get("extruder", 0)})
 
     def do_POST(self):
         body = self._body()
+        if self.path.endswith("/modifiers"):
+            return self._send(200, {"volume": {"index": 1, "id": 71, "type": "modifier"}})
         if self.path.endswith("/preset/config"):
             return self._send(200, {"config": {"printhost_apikey": "SECRET", "print_host": "http://u:p@h"}})
         self._send(200, {"loaded": True, "path": body.get("path")})
@@ -298,8 +394,20 @@ class _RefuseEverything(_Fake):
             return self._send(200, {"printer": []})
         self._deny(400, "bad_param")
 
+    def do_DELETE(self):
+        self._deny(422, "cannot_delete_part")
+
     def do_PUT(self):
         body = self._body()
+        if "/volumes/" in self.path:
+            index = self.path.split("/volumes/", 1)[1].split("/", 1)[0]
+            if not index.isdigit():
+                return self._deny(400, "bad_volume_index")
+            if int(index) != 0:
+                return self._deny(404, "unknown_volume")
+            errors = {k: "forbidden_key" if k == "post_process" else "blocked_by_remote_api_policy" if k == "printer_agent" else "refused"
+                      for k in body}
+            return self._send(200, {"applied": [], "errors": errors})
         if self.path.endswith("/config"):
             slot = body.get("filament_slot")
             if "filament_slot" in body:
@@ -323,6 +431,11 @@ class _RefuseEverything(_Fake):
 
     def do_POST(self):
         body = self._body()
+        if self.path.endswith("/modifiers"):
+            size = body.get("size", [])
+            if not size or any(not 0.1 <= n <= 1000 for n in size):
+                return self._deny(400, "bad_modifier")
+            return self._deny(422 if "post_process" in body.get("config", {}) else 403, "refused")
         if self.path.endswith("/preset/config"):
             return self._send(200, {"config": {"printhost_apikey": "<redacted>", "print_host": "<redacted>"}})
         path = str(body.get("path", ""))
