@@ -438,6 +438,14 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Json" }
   /objects/{id}:
+    get:
+      summary: One object with its volumes (parts, modifiers, support blockers/enforcers)
+      operationId: getObject
+      description: Returns the object's id, index, name and config plus `volumes`, an array of {index, id, name, type (part, negative, modifier, support_blocker, support_enforcer), extruder, config}. Volume indices are re-sorted by the slicer after a modifier is added or a volume deleted, so re-read before addressing a volume.
+      parameters: [ { $ref: "#/components/parameters/ObjectId" } ]
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+        "404": { $ref: "#/components/responses/Json" }
     delete:
       summary: Delete an object
       operationId: deleteObject
@@ -496,6 +504,80 @@ paths:
             schema: { type: object, additionalProperties: true }
       responses:
         "200": { $ref: "#/components/responses/Json" }
+        "422": { $ref: "#/components/responses/Json" }
+  /objects/{id}/volumes/{v}/config:
+    put:
+      summary: Set per-volume (per-part or per-modifier) setting overrides (atomic)
+      operationId: putObjectVolumeConfig
+      description: Same rules as putObjectConfig (forbidden keys refused, policy-gated keys refused, nothing applied if any key is invalid) but for one volume of the object. `v` is the 0-based volume index from getObject.
+      x-mutating: true
+      parameters: [ { $ref: "#/components/parameters/ObjectId" }, { $ref: "#/components/parameters/VolumeIndex" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+        "400":
+          description: Body is not an object, or `v` is not a non-negative integer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                index: { value: { error: "bad_volume_index" } }
+        "404":
+          description: Unknown object or volume.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                object: { value: { error: "unknown_object" } }
+                volume: { value: { error: "unknown_volume", volumes: 2 } }
+        "422": { $ref: "#/components/responses/Json" }
+  /objects/{id}/volumes/{v}:
+    delete:
+      summary: Delete a modifier, support blocker/enforcer or negative volume (never a part)
+      operationId: deleteObjectVolume
+      description: Parts cannot be deleted through the API (422 cannot_delete_part), so the last part is safe by construction. A negative volume of a cut object is refused (422 cut_object). Indices of the remaining volumes may shift; re-read getObject. When one volume is left the slicer folds its overrides into the object config, as the GUI does.
+      x-mutating: true
+      x-destructive: true
+      parameters: [ { $ref: "#/components/parameters/ObjectId" }, { $ref: "#/components/parameters/VolumeIndex" } ]
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+        "400": { $ref: "#/components/responses/Json" }
+        "404": { $ref: "#/components/responses/Json" }
+        "422": { $ref: "#/components/responses/Json" }
+  /objects/{id}/modifiers:
+    post:
+      summary: Add a box or cylinder modifier volume to an object
+      operationId: addObjectModifier
+      description: "`shape` box takes size [x,y,z] mm; cylinder takes size [diameter,height] mm. `offset` [x,y,z] mm is relative to the centre of the object's bounding box along the bed axes (default [0,0,0]). `type` defaults to modifier. Optional `config` is validated like putObjectVolumeConfig before anything is added. The new volume is not selected. Returns the new volume record at its post-sort index."
+      x-mutating: true
+      parameters: [ { $ref: "#/components/parameters/ObjectId" } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [shape, size]
+              properties:
+                shape:  { type: string, enum: [box, cylinder] }
+                size:   { type: array, items: { type: number, minimum: 0.1, maximum: 1000 }, minItems: 2, maxItems: 3 }
+                offset: { type: array, items: { type: number, minimum: -10000, maximum: 10000 }, minItems: 3, maxItems: 3 }
+                type:   { type: string, enum: [modifier, support_blocker, support_enforcer], default: modifier }
+                config: { type: object, additionalProperties: true, description: "Initial setting overrides for the new volume." }
+      responses:
+        "200": { $ref: "#/components/responses/Json" }
+        "400":
+          description: Missing or out-of-range shape, size, offset or type.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                size: { value: { error: "bad_modifier" } }
+        "404": { $ref: "#/components/responses/Json" }
         "422": { $ref: "#/components/responses/Json" }
   /objects/{id}/layer_height:
     put:
@@ -664,6 +746,7 @@ paths:
             image/png: { schema: { type: string, format: binary } }
 components:
   parameters:
+    VolumeIndex: { name: v, in: path, required: true, schema: { type: integer, minimum: 0 }, description: "0-based volume index from getObject; re-read after adding or deleting a volume." }
     ObjectId: { name: id, in: path, required: true, schema: { type: integer, format: int64 }, description: "Object id from getObjects." }
   securitySchemes:
     ApiToken:

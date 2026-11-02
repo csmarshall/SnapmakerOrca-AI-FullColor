@@ -45,6 +45,10 @@ Base URL: `http://<host>:13130/api/v1`
 | POST | `/plates/{i}/select` | Make plate `i` the current one |
 | DELETE | `/plates/{i}` | Delete plate `i` (its objects are parked beside the bed, not deleted) |
 | POST | `/objects/{id}/plate` | Move an object onto plate `i` |
+| GET | `/objects/{id}` | One object with its volumes (parts, modifiers, blockers, enforcers) |
+| PUT | `/objects/{id}/volumes/{v}/config` | Per-volume setting overrides (atomic, same guards as the object endpoint) |
+| POST | `/objects/{id}/modifiers` | Add a box or cylinder modifier / support blocker / enforcer |
+| DELETE | `/objects/{id}/volumes/{v}` | Delete a non-part volume |
 
 ### GET /status
 
@@ -325,3 +329,35 @@ target or the plate it sits on is locked; `plate` names which) `| move_failed`,
   clients stay connected.
 - **No SO_REUSEADDR pitfalls.** The listener sets `SO_REUSEADDR`, so restarting
   the app rebinds the port cleanly even if a prior socket is in `TIME_WAIT`.
+
+### Part-level settings and modifiers
+
+`GET /objects/{id}` returns `{id, index, name, config, volumes}`; each volume is
+`{index, id, name, type, extruder, config}` with `type` one of `part`, `negative`,
+`modifier`, `support_blocker`, `support_enforcer`.
+
+```bash
+curl -X POST -H "X-Api-Token: $TOK" -H "Content-Type: application/json" \
+  -d '{"shape":"box","size":[20,20,10],"offset":[0,0,5],"config":{"sparse_infill_density":"40%"}}' \
+  http://localhost:13130/api/v1/objects/832/modifiers
+curl -X PUT -H "X-Api-Token: $TOK" -H "Content-Type: application/json" \
+  -d '{"wall_loops":4}' http://localhost:13130/api/v1/objects/832/volumes/1/config
+curl -X DELETE -H "X-Api-Token: $TOK" http://localhost:13130/api/v1/objects/832/volumes/1
+```
+
+- `PUT .../volumes/{v}/config` follows `PUT /objects/{id}/config` exactly: a forbidden key
+  is `forbidden_key`, an unknown one `unknown_key`, a policy-gated one
+  `blocked_by_remote_api_policy`, and nothing is applied if any key fails (`422`). Errors:
+  `400 bad_volume_index`, `404 unknown_object | unknown_volume`. It takes an undo snapshot.
+- `POST .../modifiers`: `shape` is `box` (`size` = [x,y,z]) or `cylinder` (`size` =
+  [diameter,height]), in mm, each 0.1 to 1000. `offset` (mm, within +-10000) is relative to the
+  centre of the object's bounding box along the bed axes. `type` defaults to `modifier`. A
+  bad number gives `400 bad_modifier`; an invalid or forbidden `config` key gives `422` and adds
+  nothing. The new volume is not selected and no tips dialog is shown.
+- `DELETE .../volumes/{v}` removes modifiers, blockers, enforcers and negative volumes
+  only: a part gives `422 cannot_delete_part`, a cut object's negative volume `422 cut_object`.
+  When one volume is left the slicer folds its overrides into the object config, as the
+  window does.
+- Volume indices are re-sorted after an add or delete (parts first). Always re-read
+  `GET /objects/{id}` before addressing a volume; `id` is the volume's stable id.
+- Any print key is accepted, as for objects; some (for example `layer_height` on a modifier) have no effect.
