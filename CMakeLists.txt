@@ -281,7 +281,10 @@ if (APPLE)
     if (CMAKE_MACOSX_BUNDLE)
         set(CMAKE_INSTALL_RPATH @executable_path/../Frameworks)
     endif()
-    SET(CMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.orcaslicer.OrcaSlicer")
+    # This build's own macOS bundle id. Sharing stock OrcaSlicer's id would share its preferences,
+    # saved window state and privacy grants; one constant, used by Info.plist.in and the helper app.
+    set(ORCA_BUNDLE_ID "com.wozi.orca-snapmaker-ai-fc" CACHE STRING "macOS bundle identifier of this build")
+    SET(CMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${ORCA_BUNDLE_ID}")
 
     # The macOS CI jobs build with Ninja (build_release_macos.sh -x), so the Xcode generator
     # is not covered. Xcode adds -Wshorten-64-to-32 by default ("Implicit Conversion to 32 Bit
