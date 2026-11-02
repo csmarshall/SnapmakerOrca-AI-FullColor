@@ -55,3 +55,6 @@ __pycache__/
 /.test/
 docs/superpowers/
 ctest_results.xml
+
+# Probe runs copy data dirs here when asked; never commit them
+e2e-*/

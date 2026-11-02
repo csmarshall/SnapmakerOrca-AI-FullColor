@@ -519,5 +519,24 @@ class AdvisoryTests(unittest.TestCase):
         self.assertAlmostEqual(r["data"]["maxVonMises"], 6.0, delta=0.6)
 
 
+class ProbeVerdictTests(unittest.TestCase):
+    """run_probe.verdict decides the probe's exit code; it is exercised on canned probe output, never an app."""
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "plugin_write_probe"))
+        import run_probe
+        cls.probe = run_probe
+
+    def test_exit_code_follows_expectation_and_the_layer_height_control(self):
+        raised = "layer_height: APPLIED\npost_process: RAISED RuntimeError: x\n"
+        applied = "layer_height: APPLIED\npost_process: APPLIED\n"
+        self.assertEqual(self.probe.verdict(raised, "raised"), 0)
+        self.assertEqual(self.probe.verdict(raised, "applied"), 1)
+        self.assertEqual(self.probe.verdict(applied, "applied"), 0)
+        self.assertEqual(self.probe.verdict(applied, "raised"), 1)
+        self.assertEqual(self.probe.verdict("layer_height: RAISED X: y\npost_process: RAISED X: y\n", "raised"), 1)   # control failed
+        self.assertEqual(self.probe.verdict("garbage", "raised"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
