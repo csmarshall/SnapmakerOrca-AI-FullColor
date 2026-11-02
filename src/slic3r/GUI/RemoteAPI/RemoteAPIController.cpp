@@ -325,7 +325,7 @@ Response Controller::handle_status()
             {"plates", {{"count", plates.get_plate_count()}, {"current", plates.get_curr_plate_index()}}},
             {"app_version", SLIC3R_VERSION},
             {"api_version", "1.0"},
-            {"capabilities", {"status", "config", "slice", "events", "model", "preset", "gcode", "objects", "arrange", "orient", "object_config", "slice_breakdown", "plate_render", "sensitive_key_policy", "plates"}},
+            {"capabilities", {"status", "config", "slice", "events", "model", "preset", "gcode", "objects", "arrange", "orient", "object_config", "slice_breakdown", "plate_render", "preset_discard", "sensitive_key_policy", "plates"}},
             {"sensitive_keys_allowed", sensitive_writes_allowed()},
             {"project", plater->get_project_filename().ToUTF8().data()},
             {"objects", objects},
@@ -1595,11 +1595,33 @@ Response Controller::handle_save_preset(const std::string &body)
         Tab *tab = wxGetApp().get_tab(type);
         if (tab == nullptr) return {{"error", "tab_unavailable"}};
         bool created = existing == nullptr;
+        // Tab::save_preset re-points every filament slot that used the edited preset's old name to the new
+        // name (Sidebar::update_presets_from_to). Snapshot the slots so the response can say which moved.
+        const std::string previous_preset = presets.get_edited_preset().name;
+        const std::vector<std::string> slots_before = bundle->filament_presets;
         tab->save_preset(name, detach, /*save_to_project=*/false);
         // save_preset returns void; confirm the preset actually landed.
         const Preset *saved = presets.find_preset(name, false);
         if (saved == nullptr) return {{"error", "save_failed"}};
-        return {{"saved", name}, {"created", created}};
+        nlohmann::json res = {{"saved", name}, {"created", created}};
+        if (type == Preset::TYPE_FILAMENT) {
+            nlohmann::json repointed = nlohmann::json::array(), using_saved = nlohmann::json::array(), odd = nlohmann::json::array();
+            const std::vector<std::string> &after = bundle->filament_presets;
+            for (size_t i = 0; i < after.size(); ++i) {
+                if (after[i] == name) using_saved.push_back(i);
+                if (i < slots_before.size() && slots_before[i] != after[i]) {
+                    repointed.push_back(i);
+                    if (after[i] != name) odd.push_back(i);   // a slot moved somewhere other than the saved preset
+                }
+            }
+            if (!odd.empty())
+                return {{"error", "slot_repoint_unexpected"}, {"repointed_slots", repointed}, {"slots_using_saved_preset", using_saved},
+                        {"previous_preset", previous_preset}};
+            res["previous_preset"]          = previous_preset;
+            res["repointed_slots"]          = repointed;
+            res["slots_using_saved_preset"] = using_saved;
+        }
+        return res;
     });
     if (r.contains("error")) {
         if (r["error"] == "name_reserved") {
@@ -1609,6 +1631,62 @@ Response Controller::handle_save_preset(const std::string &body)
         return { 500, r };
     }
     api_notify((r["created"].get<bool>() ? "Saved new " : "Updated ") + type_s + " preset '" + name + "'");
+    return { 200, r };
+}
+
+// POST /api/v1/preset/discard  body {"type":"print|filament|printer"}
+// Drops the collection's unsaved edits through the tab's own "back to saved values" path
+// (Tab::on_roll_back_value), which opens no dialog, and refreshes the tab and sidebar. It can only
+// return values to the preset saved on disk, never to a caller-chosen value.
+Response Controller::handle_discard_preset(const std::string &body)
+{
+    nlohmann::json in = nlohmann::json::parse(body);
+    if (!in.is_object() || !in.contains("type") || !in["type"].is_string())
+        return { 400, {{"error", "missing_fields"}} };
+    const std::string type_s = in["type"].get<std::string>();
+    Preset::Type type = type_s == "print"    ? Preset::TYPE_PRINT :
+                        type_s == "filament" ? Preset::TYPE_FILAMENT :
+                        type_s == "printer"  ? Preset::TYPE_PRINTER : Preset::TYPE_INVALID;
+    if (type == Preset::TYPE_INVALID)
+        return { 400, {{"error", "unknown_type"}} };
+
+    nlohmann::json r = run_on_ui([type, type_s]() -> nlohmann::json {
+        auto *bundle = wxGetApp().preset_bundle;
+        PresetCollection &presets = type == Preset::TYPE_PRINT    ? bundle->prints :
+                                    type == Preset::TYPE_FILAMENT ? bundle->filaments :
+                                                                    bundle->printers;
+        Tab *tab = wxGetApp().get_tab(type);
+        if (tab == nullptr) return {{"error", "tab_unavailable"}};
+        // With the sidebar filament editor open, the refresh after a discard writes the Filament-tab
+        // selection into the slot being edited (Sidebar::update_presets); refuse, as PUT /config does.
+        if (type == Preset::TYPE_FILAMENT)
+            if (const int editing = wxGetApp().sidebar().editing_filament_index(); editing >= 0)
+                return {{"error", "filament_editor_open"},
+                        {"detail", "filament slot " + std::to_string(editing) + " is open in the filament editor; close it before discarding"}};
+        const std::string preset = presets.get_edited_preset().name;
+        if (!presets.current_is_dirty())
+            return {{"type", type_s}, {"preset", preset}, {"discarded", false}, {"dropped_keys", nlohmann::json::array()}};
+        const nlohmann::json keys = presets.current_dirty_options(true);
+        tab->on_roll_back_value(/*to_sys=*/false);
+        if (presets.current_is_dirty()) {
+            // on_roll_back_value returns early when the preset's is_dirty flag is unset; fall back to the collection
+            // and let the tab pick up the restored config.
+            presets.discard_current_changes();
+            tab->reload_config();
+            tab->update_dirty();
+        }
+        wxGetApp().plater()->update_project_dirty_from_presets();
+        if (type == Preset::TYPE_FILAMENT)
+            wxGetApp().sidebar().update_dynamic_filament_list();
+        if (presets.current_is_dirty()) return {{"error", "discard_failed"}};
+        return {{"type", type_s}, {"preset", preset}, {"discarded", true}, {"dropped_keys", keys}};
+    });
+    if (r.contains("error")) {
+        const std::string e = r["error"].get<std::string>();
+        return { e == "filament_editor_open" ? 409 : 500, r };
+    }
+    if (r["discarded"].get<bool>())
+        api_notify("Discarded unsaved " + type_s + " changes in '" + r["preset"].get<std::string>() + "'");
     return { 200, r };
 }
 
@@ -2575,6 +2653,13 @@ Response Controller::dispatch(const Request &req)
         if (is("POST", "/api/v1/preset/save")) {
             try {
                 return handle_save_preset(req.body);
+            } catch (const nlohmann::json::parse_error &) {
+                return { 400, {{"error", "invalid_json"}} };
+            }
+        }
+        if (is("POST", "/api/v1/preset/discard")) {
+            try {
+                return handle_discard_preset(req.body);
             } catch (const nlohmann::json::parse_error &) {
                 return { 400, {{"error", "invalid_json"}} };
             }

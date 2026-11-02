@@ -37,6 +37,9 @@ Base URL: `http://<host>:13130/api/v1`
 | GET | `/status` | App/project/preset status + slice validity |
 | GET | `/config[?keys=a,b]` | Read merged config (secrets redacted) |
 | PUT | `/config` | Apply config edits live (atomic) |
+| PUT | `/preset` | Select a preset (409 `unsaved_changes` unless `discard:true`) |
+| POST | `/preset/discard` | Drop a collection's unsaved edits |
+| POST | `/preset/save` | Save the current edits as a user preset |
 | POST | `/slice` | Start slicing the current plate |
 | GET | `/slice/status` | Current/last slice state + stats + warnings |
 | WS | `/events?token=…` | Live event stream |
@@ -174,6 +177,46 @@ in `PUT`) and report why: `values_are_unchecked_extruder_indices` (`filament_map
 (`filament_colour_type`, `filament_multi_colour`), `derived_from_flush_volumes_matrix`
 (`flush_volumes_vector`), `live_printer_state_not_a_setting`
 (`has_filament_switcher`, `enable_filament_dynamic_map`).
+
+### PUT /preset
+
+`{"type":"print|filament|printer","name":"...","extruder":0?,"discard":false?}` selects a
+preset. Unsaved edits are never dropped silently: if any settings group is modified the
+call fails with 409 `unsaved_changes` and `dirty` lists the groups. `discard:true` drops
+the unsaved edits in EVERY dirty group (print, filament and printer), not just the named
+type, and the response lists them in `discarded_changes`. A non-boolean `discard` is 400
+`bad_discard`. To drop one collection's edits without selecting anything use
+`POST /preset/discard`.
+
+### POST /preset/discard
+
+`{"type":"print|filament|printer"}` reverts that collection to its saved preset through the
+tab's own "back to saved values" path (`Tab::on_roll_back_value`), opens no dialog and
+refreshes the tab and sidebar. It can only return values to what is saved on disk.
+
+    {"type":"print","preset":"0.20mm Standard","discarded":true,"dropped_keys":["wall_loops"]}
+
+When nothing was modified it answers 200 with `discarded:false` and empty `dropped_keys`.
+Errors: 400 `missing_fields`/`unknown_type`, 409 `filament_editor_open` (the sidebar
+filament editor is open, so the refresh could rewrite the slot being edited; close it
+first), 500 `discard_failed`. Discarding printer edits can change the number of filament
+slots, as it does in the GUI.
+
+### POST /preset/save
+
+`{"type":"...","name":"...","detach":false?}` saves the collection's current edits as a
+user preset (create or update, no dialog). System presets cannot be overwritten (409).
+
+For `type=filament` the response also reports what happened to the slots:
+`previous_preset` (the preset that was being edited), `repointed_slots` (0-based slots
+whose preset changed) and `slots_using_saved_preset` (every slot on the saved name
+afterwards). The GUI's save-as moves exactly the slots that held the old preset (for
+example a system preset opened with `filament_slot`) to the new user preset and leaves
+the others alone; saving under the same name moves none. This is read from the source and
+reported, not re-implemented here; if a slot ever moved to a different name the call fails
+with 500 `slot_repoint_unexpected` listing the slots. Caveat: saving over a DIFFERENT
+existing user preset changes the settings of any slot already using that name, which
+`slots_using_saved_preset` makes visible.
 
 ### POST /slice
 

@@ -124,6 +124,77 @@ def restore_selection(api: Api, st: dict) -> None:
         api.j("PUT", "/preset", {"type": "filament", "name": name, "extruder": i})
 
 
+TRANSFORM_GUARDS = [
+    ("scale 0", {"scale": [0, 1, 1]}),
+    ("translate 1e300", {"translate": [1e300, 0, 0]}),
+    ("non-number element", {"rotate": [0, "x", 0]}),
+    ("2-element vector", {"translate": [1, 2]}),
+]
+
+
+def _transform_guards(api: Api) -> list[tuple[str, bool, str]]:
+    """Validation runs before the object lookup, so a nonexistent id still reaches bad_transform and a broken guard
+    cannot move a real object. (NaN/Inf cannot be sent as strict JSON; they would come back as invalid_json.)"""
+    out = []
+    for label, body in TRANSFORM_GUARDS:
+        status, r = api.j("POST", "/objects/999999999/transform", body)
+        out.append((f"transform refuses {label}", status == 400 and r.get("error") == "bad_transform", f"HTTP {status} {json.dumps(r)[:100]}"))
+    return out
+
+
+def _dirty_print_checks(api: Api, st: dict) -> list[tuple[str, bool, str]]:
+    """PUT /preset discard:true drops unsaved edits in EVERY group, so refuse to run while anything is modified."""
+    out: list[tuple[str, bool, str]] = []
+    modified = {g: v for g, v in (st.get("modified") or {}).items() if v}
+    names = ["PUT /preset refuses to drop unsaved edits (409 unsaved_changes)", "PUT /preset rejects a non-boolean discard (400 bad_discard)",
+             "control: PUT /preset discard:true drops the print edit and restores the saved value",
+             "POST /preset/discard rejects an unknown type (400 unknown_type)",
+             "control: POST /preset/discard drops the print edit and restores the saved value"]
+    if modified:
+        return [(n, False, f"unsaved edits present {modified}; refusing to discard them") for n in names]
+    printp = st.get("presets", {}).get("print", "")
+    key = "wall_loops"
+    _, cur = api.j("GET", f"/config?keys={key}")
+    orig = str(cur.get("config", {}).get(key, ""))
+    if not orig.lstrip("-").isdigit():
+        return [(n, False, f"{key} is not an integer: {orig!r}") for n in names]
+    edited = str(int(orig) + 1)
+
+    def dirty() -> int:
+        return api.j("PUT", "/config", {key: edited})[0]
+
+    def value() -> str:
+        return str(api.j("GET", f"/config?keys={key}")[1].get("config", {}).get(key, ""))
+
+    leaked = False
+    try:
+        dirty()
+        status, r = api.j("PUT", "/preset", {"type": "print", "name": printp})
+        leaked |= status == 200
+        out.append((names[0], status == 409 and r.get("error") == "unsaved_changes" and "print" in r.get("dirty", []), f"HTTP {status} {json.dumps(r)[:120]}"))
+        status, r = api.j("PUT", "/preset", {"type": "print", "name": printp, "discard": "yes"})
+        leaked |= status == 200
+        out.append((names[1], status == 400 and r.get("error") == "bad_discard", f"HTTP {status} {json.dumps(r)[:120]}"))
+        dirty()
+        status, r = api.j("PUT", "/preset", {"type": "print", "name": printp, "discard": True})
+        _, st3 = api.j("GET", "/status")
+        out.append((names[2], status == 200 and "print" in r.get("discarded_changes", []) and value() == orig
+                    and not (st3.get("modified") or {}).get("print"), f"HTTP {status} {json.dumps(r)[:120]} value {value()!r} want {orig!r}"))
+        status, r = api.j("POST", "/preset/discard", {"type": "bogus"})
+        out.append((names[3], status == 400 and r.get("error") == "unknown_type", f"HTTP {status} {json.dumps(r)[:100]}"))
+        dirty()
+        status, r = api.j("POST", "/preset/discard", {"type": "print"})
+        _, st4 = api.j("GET", "/status")
+        out.append((names[4], status == 200 and r.get("discarded") is True and key in r.get("dropped_keys", []) and value() == orig
+                    and not (st4.get("modified") or {}).get("print"), f"HTTP {status} {json.dumps(r)[:120]} value {value()!r} want {orig!r}"))
+    finally:   # put the saved value back whatever happened, and re-select if a refusal let a selection through
+        if value() != orig:
+            api.j("PUT", "/config", {key: orig})
+        if leaked:
+            restore_selection(api, st)
+    return out
+
+
 def run_checks(api: Api) -> list[tuple[str, bool, str]]:
     out: list[tuple[str, bool, str]] = []
 
@@ -205,6 +276,8 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
         status, r = guarded_write(api, {"filament_slot": len(slots)})
         check("filament_slot out of range refused", status == 422 and r.get("error") == "bad_filament_slot", f"HTTP {status} {r}")
         out.extend(_filament_slot_write(api, slots))
+    out.extend(_transform_guards(api))
+    out.extend(_dirty_print_checks(api, st))
     status, r = None, {}
     try:
         status, r = api.j("PUT", "/preset", {"type": "filament", "name": "No Such Filament Preset"})
@@ -237,10 +310,16 @@ READS_THAT_PASS_EVERYWHERE = {"status reachable", "status lists filament slots"}
 # The fakes do not model per-slot nozzle_temperature, so this write check cannot run against them (it fails on both).
 NOT_EXERCISED_BY_FAKES = {"filament_slot write changes only the slots sharing that preset"}
 EXPECTED_PASS_WHEN_ACCEPTING = CONTROLS | READS_THAT_PASS_EVERYWHERE
-EXPECTED_FAIL_WHEN_REFUSING = CONTROLS | NOT_EXERCISED_BY_FAKES
+# Pass paths that only a real slicer can show (a fake that refuses everything cannot drop an edit).
+CONTROLS_NEEDING_A_REAL_SLICER = {
+    "control: PUT /preset discard:true drops the print edit and restores the saved value",
+    "control: POST /preset/discard drops the print edit and restores the saved value",
+}
+EXPECTED_FAIL_WHEN_REFUSING = CONTROLS | NOT_EXERCISED_BY_FAKES | CONTROLS_NEEDING_A_REAL_SLICER
 
-_CONFIG = {"layer_height": "0.2", "printer_agent": "orca", "emit_machine_limits_to_gcode": "0"}
-_STATUS = {"app": "fake", "presets": {"printer": "P", "print": "Q", "filaments": ["F1", "F2"]}}
+_CONFIG = {"layer_height": "0.2", "printer_agent": "orca", "emit_machine_limits_to_gcode": "0", "wall_loops": "2"}
+_STATUS = {"app": "fake", "presets": {"printer": "P", "print": "Q", "filaments": ["F1", "F2"]},
+           "modified": {"print": [], "filament": [], "printer": []}}
 
 
 class _Fake(BaseHTTPRequestHandler):
@@ -259,7 +338,8 @@ class _Fake(BaseHTTPRequestHandler):
             return self._send(200, _STATUS)
         if self.path.startswith("/api/v1/config"):
             keys = (self.path.split("keys=", 1) + [""])[1].split(",")
-            return self._send(200, {"config": {k: _CONFIG[k] for k in keys if k in _CONFIG}})
+            live = {**_CONFIG, **getattr(self.server, "state", {})}   # fixture writes overlay the static config
+            return self._send(200, {"config": {k: live[k] for k in keys if k in live}})
         return None
 
     def log_message(self, *_):
@@ -306,6 +386,9 @@ class _RefuseEverything(_Fake):
                 if not isinstance(slot, int):
                     return self._deny(400, "bad_filament_slot")
                 return self._deny(422 if slot >= len(_STATUS["presets"]["filaments"]) else 403, "bad_filament_slot" if slot >= 2 else "refused")
+            if set(body) == {"wall_loops"}:   # the dirty-print fixture write, not a control: a real slicer applies it, and it is what the 409 checks need
+                self.server.state["wall_loops"] = str(body["wall_loops"])
+                return self._send(200, {"applied": ["wall_loops"], "errors": {}})
             errors = {}
             for key in body:
                 if key == "printer_agent":
@@ -319,10 +402,22 @@ class _RefuseEverything(_Fake):
             return self._deny(400 if body["extruder"] < 0 or body.get("type") != "filament" else 422, "bad_extruder")
         if body.get("name") == "No Such Filament Preset":
             return self._deny(422, "unknown_preset")
+        if body.get("type") == "print":
+            if "discard" in body and not isinstance(body["discard"], bool):
+                return self._deny(400, "bad_discard")
+            if body.get("discard") is True:
+                return self._deny(403, "refused")   # control: a real slicer drops the edit here
+            if self.server.state.get("wall_loops", _CONFIG["wall_loops"]) != _CONFIG["wall_loops"]:
+                return self._send(409, {"error": "unsaved_changes", "dirty": ["print"], "applied": [], "errors": {}})
         self._deny(403, "refused")
 
     def do_POST(self):
         body = self._body()
+        if "/transform" in self.path:
+            return self._deny(400, "bad_transform")
+        if self.path.endswith("/preset/discard"):
+            return self._deny(400 if body.get("type") not in ("print", "filament", "printer") else 403,
+                              "unknown_type" if body.get("type") not in ("print", "filament", "printer") else "refused")
         if self.path.endswith("/preset/config"):
             return self._send(200, {"config": {"printhost_apikey": "<redacted>", "print_host": "<redacted>"}})
         path = str(body.get("path", ""))
@@ -334,6 +429,10 @@ class _RefuseEverything(_Fake):
 
 
 class _QuietServer(HTTPServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.state: dict[str, str] = {}   # fixture writes, per server, so the two fakes never share edits
+
     def handle_error(self, request, client_address):   # a client hanging up mid-response is not interesting here
         pass
 
