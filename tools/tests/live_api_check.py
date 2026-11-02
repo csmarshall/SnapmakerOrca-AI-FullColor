@@ -104,6 +104,19 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
         check(f"forbidden write refused: {key}", r.get("applied") == [] and r.get("errors", {}).get(key) == "forbidden_key",
               f"HTTP {status} {json.dumps(r)[:100]}")
 
+    # Preferences > Remote API "Allow printer-type and connection-agent edits" is off by default:
+    # a CHANGE to a policy-gated key is refused, while writing its current value back passes.
+    _, cur = api.j("GET", "/config?keys=printer_agent")
+    agent = cur.get("config", {}).get("printer_agent")
+    status, r = api.j("PUT", "/config", {"printer_agent": "live-check-not-an-agent"})
+    check("policy-gated change refused while the toggle is off",
+          r.get("applied") == [] and r.get("errors", {}).get("printer_agent") == "blocked_by_remote_api_policy",
+          f"HTTP {status} {json.dumps(r)[:120]}")
+    if agent is not None:
+        status, r = api.j("PUT", "/config", {"printer_agent": agent})
+        check("control: policy-gated key written back unchanged passes", "printer_agent" in r.get("applied", []),
+              f"HTTP {status} {json.dumps(r)[:120]}")
+
     # control: an idempotent write must go through, so a refuse-everything bug cannot pass the checks above
     _, cur = api.j("GET", "/config?keys=layer_height")
     value = cur.get("config", {}).get("layer_height")
