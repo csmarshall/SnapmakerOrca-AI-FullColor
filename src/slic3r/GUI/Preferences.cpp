@@ -2355,6 +2355,18 @@ void PreferencesDialog::create_items()
         _L("Show a notification when an external tool changes settings, loads or edits objects, or switches presets."),
         "remote_api_notify"));
 
+    // Read by RemoteAPIController (sensitive_writes_allowed) on every write; absent = off.
+    // Scripts, custom G-code, print-host keys, printer model and filename format are refused
+    // by the controller's hard block whatever this says, so the wording claims only what
+    // ticking it actually unlocks.
+    g_sizer->Add(create_item_checkbox(_L("Allow printer-type and connection-agent edits"),
+        _L("Off (recommended): the API cannot change the printer technology, the printer agent, the "
+           "Flashforge serial number or the physical-printer preset names. Scripts, custom G-code, the "
+           "print host and its credentials, the printer model and the output filename format can never "
+           "be changed through the API, whatever this is set to. Writing back a value that is already "
+           "set is always allowed."),
+        "remote_api_allow_sensitive"));
+
     // A bounded spin box: the port can only ever be saved as 1-65535.
     // The spin box parses the stored value, so seed a missing key (first run) with the default port.
     if (!app_config->has("remote_api_port"))
