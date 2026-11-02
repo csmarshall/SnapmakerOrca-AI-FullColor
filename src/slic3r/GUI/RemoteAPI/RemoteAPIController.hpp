@@ -73,6 +73,10 @@ private:
     Response handle_transform_object(uint64_t id, const std::string &body); // M4b: POST /objects/{id}/transform
     Response handle_duplicate_object(uint64_t id);          // M4b: POST /objects/{id}/duplicate
     Response handle_put_object_config(uint64_t id, const std::string &body); // M4c: PUT /objects/{id}/config
+    Response handle_get_object(uint64_t id);                // GET /objects/{id} (with volumes)
+    Response handle_put_volume_config(uint64_t id, int vol, const std::string &body); // PUT /objects/{id}/volumes/{v}/config
+    Response handle_add_modifier(uint64_t id, const std::string &body);      // POST /objects/{id}/modifiers
+    Response handle_delete_volume(uint64_t id, int vol);    // DELETE /objects/{id}/volumes/{v}
     Response handle_arrange(const std::string &body);              // M4b: POST /arrange (async)
     Response handle_orient();                               // M4b: POST /orient (async)
     Response handle_jobs_status();                          // M4b: GET /jobs/status
