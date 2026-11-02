@@ -20,7 +20,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 FORBIDDEN_WRITES = ["post_process", "printer_model", "filename_format", "gcode_substitutions", "bed_custom_texture",
                     "bed_custom_model", "layer_change_gcode", "machine_start_gcode", "printhost_apikey", "printhost_port",
-                    "print_host", "print_host_webui", "bbl_use_printhost", "host_type"]
+                    "print_host", "print_host_webui", "bbl_use_printhost", "host_type",
+                    "imex_mode_gcodes", "load_custom_gcodes", "filament_start_gcode"]
 BAD_PATHS = ["//server/share/a.stl", "\\\\server\\share\\a.stl", "/\\server/a.stl", "\\/server/a.stl", "relative/a.stl",
              "\\??\\C:\\a.stl"]
 
