@@ -610,7 +610,9 @@ static const t_config_enum_values s_keys_map_BedType = {
     { "Engineering Plate",  btEP  },
     { "High Temp Plate",    btPEI  },
     { "Textured PEI Plate", btPTE },
-    { "Textured Cool Plate", btPCT }
+    { "Textured Cool Plate", btPCT },
+    // Snapmaker U1 plate; not in curr_bed_type enum_values, so other printers do not offer it
+    { "Graphic Effect Plate", btGESP }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BedType)
 
@@ -1392,6 +1394,25 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 300;
     def->set_default_value(new ConfigOptionInts{45});
+
+    // Snapmaker Graphic Effect Plate (U1). 0 means the filament does not support this plate.
+    def = this->add("graphic_effect_plate_temp", coInts);
+    def->label = L("Other layers");
+    def->tooltip = L("Bed temperature for layers except the initial one. A value of 0 means the filament does not support printing on this plate.");
+    def->sidetext = u8"\u2103" /* °C */;	// degrees Celsius, don't need translation
+    def->full_label = L("Bed temperature");
+    def->min = 0;
+    def->max = 300;
+    def->set_default_value(new ConfigOptionInts{0});
+
+    def = this->add("graphic_effect_plate_temp_initial_layer", coInts);
+    def->label = L("Initial layer");
+    def->full_label = L("Initial layer bed temperature");
+    def->tooltip = L("Bed temperature of the initial layer. A value of 0 means the filament does not support printing on this plate.");
+    def->sidetext = u8"\u2103" /* °C */;	// degrees Celsius, don't need translation
+    def->min = 0;
+    def->max = 300;
+    def->set_default_value(new ConfigOptionInts{0});
 
     def = this->add("supertack_plate_temp_initial_layer", coInts);
     def->label = L("First layer");
