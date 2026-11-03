@@ -142,6 +142,76 @@ def _transform_guards(api: Api) -> list[tuple[str, bool, str]]:
     return out
 
 
+TRANSFORM_SEMANTICS_CHECKS = [
+    "transform: GET /objects reports rotation_deg beside rotation (radians)",
+    "transform: translate is relative, in mm",
+    "transform: rotate is relative, degrees in; rotation in radians, rotation_deg in degrees",
+    "transform: scale is absolute (same factor twice gives the same scale)",
+    "transform: response and GET /objects agree",
+    "transform: bad vector refused (400 bad_transform)",
+    "transform: unknown instance refused (404 unknown_instance)",
+    "transform: original offset, rotation and scale restored",
+]
+_STEP_MM, _STEP_DEG, _TEST_SCALE = 5.0, 10.0, 1.25   # one named place for the probe sizes
+_RAD_PER_DEG = 0.017453292519943295
+
+
+def _first_instance(api: Api):
+    _, r = api.j("GET", "/objects")
+    for o in r.get("objects", []):
+        if isinstance(o.get("transform"), dict):
+            return o["id"], o["transform"]
+    return None, None
+
+
+def _transform_semantics(api: Api) -> list[tuple[str, bool, str]]:
+    """Pins down what POST /objects/{id}/transform does (translate/rotate relative, scale absolute) and that rotations are
+    reported in both radians and degrees. Every write is undone in the finally block."""
+    n = TRANSFORM_SEMANTICS_CHECKS
+    oid, t0 = _first_instance(api)
+    if oid is None:
+        return [(n[0], False, "no object with a transform in GET /objects")] + [(x, False, "no object") for x in n[1:]]
+    out: list[tuple[str, bool, str]] = []
+    path = f"/objects/{oid}/transform"
+    close = lambda a, b, tol=1e-6: len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
+    out.append((n[0], isinstance(t0.get("rotation_deg"), list) and close(t0["rotation_deg"], [d / _RAD_PER_DEG for d in t0["rotation"]], 1e-4),
+                f"transform {json.dumps(t0)[:160]}"))
+    moved = False
+    try:
+        moved = True
+        status, r = api.j("POST", path, {"translate": [_STEP_MM, 0, 0]})
+        t1 = r.get("transform", {})
+        out.append((n[1], status == 200 and close(t1.get("offset", []), [t0["offset"][0] + _STEP_MM, t0["offset"][1], t0["offset"][2]]),
+                    f"HTTP {status} {json.dumps(r)[:140]}"))
+        status, r = api.j("POST", path, {"rotate": [0, 0, _STEP_DEG]})
+        t2 = r.get("transform", {})
+        want_rad = [t0["rotation"][0], t0["rotation"][1], t0["rotation"][2] + _STEP_DEG * _RAD_PER_DEG]
+        want_deg = [d / _RAD_PER_DEG for d in want_rad]
+        out.append((n[2], status == 200 and close(t2.get("rotation", []), want_rad) and close(t2.get("rotation_deg", []), want_deg, 1e-4),
+                    f"HTTP {status} {json.dumps(r)[:160]} want rad {want_rad}"))
+        scales = []
+        for _ in range(2):
+            status, r = api.j("POST", path, {"scale": [_TEST_SCALE] * 3})
+            scales.append(r.get("transform", {}).get("scale", []))
+        out.append((n[3], status == 200 and all(close(s, [_TEST_SCALE] * 3) for s in scales), f"scales {scales}"))
+        _, now = _first_instance(api)
+        out.append((n[4], now is not None and close(now["rotation"], t2.get("rotation", [])) and close(now["offset"], t2.get("offset", []))
+                    and close(now["scale"], scales[-1]), f"GET {json.dumps(now)[:140]}"))
+        status, r = api.j("POST", path, {"translate": [1, 2]})
+        out.append((n[5], status == 400 and r.get("error") == "bad_transform", f"HTTP {status} {json.dumps(r)[:100]}"))
+        status, r = api.j("POST", path, {"translate": [1, 0, 0], "instance": 9999})
+        out.append((n[6], status == 404 and r.get("error") == "unknown_instance", f"HTTP {status} {json.dumps(r)[:100]}"))
+    finally:
+        if moved:   # inverse translate, inverse rotate, original scale: the handler adds per component, so this is exact
+            api.j("POST", path, {"translate": [-_STEP_MM, 0, 0]})
+            api.j("POST", path, {"rotate": [0, 0, -_STEP_DEG]})
+            api.j("POST", path, {"scale": t0["scale"]})
+    _, back = _first_instance(api)
+    out.append((n[7], back is not None and close(back["offset"], t0["offset"], 1e-6) and close(back["rotation"], t0["rotation"], 1e-9)
+                and close(back["scale"], t0["scale"], 1e-9), f"before {json.dumps(t0)[:100]} after {json.dumps(back)[:100]}"))
+    return out
+
+
 def _dirty_print_checks(api: Api, st: dict) -> list[tuple[str, bool, str]]:
     """PUT /preset discard:true drops unsaved edits in EVERY group, so refuse to run while anything is modified."""
     out: list[tuple[str, bool, str]] = []
@@ -371,6 +441,7 @@ def run_checks(api: Api) -> list[tuple[str, bool, str]]:
         check("filament_slot out of range refused", status == 422 and r.get("error") == "bad_filament_slot", f"HTTP {status} {r}")
         out.extend(_filament_slot_write(api, slots))
     out.extend(_transform_guards(api))
+    out.extend(_transform_semantics(api))
     out.extend(_dirty_print_checks(api, st))
     status, r = None, {}
     try:
@@ -404,6 +475,9 @@ CONTROLS = {
 }
 # Reads that succeed against both fakes: they say the fixture is alive, not that a guard works.
 READS_THAT_PASS_EVERYWHERE = {"status reachable", "status lists filament slots", "fixture: an object is loaded", "object lists its volumes"}
+# Both fakes model the transform endpoint (relative translate/rotate, absolute scale) for the fixture object, so these agree with the fakes everywhere.
+# That shows the check and the fakes agree, not that the C++ handler is right: only a live run against a build shows that.
+READS_THAT_PASS_EVERYWHERE |= set(TRANSFORM_SEMANTICS_CHECKS)
 # The fakes do not model per-slot nozzle_temperature, so this write check cannot run against them (it fails on both).
 NOT_EXERCISED_BY_FAKES = {"filament_slot write changes only the slots sharing that preset"}
 EXPECTED_PASS_WHEN_ACCEPTING = CONTROLS | READS_THAT_PASS_EVERYWHERE
@@ -434,12 +508,48 @@ class _Fake(BaseHTTPRequestHandler):
     def _vols(self) -> list[dict]:
         return [{"index": 0, "id": 70, "type": "part", "config": {}}]
 
+    def _xf(self) -> dict:
+        """The fixture object's single instance: offset mm, Euler rotation in RADIANS, scale factor (per server, like the app)."""
+        return self.server.state.setdefault("xf", {"offset": [10.0, 20.0, 0.0], "rotation": [0.0, 0.0, 0.1], "scale": [1.0, 1.0, 1.0]})
+
+    def _xf_view(self) -> dict:
+        x = self._xf()
+        return {**x, "rotation_deg": [r / _RAD_PER_DEG for r in x["rotation"]]}
+
+    def _apply_transform(self, body: dict) -> tuple[int, dict]:
+        """Mirrors the C++ handler: vectors of 3 finite numbers (400 bad_transform), instance 0 only (404 unknown_instance),
+        translate/rotate ADDED (mm, degrees in), scale REPLACED. Scale must be positive."""
+        limits = {"translate": (-10000, 10000), "rotate": (-3600, 3600), "scale": (1e-4, 1000)}
+        vecs = {}
+        for k, (lo, hi) in limits.items():
+            if k in body:
+                v = body[k]
+                if (not isinstance(v, list) or len(v) != 3 or any(isinstance(n, bool) or not isinstance(n, (int, float)) for n in v)
+                        or any(not lo <= n <= hi for n in v)):
+                    return 400, {"error": "bad_transform"}
+                vecs[k] = [float(n) for n in v]
+        if not vecs:
+            return 400, {"error": "no_transform"}
+        inst = body.get("instance", 0)
+        if not isinstance(inst, int) or isinstance(inst, bool):
+            return 400, {"error": "instance_must_be_integer"}
+        if inst != 0:
+            return 404, {"error": "unknown_instance", "instances": 1}
+        x = self._xf()
+        if "translate" in vecs:
+            x["offset"] = [a + b for a, b in zip(x["offset"], vecs["translate"])]
+        if "rotate" in vecs:
+            x["rotation"] = [a + b * _RAD_PER_DEG for a, b in zip(x["rotation"], vecs["rotate"])]
+        if "scale" in vecs:
+            x["scale"] = vecs["scale"]
+        return 200, {"id": 7, "instance": 0, "transform": self._xf_view()}
+
     def _get_common(self):
         if self.path.startswith("/api/v1/status"):
             return self._send(200, _STATUS)
         if self.path.startswith("/api/v1/objects"):
             if self.path.rstrip("/").endswith("/objects"):
-                return self._send(200, {"objects": [{"id": 7, "name": "cube"}], "count": 1})
+                return self._send(200, {"objects": [{"id": 7, "name": "cube", "transform": self._xf_view()}], "count": 1})
             return self._send(200, {"id": 7, "config": {"print_host": self.HOST_VALUE}, "volumes": self._vols()})
         if self.path.startswith("/api/v1/config"):
             keys = (self.path.split("keys=", 1) + [""])[1].split(",")
@@ -470,6 +580,8 @@ class _AcceptEverything(_Fake):
 
     def do_POST(self):
         body = self._body()
+        if self.path == "/api/v1/objects/7/transform":
+            return self._send(*self._apply_transform(body))
         if self.path.endswith("/modifiers"):
             return self._send(200, {"volume": {"index": 1, "id": 71, "type": "modifier"}})
         if self.path.endswith("/preset/config"):
@@ -539,6 +651,8 @@ class _RefuseEverything(_Fake):
 
     def do_POST(self):
         body = self._body()
+        if self.path == "/api/v1/objects/7/transform":
+            return self._send(*self._apply_transform(body))
         if "/transform" in self.path:
             return self._deny(400, "bad_transform")
         if self.path.endswith("/preset/discard"):
@@ -564,7 +678,7 @@ class _RefuseEverything(_Fake):
 class _QuietServer(HTTPServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.state: dict[str, str] = {}   # fixture writes, per server, so the two fakes never share edits
+        self.state: dict = {}   # fixture writes, per server, so the two fakes never share edits
 
     def handle_error(self, request, client_address):   # a client hanging up mid-response is not interesting here
         pass

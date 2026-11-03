@@ -434,7 +434,7 @@ paths:
     get:
       summary: List objects on the plate with transform, size, per-object config, layer-height ranges
       operationId: getObjects
-      description: Each object carries `transform` (instance 0) and `instances_detail`, an array of {index, offset, rotation (radians), scale} with one entry per instance.
+      description: Each object carries `transform` (instance 0) and `instances_detail`, an array of {index, offset (mm), rotation (radians), rotation_deg (degrees, same angles), scale} with one entry per instance. `transform.rotation_deg` is likewise added beside `transform.rotation`.
       responses:
         "200": { $ref: "#/components/responses/Json" }
   /objects/{id}:
@@ -458,7 +458,16 @@ paths:
     post:
       summary: Move, rotate and/or scale an object
       operationId: transformObject
-      description: Provide at least one of translate (mm), rotate (degrees) or scale (absolute factor), each as [x,y,z].
+      description: |
+        Provide at least one of translate, rotate or scale, each as [x,y,z] (exactly three finite numbers, else 400 bad_transform; none of them, 400 no_transform).
+        Applied to one instance (`instance`, default 0).
+        translate is RELATIVE: millimetres added to the instance offset (world frame), limit +-10000 per component.
+        rotate is RELATIVE: degrees added per component to the instance's stored Euler XYZ angles, limit +-3600 per component. With more than one non-zero axis this is not the same as an extra rotation about the world axes, and the angles are not normalised, so they can exceed 360 degrees.
+        scale is ABSOLUTE: the per-axis factor is set, not multiplied (sending [2,2,2] twice leaves 2), range 0.0001..1000; negative values are refused, so mirroring is impossible.
+        The three act on separate parts of the instance transform, so their order in one request does not matter. Rotation and scale act about the instance origin (the mesh origin), not the bounding-box centre.
+        After the change the object is re-dropped onto the bed if it was floating or touching (its lowest point at or above -0.001 mm) or lay wholly below it; one sunk part-way into the bed stays where it is. Check `bbox_min[2]` in GET /objects.
+        The response `transform` reports the instance after the change: offset in mm, rotation in RADIANS, rotation_deg in degrees (same angles), scale as factors.
+        Any failure to find the target returns 404: unknown_object, no_instance or unknown_instance.
       x-mutating: true
       parameters: [ { $ref: "#/components/parameters/ObjectId" } ]
       requestBody:
