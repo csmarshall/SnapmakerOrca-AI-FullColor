@@ -103,5 +103,11 @@
 	],
 	"filament_end_gcode": [
 		"; filament end gcode\n"
+	],
+	"filament_change_length": [
+		"6"
+	],
+	"filament_change_length_nc": [
+		"6"
 	]
 }

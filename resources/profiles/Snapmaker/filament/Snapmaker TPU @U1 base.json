@@ -28,5 +28,11 @@
 	],
 	"filament_cooling_final_speed": [
 		"60"
+	],
+	"filament_change_length": [
+		"6"
+	],
+	"filament_change_length_nc": [
+		"6"
 	]
 }

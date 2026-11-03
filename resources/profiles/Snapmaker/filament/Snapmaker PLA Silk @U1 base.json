@@ -49,5 +49,11 @@
 	],
 	"nozzle_temperature": [
 		"230"
+	],
+	"filament_change_length": [
+		"6"
+	],
+	"filament_change_length_nc": [
+		"6"
 	]
 }

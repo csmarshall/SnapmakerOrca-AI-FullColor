@@ -85,5 +85,11 @@
 	],
 	"nozzle_temperature_range_high": [
 		"255"
+	],
+	"filament_change_length": [
+		"6"
+	],
+	"filament_change_length_nc": [
+		"6"
 	]
 }

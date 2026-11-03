@@ -125,5 +125,11 @@
 	"filament_extruder_variant": [
 		"Direct Drive Standard",
 		"Direct Drive High Flow"
+	],
+	"filament_change_length": [
+		"6"
+	],
+	"filament_change_length_nc": [
+		"6"
 	]
 }

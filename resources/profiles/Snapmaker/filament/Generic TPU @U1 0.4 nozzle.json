@@ -23,5 +23,11 @@
 	"additional_cooling_fan_speed": [
 		"70",
 		"70"
+	],
+	"filament_change_length": [
+		"6"
+	],
+	"filament_change_length_nc": [
+		"6"
 	]
 }

@@ -72,5 +72,6 @@
 	"wall_generator": "arachne",
 	"compatible_printers": [],
 	"wipe_tower_extra_rib_length": "8",
-	"exclude_object": "1"
+	"exclude_object": "1",
+	"prime_tower_infill_gap": "120%"
 }
