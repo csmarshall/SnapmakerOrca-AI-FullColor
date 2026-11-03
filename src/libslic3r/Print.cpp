@@ -5295,7 +5295,7 @@ void Print::_make_wipe_tower()
                                                   ? float(m_default_region_config.first_layer_flow_ratio)
                                                   : 1.f);
         wipe_tower.set_has_tpu_filament(this->has_tpu_filament());
-        wipe_tower.set_tool_change_temp_in_gcode(!this->is_BBL_printer());
+        wipe_tower.set_tool_change_temp_in_gcode(this->tool_change_temp_in_gcode());
         // Per-layer filament->nozzle grouping. sort_and_build_data() above publishes it on the Print
         // for by-layer prints; by-object prints publish only later (psSkirtBrim), so fall back to the
         // ToolOrdering's own copy there. set_extruder() below dereferences it, so it must be set first.

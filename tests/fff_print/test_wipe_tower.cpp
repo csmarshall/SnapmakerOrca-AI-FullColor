@@ -673,3 +673,47 @@ TEST_CASE("Without sparse layers the filament change starts at the tallest print
         CHECK(tower_z < printed_z - EPSILON);
     }
 }
+
+// Slicer-written (N0) nozzle temperature commands inside the tower's regions.
+static size_t tower_slicer_m104_count(const std::string &tower)
+{
+    size_t count = 0;
+    std::istringstream lines(tower);
+    for (std::string line; std::getline(lines, line);)
+        if (line.rfind("M104", 0) == 0 && line.find(" N0") != std::string::npos)
+            ++count;
+    return count;
+}
+
+// A Type 1 tower with filament_cooling_before_tower set, so its reheat M104 is in play. `bbl` and
+// the ooze settings choose which half of Print::tool_change_temp_in_gcode() applies.
+static size_t type1_tower_slicer_m104s(bool bbl, bool ooze, int standby_delta)
+{
+    DynamicPrintConfig config = wipe_tower_toolchange_config("klipper");
+    config.set_deserialize_strict({ { "wipe_tower_type", "type1" },
+                                    { "filament_cooling_before_tower", "20,20" },
+                                    { "ooze_prevention", ooze ? "1" : "0" },
+                                    { "standby_temperature_delta", std::to_string(standby_delta) } });
+    Print print;
+    Model model;
+    init_print({ cube(10) }, print, model, config);
+    print.is_BBL_printer() = bbl;
+    print.apply(model, config);
+    return tower_slicer_m104_count(wipe_tower_regions(gcode(print)));
+}
+
+TEST_CASE("The tower drops its reheat M104 only when the main G-code replaces it", "[WipeTower]")
+{
+    // Non-BBL with ooze prevention on and a standby delta: GCode.cpp writes "M104 S<t> T<n>" after the
+    // tool change, so the tower's own N0 reheat goes.
+    const size_t replaced = type1_tower_slicer_m104s(false, true, -150);
+    // Ooze prevention off or no standby delta: nothing replaces it, the tower keeps its M104.
+    const size_t ooze_off   = type1_tower_slicer_m104s(false, false, -150);
+    const size_t no_delta   = type1_tower_slicer_m104s(false, true, 0);
+    // BBL keeps the tower's M104 whatever the ooze settings.
+    const size_t bbl        = type1_tower_slicer_m104s(true, true, -150);
+    CHECK(ooze_off > replaced);
+    CHECK(no_delta > replaced);
+    CHECK(bbl > replaced);
+    CHECK(replaced == 0);
+}

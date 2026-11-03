@@ -1344,6 +1344,14 @@ public:
     //SoftFever
     bool &is_BBL_printer() { return m_isBBLPrinter; }
     const bool is_BBL_printer() const { return m_isBBLPrinter; }
+    // True when a Type 1 tower leaves the new tool's temperature to the main G-code: GCode.cpp then writes
+    // "M104 S<t> T<n>" right after the tool change (as OozePrevention::post_toolchange does) and the tower drops its
+    // own reheat M104. One predicate for both halves, so the tower never drops an M104 that nobody replaces.
+    bool tool_change_temp_in_gcode() const
+    {
+        return !is_BBL_printer() && m_config.ooze_prevention.value && !m_config.single_extruder_multi_material.value
+            && m_config.standby_temperature_delta.value != 0;
+    }
     WipeTowerType wipe_tower_type() const { return is_BBL_printer() ? WipeTowerType::Type1 : m_config.wipe_tower_type.value; }
     CalibMode& calib_mode() { return m_calib_params.mode; }
     const CalibMode calib_mode() const { return m_calib_params.mode; }
