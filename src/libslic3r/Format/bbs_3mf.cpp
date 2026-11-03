@@ -775,6 +775,10 @@ static bool map_snapmaker_flow_columns(DynamicPrintConfig &config, const std::ve
         config.set_key_value("extruder_variant_list",
                              new ConfigOptionStrings(std::vector<std::string>(count, "Direct Drive Standard,Direct Drive High Flow")));
     }
+    // Snapmaker stores some keys this build splits per variant (filament_long_retractions_when_cut,
+    // filament_retraction_distances_when_cut) once per filament. The loader's own widening ran before
+    // filament_self_index existed, so widen them now that it does.
+    normalize_filament_values_to_variants(config);
     return true;
 }
 
