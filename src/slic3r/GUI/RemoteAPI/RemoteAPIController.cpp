@@ -7,6 +7,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "libslic3r/Geometry.hpp"     // rad2deg for the rotation_deg fields
 #include "libslic3r/Model.hpp"    // M4b: ModelObject/ModelInstance for GET /objects
 #include "slic3r/GUI/NotificationManager.hpp" // in-app change notifications
 #include "libslic3r/AppConfig.hpp"             // remote_api_notify toggle
@@ -171,6 +172,12 @@ void Controller::on_config_changed(int preset_type)
 // s_deferred_ui_tasks and flushed when the export ends; the exporter skips a
 // cycle (re-arming itself) if an API task is on the stack (nested-pump case).
 namespace {
+
+// Euler XYZ rotation of an instance in degrees, reported as `rotation_deg` beside the radians in `rotation`.
+nlohmann::json rotation_deg_json(const Vec3d &rot_rad)
+{
+    return {Geometry::rad2deg(rot_rad.x()), Geometry::rad2deg(rot_rad.y()), Geometry::rad2deg(rot_rad.z())};
+}
 
 struct UiTask : std::enable_shared_from_this<UiTask>
 {
@@ -2068,6 +2075,7 @@ Response Controller::handle_get_objects()
                 o["transform"] = {
                     {"offset",   {off.x(), off.y(), off.z()}},
                     {"rotation", {rot.x(), rot.y(), rot.z()}},
+                    {"rotation_deg", rotation_deg_json(rot)},
                     {"scale",    {scl.x(), scl.y(), scl.z()}},
                 };
                 // World-space bbox of instance 0. `offset` above is the MESH
@@ -2092,6 +2100,7 @@ Response Controller::handle_get_objects()
                         {"index",    k},
                         {"offset",   {koff.x(), koff.y(), koff.z()}},
                         {"rotation", {krot.x(), krot.y(), krot.z()}},
+                        {"rotation_deg", rotation_deg_json(krot)},
                         {"scale",    {kscl.x(), kscl.y(), kscl.z()}},
                     });
                 }
@@ -2214,6 +2223,7 @@ Response Controller::handle_transform_object(uint64_t id, const std::string &bod
         return {{"id", id}, {"instance", inst_idx}, {"transform", {
             {"offset",   {off.x(), off.y(), off.z()}},
             {"rotation", {rot.x(), rot.y(), rot.z()}},
+            {"rotation_deg", rotation_deg_json(rot)},
             {"scale",    {scl.x(), scl.y(), scl.z()}}}}};
     });
     if (r.contains("error")) return { 404, r };

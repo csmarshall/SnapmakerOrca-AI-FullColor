@@ -8860,7 +8860,8 @@ bool Tab::validate_filament_temperature_pairs()
             if (first_key.empty() || other_key.empty())
                 continue;
 
-            wxString label = _(bed_type_def->enum_labels[label_idx]);
+            // btGESP is not in curr_bed_type's enum_labels (only the U1 offers it), so it has its own label
+            wxString label = label_idx < bed_type_def->enum_labels.size() ? _(bed_type_def->enum_labels[label_idx]) : _L("Graphic Effect Plate");
             temp_pair_rules.push_back({label, first_key, other_key, 15});
         }
     }

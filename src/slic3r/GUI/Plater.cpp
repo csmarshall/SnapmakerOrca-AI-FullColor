@@ -4251,7 +4251,7 @@ bool Sidebar::reset_bed_type_combox_choices(bool is_sidebar_init)
         }
     }
     if (m_last_combo_bedtype_count != 0 && pm) {
-        auto cur_count = (int) BedType::btCount - 1 - pm->not_support_bed_types.size();
+        auto cur_count = (int) print_config_def.get("curr_bed_type")->enum_labels.size() - pm->not_support_bed_types.size(); // the list, not btCount: btGESP is not listed
         if (cur_count == m_last_combo_bedtype_count) {//no change
             return false;
         }

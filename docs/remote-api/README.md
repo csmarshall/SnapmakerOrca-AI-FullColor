@@ -360,6 +360,22 @@ next plate appears, so `POST /plates` straight after a delete picks them back up
 target or the plate it sits on is locked; `plate` names which) `| move_failed`,
 `409 slicing`, `400 missing_plate`.
 
+### Object transform semantics
+
+`POST /objects/{id}/transform` takes `translate`, `rotate` and `scale` (each `[x,y,z]`, at least one) and an optional `instance` (default 0).
+
+| field | meaning | units | limit |
+|---|---|---|---|
+| `translate` | RELATIVE, added to the instance offset (world frame) | mm | +-10000 per component |
+| `rotate` | RELATIVE, added per component to the instance's stored Euler XYZ angles | degrees in | +-3600 per component |
+| `scale` | ABSOLUTE per-axis factor (sending `[2,2,2]` twice leaves 2); negative refused, so no mirroring | factor | 0.0001 to 1000 |
+
+- With more than one non-zero rotation axis, adding Euler angles is not the same as an extra rotation about the world axes, and angles are not normalised (they can pass 360 degrees).
+- Order inside one request does not matter. Rotation and scale act about the instance origin (mesh origin), not the bounding-box centre.
+- Afterwards the object is dropped to the bed if it was floating or touching (lowest point at or above -0.001 mm) or lay wholly below it; one sunk part-way stays sunk. Read `bbox_min[2]` from `GET /objects`.
+- The response `transform` and `GET /objects` (`transform` for instance 0, every entry of `instances_detail`) report `offset` in mm, `rotation` in RADIANS and `rotation_deg` in degrees (same angles), `scale` as factors. `rotation` stays in radians for existing clients.
+- Errors: `400 bad_transform` (a vector is not exactly 3 finite numbers, or out of range; `detail` says which), `400 no_transform`, `400 instance_must_be_integer`, `400 negative_index`, `404 unknown_object | no_instance | unknown_instance` (every failure to find the target is a 404).
+
 ## Notes & limits
 
 - **Single-client oriented.** The server uses one I/O thread and marshals most

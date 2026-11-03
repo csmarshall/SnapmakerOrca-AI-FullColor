@@ -426,7 +426,7 @@ PlateSettingsDialog::PlateSettingsDialog(wxWindow* parent, const wxString& title
         }
 
     } else {
-        for (BedType i = btDefault; i < btCount; i = BedType(int(i) + 1)) {
+        for (BedType i = btDefault; i < btGESP; i = BedType(int(i) + 1)) {   // btGESP is not offered here
             m_bed_type_choice->Append(to_bed_type_name(i));
         }
     }
