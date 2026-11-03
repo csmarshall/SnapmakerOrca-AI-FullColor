@@ -1259,6 +1259,20 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
         end_filament_gcode_str = toolchange_retract_str + object_end_label_temp + end_filament_gcode_str;
 
+        // Ooze prevention: drop the outgoing filament to its standby temperature, as set_extruder() does.
+        // The Type 1 path builds the toolchange itself and never reaches set_extruder(), so without this
+        // printers that enable ooze_prevention on a Type 1 tower (the Snapmaker U1) left idle nozzles hot.
+        // Snapmaker Orca emits it at this point too: after the filament end gcode, before change_filament_gcode.
+        if (tcr.is_tool_change && gcodegen.m_ooze_prevention.enable && gcodegen.writer().filament() != nullptr
+            && int(gcodegen.writer().filament()->id()) != new_filament_id) {
+            const auto &pem             = gcodegen.config().physical_extruder_map.values;
+            const int   old_filament_id = int(gcodegen.writer().filament()->id());
+            const bool  same_physical   = gcodegen.config().is_imex.value && !pem.empty() && new_filament_id >= 0
+                && old_filament_id < int(pem.size()) && new_filament_id < int(pem.size()) && pem[old_filament_id] == pem[new_filament_id];
+            if (!same_physical)
+                end_filament_gcode_str += gcodegen.m_ooze_prevention.pre_toolchange(gcodegen);
+        }
+
         // Lift to the layer Z so the toolchange can't hit taller printed parts. Only a custom macro or
         // a switch to another physical extruder (whose firmware Tn may dock) can travel. The
         // compacted_below_object descent below brings Z back down once over the tower.
