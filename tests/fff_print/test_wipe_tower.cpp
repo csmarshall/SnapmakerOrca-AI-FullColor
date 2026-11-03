@@ -693,6 +693,8 @@ static size_t type1_tower_slicer_m104s(bool bbl, bool ooze, int standby_delta)
     config.set_deserialize_strict({ { "wipe_tower_type", "type1" },
                                     { "filament_cooling_before_tower", "20,20" },
                                     { "ooze_prevention", ooze ? "1" : "0" },
+                                    // Defaults to on, which disables ooze prevention (and with it is rejected with a wipe tower).
+                                    { "single_extruder_multi_material", "0" },
                                     { "standby_temperature_delta", std::to_string(standby_delta) } });
     Print print;
     Model model;
