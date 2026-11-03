@@ -363,6 +363,10 @@ public:
     int get_number_of_toolchanges() const { return m_num_tool_changes; }
 
 	void set_has_tpu_filament(bool has_tpu) { m_has_tpu_filament = has_tpu; }
+    // Non-BBL printers (the Snapmaker U1) get the incoming tool's temperature from the tool change G-code
+    // (WipeTowerIntegration::append_tcr), as GCode::set_extruder() does, so the tower skips its own
+    // BBL-style precool M104 (M400 + "M104 ... N0") in the middle of the wipe.
+    void set_tool_change_temp_in_gcode(bool v) { m_tool_change_temp_in_gcode = v; }
 
     bool has_tpu_filament() const { return m_has_tpu_filament; }
     struct FilamentParameters {
@@ -518,6 +522,7 @@ private:
     bool               m_has_tpu_filament{false};
     bool               m_is_multi_extruder{false};
     bool               m_use_gap_wall{false};
+    bool               m_tool_change_temp_in_gcode{false};
     bool               m_use_rib_wall{false};
     float              m_rib_length=0.f;
     float              m_rib_width=0.f;

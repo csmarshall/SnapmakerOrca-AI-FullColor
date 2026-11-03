@@ -72,6 +72,7 @@ public:
     OozePrevention() : enable(false) {}
     std::string pre_toolchange(GCode &gcodegen);
     std::string post_toolchange(GCode &gcodegen);
+    int current_temp(const GCode &gcodegen) const { return _get_temp(gcodegen); }
 
 private:
     int _get_temp(const GCode &gcodegen) const;

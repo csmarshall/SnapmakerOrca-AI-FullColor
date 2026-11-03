@@ -1517,6 +1517,17 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
         }
 
+        // Non-BBL printers (the Snapmaker U1): set the incoming tool's temperature right after the tool
+        // change, as set_extruder() does via OozePrevention::post_toolchange (Snapmaker Orca writes
+        // "M104 S<t> T<n> ; set nozzle temperature" here, without waiting). BBL printers keep the
+        // tower's own precool M104, so WipeTower::set_tool_change_temp_in_gcode is the same gate.
+        if (tcr.is_tool_change && !gcodegen.m_print->is_BBL_printer() && gcodegen.m_ooze_prevention.enable
+            && gcodegen.config().standby_temperature_delta.value != 0 && gcodegen.writer().filament() != nullptr
+            && int(gcodegen.writer().filament()->id()) == new_filament_id) {
+            check_add_eol(toolchange_gcode_str);
+            toolchange_gcode_str += gcodegen.writer().set_temperature(gcodegen.m_ooze_prevention.current_temp(gcodegen), false, new_filament_id);
+        }
+
         // The change G-code may move the carriage even when the incoming
         // filament uses the same physical nozzle (the common AMS case).
         // Synchronize before planning the tower-entry travel so exclusion

@@ -4303,6 +4303,7 @@ void WipeTower::toolchange_wipe_new(WipeTowerWriter &writer, const box_coordinat
     auto add_M104_by_requirement = [&writer, &should_heating, this]() {
         if (m_filpar[m_current_tool].filament_cooling_before_tower < EPSILON) return;
         if (!should_heating) return;
+        if (m_tool_change_temp_in_gcode) return;
         float target_temp = is_first_layer() ? m_filpar[m_current_tool].nozzle_temperature_initial_layer : m_filpar[m_current_tool].nozzle_temperature;
         writer.format_line_M104(target_temp, get_extruder_id(m_current_tool, m_cur_layer_id));
     };
