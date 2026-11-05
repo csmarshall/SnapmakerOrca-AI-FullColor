@@ -1449,12 +1449,12 @@
 			"sub_path": "filament/Snapmaker PETG @0.2 nozzle.json"
 		},
 		{
-			"name": "Snapmaker PETG HF @U1 0.2 nozzle",
-			"sub_path": "filament/Snapmaker PETG HF @U1 0.2 nozzle.json"
+			"name": "Snapmaker PETG HF",
+			"sub_path": "filament/Snapmaker PETG HF.json"
 		},
 		{
-			"name": "Snapmaker PETG HF @U1 0.4 nozzle",
-			"sub_path": "filament/Snapmaker PETG HF @U1 0.4 nozzle.json"
+			"name": "Snapmaker PETG HF @U1 0.2 nozzle",
+			"sub_path": "filament/Snapmaker PETG HF @U1 0.2 nozzle.json"
 		},
 		{
 			"name": "Snapmaker PETG HF @U1 0.6 nozzle",
