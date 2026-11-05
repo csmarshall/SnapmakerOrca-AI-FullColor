@@ -135,6 +135,11 @@ public:
     // specific rule fired.
     bool is_denied_path(const boost::filesystem::path& candidate) const;
 
+    // True for data_dir()/user/** and data_dir()/system/**. Writes there (preset JSON that can
+    // carry post_process / *_gcode) are not allowed by the data_dir() root and need a user
+    // grant through the FsReadWrite prompt. Not a hard deny: reads are unaffected.
+    bool is_write_protected_path(const boost::filesystem::path& candidate) const;
+
     // --- policy checks ---
     // Shared core for every audited filesystem event.  The deny checks are consulted above the
     // allowed roots, so a denied path is blocked even when it sits inside an allowed root (e.g.

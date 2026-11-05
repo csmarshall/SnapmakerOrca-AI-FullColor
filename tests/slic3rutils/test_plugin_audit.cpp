@@ -425,6 +425,50 @@ TEST_CASE("Plugin audit a read-only allowed root blocks writes but not reads", "
     }
 }
 
+TEST_CASE("Plugin audit write-protects the preset folders but not reads or plugin storage", "[audit]")
+{
+    ScopedDataDir data_dir_guard("plugin-audit-write-protected");
+    seed_denied_names();
+    seed_denied_keywords();
+
+    PluginAuditManager& mgr = PluginAuditManager::instance();
+    mgr.add_global_allowed_root(data_dir());
+
+    ScopedPluginAuditContext ctx("test_plugin", "");
+
+    const fs::path preset = fs::path(data_dir()) / "user" / "default" / "process" / "probe53.json";
+    const fs::path bundle = fs::path(data_dir()) / "user" / "default" / "process" / "_local" / "b" / "p.json";
+    const fs::path vendor = fs::path(data_dir()) / "system" / "Vendor" / "process" / "p.json";
+
+    SECTION("a write below user/ or system/ is not allowed by the data_dir() root")
+    {
+        for (const fs::path& target : {preset, bundle, vendor}) {
+            AuditDecision decision = mgr.check_open(target.string(), "w");
+            CHECK_FALSE(decision.allowed);
+            CHECK(decision.reason == "write-protected preset folder");
+            CHECK_FALSE(mgr.check_path_access(target, /*is_write=*/true).allowed);
+        }
+    }
+
+    SECTION("a traversal into user/ is still protected")
+    {
+        const fs::path traversal = fs::path(data_dir()) / "orca_plugins" / ".." / "user" / "x.json";
+        CHECK_FALSE(mgr.check_open(traversal.string(), "w").allowed);
+    }
+
+    SECTION("reads below user/ and system/ stay allowed")
+    {
+        CHECK(mgr.check_open(preset.string(), "r").allowed);
+        CHECK(mgr.check_open(vendor.string(), "r").allowed);
+    }
+
+    SECTION("plugin storage and other data_dir() writes stay allowed")
+    {
+        CHECK(mgr.check_open((fs::path(data_dir()) / "orca_plugins" / "p" / "state.json").string(), "w").allowed);
+        CHECK(mgr.check_open((fs::path(data_dir()) / "userland.txt").string(), "w").allowed);
+    }
+}
+
 TEST_CASE("Plugin audit network permissions match by scheme and host", "[audit]")
 {
     SECTION("a URL is reduced to its scheme and host")
