@@ -42,6 +42,7 @@
 #include "libslic3r/AppConfig.hpp"
 #include "GUI_App.hpp"
 #include <openssl/sha.h>
+#include <wx/app.h>
 #include <wx/msgdlg.h>
 #include <wx/utils.h>
 #include <string>
@@ -391,9 +392,14 @@ PostProcessApproval check_post_process_approval(const DynamicPrintConfig& config
     const std::string hash = post_process_hash(config);
     if (hash.empty())
         return PostProcessApproval::NotNeeded;
+    // No GUI application (unit tests, tools that link this file) means nobody to ask and no approval
+    // store: keep the existing behaviour. The interactive app always has an AppConfig.
+    if (wxTheApp == nullptr)
+        return PostProcessApproval::Approved;
     const AppConfig* app_config = GUI::wxGetApp().app_config;
-    return app_config != nullptr && is_post_process_hash_approved(*app_config, hash) ? PostProcessApproval::Approved :
-                                                                                      PostProcessApproval::NeedsApproval;
+    if (app_config == nullptr)
+        return PostProcessApproval::Approved;
+    return is_post_process_hash_approved(*app_config, hash) ? PostProcessApproval::Approved : PostProcessApproval::NeedsApproval;
 }
 
 bool ask_post_process_approval(const DynamicPrintConfig& config)
@@ -401,7 +407,7 @@ bool ask_post_process_approval(const DynamicPrintConfig& config)
     const PostProcessApproval state = check_post_process_approval(config);
     if (state != PostProcessApproval::NeedsApproval)
         return true;
-    if (!wxIsMainThread() || GUI::wxGetApp().app_config == nullptr)
+    if (wxTheApp == nullptr || !wxIsMainThread() || GUI::wxGetApp().app_config == nullptr)
         return false;
     wxString scripts;
     for (const std::string& value : config.opt<ConfigOptionStrings>("post_process")->values)
