@@ -97,7 +97,8 @@ std::map<std::string, SpoolmanSpoolInfo> spoolman_parse_spools(const std::string
             continue;
         if (sp.value("archived", false) == true)
             continue;
-        const auto uids = card_uids_of(sp.value("extra", nlohmann::json::object()));
+        const auto extra_it = sp.find("extra");
+        const auto uids = extra_it != sp.end() ? card_uids_of(*extra_it) : std::vector<std::string>{};
         if (uids.empty())
             continue;
 
