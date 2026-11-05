@@ -20,6 +20,13 @@ file(TO_NATIVE_PATH "${PROFILES_DIR}" PROFILES_DIR)
 include(CTest)
 include(Catch)
 
+# The vendored Snapmaker Flutter bundle must stay byte-identical to its manifest (ADR 0005).
+add_test(NAME flutter_web_bundle_manifest
+    COMMAND ${CMAKE_COMMAND}
+        -DBUNDLE_DIR=${CMAKE_SOURCE_DIR}/resources/web/flutter_web
+        -DMANIFEST=${CMAKE_SOURCE_DIR}/resources/web/flutter_web.sha256
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_flutter_web.cmake)
+
 set(CATCH_EXTRA_ARGS "" CACHE STRING "Extra arguments for catch2 test suites.") # Unknown if this still works and/or should be replaced with something else.
 
 add_library(test_common INTERFACE)
