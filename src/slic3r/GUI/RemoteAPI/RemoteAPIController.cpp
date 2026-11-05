@@ -6,6 +6,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
+#include "slic3r/GUI/PostProcessor.hpp" // post_process approval gate
 #include "slic3r/GUI/Plater.hpp"
 #include "libslic3r/Geometry.hpp"     // rad2deg for the rotation_deg fields
 #include "libslic3r/Model.hpp"    // M4b: ModelObject/ModelInstance for GET /objects
@@ -1255,6 +1256,11 @@ Response Controller::handle_slice()
         Plater *plater = wxGetApp().plater();
         if (plater->model().objects.empty())
             return {{"error", "nothing_to_slice"}};
+        // post_process runs host programs after export. If the active value was not approved in the GUI,
+        // refuse instead of slicing toward an export that cannot run; the API can never open the prompt.
+        if (check_post_process_approval(wxGetApp().preset_bundle->prints.get_edited_preset().config) ==
+            PostProcessApproval::NeedsApproval)
+            return {{"error", "post_process_needs_approval"}};
         // A prior validation failure (e.g. an object that sat outside the bed
         // when the background process last ran) stays LATCHED on the plate
         // (process_completed_with_error) and Plater::reslice() returns directly
@@ -1296,7 +1302,7 @@ Response Controller::handle_slice()
         return {{"started", true}};
     });
     if (r.contains("error")) {
-        if (r["error"] == "already_slicing") return { 409, r };
+        if (r["error"] == "already_slicing" || r["error"] == "post_process_needs_approval") return { 409, r };
         return { 422, r };
     }
     if (r.value("already_valid", false)) return { 200, r };
@@ -1601,6 +1607,10 @@ Response Controller::handle_save_preset(const std::string &body)
             return {{"error", "name_reserved"}};
         Tab *tab = wxGetApp().get_tab(type);
         if (tab == nullptr) return {{"error", "tab_unavailable"}};
+        // Saving under a new name would copy a post_process value that no one approved in the GUI into a
+        // normal user preset (laundering). Only the GUI can approve it; the API never opens that prompt.
+        if (type == Preset::TYPE_PRINT && check_post_process_approval(presets.get_edited_preset().config) == PostProcessApproval::NeedsApproval)
+            return {{"error", "unapproved_code_settings"}, {"keys", nlohmann::json::array({"post_process"})}};
         bool created = existing == nullptr;
         // Tab::save_preset re-points every filament slot that used the edited preset's old name to the new
         // name (Sidebar::update_presets_from_to). Snapshot the slots so the response can say which moved.
@@ -1635,6 +1645,8 @@ Response Controller::handle_save_preset(const std::string &body)
             api_notify("Can't overwrite built-in " + type_s + " preset '" + name + "'", true);
             return { 409, r };
         }
+        if (r["error"] == "unapproved_code_settings")
+            return { 409, r };
         return { 500, r };
     }
     api_notify((r["created"].get<bool>() ? "Saved new " : "Updated ") + type_s + " preset '" + name + "'");

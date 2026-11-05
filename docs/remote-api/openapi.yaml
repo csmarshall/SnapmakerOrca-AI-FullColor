@@ -132,11 +132,16 @@ paths:
                   already_valid: { type: boolean, enum: [true] }
               example: { started: false, already_valid: true }
         "409":
-          description: A slice is already in progress.
+          description: |
+            `already_slicing`: a slice is already in progress. `post_process_needs_approval`: the active
+            process preset runs post_process scripts that nobody approved in the OrcaSlicer GUI (the API can
+            never approve them and never opens a dialog); approve the script in the GUI, then retry.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "already_slicing" }
+              examples:
+                already_slicing: { value: { error: "already_slicing" } }
+                post_process_needs_approval: { value: { error: "post_process_needs_approval" } }
         "422":
           description: Nothing to slice (no objects on the plate).
           content:
@@ -746,6 +751,7 @@ paths:
       description: For type=filament the 200 body also carries previous_preset (the edited preset's name before the save), repointed_slots (0-based slots whose preset changed) and slots_using_saved_preset (every slot on the saved name afterwards). A save-as moves exactly the slots that used the old name to the new one; saving under the same name moves none. Saving over a different existing user preset changes the settings of any slot already using that name.
       responses:
         "200": { $ref: "#/components/responses/Json" }
+        "409": { description: "name_reserved, or unapproved_code_settings: the edited process preset holds a post_process value that was not approved in the GUI (body keys names it); approve it in the GUI first" }
         "500": { description: "slot_repoint_unexpected: a slot moved to a name other than the saved one; the body lists the slots" }
   /preset/config:
     post:
