@@ -5,7 +5,7 @@
 - Component: the compiled Flutter web build that Snapmaker Orca uses for its Home and Device pages.
 - Taken from: Snapmaker/OrcaSlicer `resources/web/flutter_web`, source commit `a00dd4fbac`.
 - Version: `2.3.40`, build `20260930162817` (see `resources/web/flutter_web/version.json`).
-- Vendored byte-identical. No file in the directory has been edited. `resources/web/flutter_web.sha256` lists the SHA-256 of every file, and `scripts/verify_flutter_web.cmake` (run as the ctest test `flutter_web_bundle_manifest`) fails on any changed, missing or extra file.
+- Vendored byte-identical. No file in the directory has been edited. `resources/web/flutter_web.sha256` lists the SHA-256 of every file, and `scripts/verify_flutter_web.cmake` (run as the ctest test `flutter_web_bundle_manifest`) fails on any changed, missing or extra file, an empty manifest or an empty bundle. The manifest is a test-time consistency check only: it is not a runtime tamper control, and nothing verifies the files when the app runs.
 - Only the compiled output is included. **No Dart source is included** in this repository.
 
 ## Licence and source obligations: UNRESOLVED
