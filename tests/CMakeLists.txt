@@ -27,6 +27,21 @@ add_test(NAME flutter_web_bundle_manifest
         -DMANIFEST=${CMAKE_SOURCE_DIR}/resources/web/flutter_web.sha256
         -P ${CMAKE_SOURCE_DIR}/scripts/verify_flutter_web.cmake)
 
+# The verifier must also fail (not report "OK: 0 files") on an empty manifest and on an empty bundle.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty.sha256 "")
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty_dir)
+add_test(NAME flutter_web_verifier_rejects_empty_manifest
+    COMMAND ${CMAKE_COMMAND}
+        -DBUNDLE_DIR=${CMAKE_SOURCE_DIR}/resources/web/flutter_web
+        -DMANIFEST=${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty.sha256
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_flutter_web.cmake)
+add_test(NAME flutter_web_verifier_rejects_empty_bundle
+    COMMAND ${CMAKE_COMMAND}
+        -DBUNDLE_DIR=${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty_dir
+        -DMANIFEST=${CMAKE_SOURCE_DIR}/resources/web/flutter_web.sha256
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_flutter_web.cmake)
+set_tests_properties(flutter_web_verifier_rejects_empty_manifest flutter_web_verifier_rejects_empty_bundle PROPERTIES WILL_FAIL TRUE)
+
 set(CATCH_EXTRA_ARGS "" CACHE STRING "Extra arguments for catch2 test suites.") # Unknown if this still works and/or should be replaced with something else.
 
 add_library(test_common INTERFACE)

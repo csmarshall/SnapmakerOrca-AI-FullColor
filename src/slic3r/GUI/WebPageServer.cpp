@@ -27,7 +27,12 @@ namespace {
 
 constexpr std::size_t k_header_limit    = 16 * 1024;
 constexpr std::size_t k_max_connections = 64;
-constexpr auto        k_io_timeout      = std::chrono::seconds(30);
+// Re-armed per phase. A client that has not sent a complete request header in 5 s is dropped, so idle
+// unauthenticated sockets cannot hold the connection cap for long; a file body gets longer.
+constexpr auto        k_header_timeout   = std::chrono::seconds(5);
+constexpr auto        k_status_timeout   = std::chrono::seconds(10);
+constexpr auto        k_file_timeout     = std::chrono::seconds(120);
+constexpr auto        k_accept_retry     = std::chrono::milliseconds(100);
 
 std::string make_token()
 {
@@ -120,7 +125,8 @@ std::string query_value(const std::string& query, const std::string& key)
     return {};
 }
 
-std::string cookie_value(const std::string& header, const std::string& name)
+// True if ANY cookie called `name` equals the token (a planted duplicate earlier in the header must not win).
+bool cookie_matches(const std::string& header, const std::string& name, const std::string& token)
 {
     std::size_t pos = 0;
     while (pos < header.size()) {
@@ -131,15 +137,69 @@ std::string cookie_value(const std::string& header, const std::string& name)
         if (first != std::string::npos) {
             item = item.substr(first);
             const std::size_t eq = item.find('=');
-            if (eq != std::string::npos && item.compare(0, eq, name) == 0)
-                return item.substr(eq + 1);
+            if (eq != std::string::npos && item.compare(0, eq, name) == 0 && constant_time_equal(item.substr(eq + 1), token))
+                return true;
         }
         pos = semi + 1;
     }
-    return {};
+    return false;
+}
+
+// The query string without the token parameter ("" if nothing else is left).
+std::string query_without(const std::string& query, const std::string& key)
+{
+    std::string out;
+    std::size_t pos = 0;
+    while (pos <= query.size()) {
+        std::size_t amp = query.find('&', pos);
+        if (amp == std::string::npos) amp = query.size();
+        const std::string pair = query.substr(pos, amp - pos);
+        const std::size_t eq   = pair.find('=');
+        const bool        drop = pair.compare(0, eq == std::string::npos ? pair.size() : eq, key) == 0;
+        if (!pair.empty() && !drop) out += (out.empty() ? "" : "&") + pair;
+        pos = amp + 1;
+    }
+    return out;
 }
 
 } // namespace
+
+namespace web_page_server_detail {
+
+bool segments_to_relative(const std::string& rest, fs::path& rel)
+{
+    rel.clear();
+    std::size_t pos = 0;
+    while (pos < rest.size()) {
+        std::size_t slash = rest.find('/', pos);
+        if (slash == std::string::npos) slash = rest.size();
+        const std::string raw_seg = rest.substr(pos, slash - pos);
+        std::string       seg;
+        if (raw_seg.empty() || !percent_decode(raw_seg, seg) || seg.empty() || seg == "." || seg == ".." ||
+            seg.find('/') != std::string::npos || seg.find('\\') != std::string::npos ||
+            seg.find('\0') != std::string::npos || seg.find(':') != std::string::npos)
+            return false;
+        rel /= seg;
+        pos = slash + 1;
+    }
+    if (rest.empty() || rest.back() == '/') rel /= "index.html"; // directory-style URL -> its index page only
+    return true;
+}
+
+int resolve_within(const fs::path& canonical_root, const fs::path& rel, fs::path& resolved)
+{
+    boost::system::error_code ec;
+    resolved = fs::canonical(canonical_root / rel, ec);
+    if (ec) return 404;
+    const std::string root_str = canonical_root.generic_string();
+    const std::string res_str  = resolved.generic_string();
+    if (res_str.size() <= root_str.size() || res_str.compare(0, root_str.size(), root_str) != 0 || res_str[root_str.size()] != '/')
+        return 403;
+    if (!fs::is_regular_file(resolved, ec)) return 404; // directories: no listing
+    return 200;
+}
+
+} // namespace web_page_server_detail
 
 struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
 {
@@ -148,95 +208,79 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
     std::string             token = make_token();
     std::string             expected_host;
     std::string             expected_origin;
+    std::string             cookie_name;
     uint16_t                port = 0;
     asio::io_context        io{1}; // one thread: every handler is serialised, so stop() may touch connections
     asio::ip::tcp::acceptor acceptor{io};
+    asio::steady_timer      accept_retry{io};
     std::vector<std::thread> threads;
     std::atomic<bool>       running{false};
     std::atomic<std::size_t> connections{0};
-
     class Connection;
-    std::set<Connection*> open_connections; // touched on the io thread only
+    std::set<Connection*>   open_connections; // touched on the io thread only
+
     using Response = http::response<http::file_body>;
 
-    // The result of routing one request: either a file to send or a bare status.
+    // The result of routing one request: a file to send, a redirect, or a bare status.
     struct Outcome
     {
         http::status status = http::status::forbidden;
         fs::path     file;
+        std::string  location; // for 302
         bool         set_cookie = false;
-        bool         allow_get_head = false;
     };
 
-    Outcome route(http::verb method, const std::string& target, const std::string& host, const std::string& origin,
-                  const std::string& cookie_header, bool has_origin) const
+    Outcome route(http::verb method, const std::string& target, const std::string& host, const std::string& origin, bool has_origin,
+                  const std::string& cookie_header, bool has_fetch_site, const std::string& fetch_site) const
     {
         Outcome out;
         // DNS rebinding and cross-site requests: before anything else.
         if (host != expected_host) return out;
         if (has_origin && origin != expected_origin) return out;
+        // Browsers say where a request came from; cross-site and same-site (another port on this host) are refused.
+        if (has_fetch_site && fetch_site != "same-origin" && fetch_site != "none") return out;
 
-        // Split target into path and query.
-        const std::size_t qpos       = target.find('?');
-        const std::string raw_path   = target.substr(0, qpos);
-        const std::string raw_query  = qpos == std::string::npos ? std::string() : target.substr(qpos + 1);
+        const std::size_t qpos      = target.find('?');
+        const std::string raw_path  = target.substr(0, qpos);
+        const std::string raw_query = qpos == std::string::npos ? std::string() : target.substr(qpos + 1);
 
         const std::string q_token = query_value(raw_query, token_param);
-        const std::string c_token = cookie_value(cookie_header, cookie_name);
         const bool token_from_query  = !q_token.empty() && constant_time_equal(q_token, token);
-        const bool token_from_cookie = !c_token.empty() && constant_time_equal(c_token, token);
+        const bool token_from_cookie = cookie_matches(cookie_header, cookie_name, token);
         if (!token_from_query && !token_from_cookie) return out; // 403
 
         if (method != http::verb::get && method != http::verb::head) {
             out.status = http::status::method_not_allowed;
             return out;
         }
+
         // Only origin-form targets ("/...") are routed; absolute-form ("http://host/...") fails the prefix test.
-        // Path: decode per segment, so an encoded "/" or "\" or "." can never form a separator or dot segment.
         const std::string prefix = url_prefix;
         if (raw_path.compare(0, prefix.size(), prefix) != 0) {
             out.status = http::status::not_found;
             return out;
         }
-        const std::string rest = raw_path.substr(prefix.size());
-        fs::path          rel;
-        std::size_t       pos = 0;
-        while (pos < rest.size()) {
-            std::size_t slash = rest.find('/', pos);
-            if (slash == std::string::npos) slash = rest.size();
-            const std::string raw_seg = rest.substr(pos, slash - pos);
-            std::string       seg;
-            if (raw_seg.empty() || !percent_decode(raw_seg, seg) || seg.empty() || seg == "." || seg == ".." ||
-                seg.find('/') != std::string::npos || seg.find('\\') != std::string::npos ||
-                seg.find('\0') != std::string::npos || seg.find(':') != std::string::npos) {
-                out.status = http::status::forbidden;
-                return out;
-            }
-            rel /= seg;
-            pos = slash + 1;
-        }
-        if (rest.empty() || rest.back() == '/') rel /= "index.html"; // directory-style URL -> its index page only
-
-        // Symlinks: resolve and require the result to stay inside the canonical root.
-        boost::system::error_code ec;
-        const fs::path            resolved = fs::canonical(canonical_root / rel, ec);
-        if (ec) {
-            out.status = http::status::not_found;
-            return out;
-        }
-        const std::string root_str = canonical_root.generic_string();
-        const std::string res_str  = resolved.generic_string();
-        if (res_str.size() <= root_str.size() || res_str.compare(0, root_str.size(), root_str) != 0 || res_str[root_str.size()] != '/') {
+        fs::path rel;
+        if (!web_page_server_detail::segments_to_relative(raw_path.substr(prefix.size()), rel)) {
             out.status = http::status::forbidden;
             return out;
         }
-        if (!fs::is_regular_file(resolved, ec)) { // directories: no listing
-            out.status = http::status::not_found;
+        fs::path resolved;
+        switch (web_page_server_detail::resolve_within(canonical_root, rel, resolved)) {
+        case 200: break;
+        case 403: out.status = http::status::forbidden; return out;
+        default:  out.status = http::status::not_found; return out;
+        }
+        out.file = resolved;
+        if (token_from_query) {
+            // Hand the token over to the cookie and take it out of the URL (document.location, $current_url, history).
+            const std::string rest_q = query_without(raw_query, token_param);
+            out.status     = http::status::found;
+            out.location   = raw_path + (rest_q.empty() ? "" : "?" + rest_q);
+            out.set_cookie = true;
             return out;
         }
-        out.status     = http::status::ok;
-        out.file       = resolved;
-        out.set_cookie = token_from_query;
+        out.status = http::status::ok;
         return out;
     }
 
@@ -252,20 +296,29 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             impl->open_connections.erase(this);
             impl->connections--;
         }
-        void close() { stream.close(); }
+        void close() { beast::error_code ec; stream.close(); }
 
         void run()
         {
-            stream.expires_after(k_io_timeout);
+            stream.expires_after(k_header_timeout);
             parser.emplace();
             parser->header_limit(k_header_limit);
             parser->body_limit(0);
             http::async_read(stream, buffer, *parser, [self = shared_from_this()](beast::error_code ec, std::size_t) {
-                if (ec) {
-                    if (ec != http::error::end_of_stream) self->send_status(http::status::bad_request);
-                    return;
+                try {
+                    if (ec) {
+                        if (ec != http::error::end_of_stream && ec != asio::error::operation_aborted && ec != beast::error::timeout)
+                            self->send_status(http::status::bad_request);
+                        return;
+                    }
+                    self->handle();
+                } catch (const std::exception& e) {
+                    BOOST_LOG_TRIVIAL(error) << "WebPageServer: handler failed: " << e.what();
+                    self->send_status_noexcept(http::status::internal_server_error);
+                } catch (...) {
+                    BOOST_LOG_TRIVIAL(error) << "WebPageServer: handler failed with an unknown exception";
+                    self->send_status_noexcept(http::status::internal_server_error);
                 }
-                self->handle();
             });
         }
 
@@ -286,19 +339,34 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             // No Access-Control-* header is ever added.
         }
 
-        void send_status(http::status st)
+        void finish_write(std::shared_ptr<void> msg, std::chrono::seconds timeout)
+        {
+            keep = std::move(msg);
+            stream.expires_after(timeout);
+        }
+        void shutdown()
+        {
+            beast::error_code e;
+            stream.socket().shutdown(asio::ip::tcp::socket::shutdown_both, e);
+        }
+
+        void send_status_noexcept(http::status st)
+        {
+            try { send_status(st); } catch (...) { close(); }
+        }
+
+        void send_status(http::status st, const std::string& location = {}, const std::string& set_cookie = {})
         {
             auto res = std::make_shared<http::response<http::string_body>>(st, 11);
             common_headers(*res);
             res->set(http::field::content_type, "text/plain; charset=utf-8");
             if (st == http::status::method_not_allowed) res->set(http::field::allow, "GET, HEAD");
+            if (!location.empty()) res->set(http::field::location, location);
+            if (!set_cookie.empty()) res->insert(http::field::set_cookie, set_cookie);
             res->body() = std::string(http::obsolete_reason(st)) + "\n";
             res->prepare_payload();
-            keep = res;
-            http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) {
-                beast::error_code ec;
-                self->stream.socket().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
-            });
+            finish_write(res, k_status_timeout);
+            http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) { self->shutdown(); });
         }
 
         void handle()
@@ -308,9 +376,18 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             const auto        host   = std::string(req[http::field::host]);
             const bool        has_origin = req.find(http::field::origin) != req.end();
             const auto        origin = std::string(req[http::field::origin]);
-            const auto        cookie = std::string(req[http::field::cookie]);
+            const bool        has_fetch_site = req.find("Sec-Fetch-Site") != req.end();
+            const auto        fetch_site = std::string(req["Sec-Fetch-Site"]);
+            // Every Cookie header counts, joined the way a single header would be.
+            std::string cookie;
+            const auto  range = req.equal_range(http::field::cookie);
+            for (auto it = range.first; it != range.second; ++it) cookie += std::string(it->value()) + "; ";
 
-            const Outcome o = impl->route(req.method(), target, host, origin, cookie, has_origin);
+            const Outcome o = impl->route(req.method(), target, host, origin, has_origin, cookie, has_fetch_site, fetch_site);
+            if (o.status == http::status::found) {
+                send_status(o.status, o.location, o.set_cookie ? set_cookie_header() : std::string());
+                return;
+            }
             if (o.status != http::status::ok) {
                 send_status(o.status);
                 return;
@@ -318,6 +395,9 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
 
             beast::error_code ec;
             http::file_body::value_type body;
+            // NOTE: file_body opens by narrow path. On Windows that is the ANSI code page, so an install
+            // path with characters outside it fails (404 here). Not fixed: needs a wide-path File type that
+            // cannot be tested on this host.
             body.open(o.file.string().c_str(), beast::file_mode::scan, ec);
             if (ec) {
                 send_status(http::status::not_found);
@@ -328,47 +408,67 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
                 auto res = std::make_shared<http::response<http::empty_body>>(http::status::ok, 11);
                 common_headers(*res);
                 res->set(http::field::content_type, mime_for(o.file));
-                if (o.set_cookie) res->insert(http::field::set_cookie, set_cookie_header());
                 res->content_length(size);
-                keep = res;
-                http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) {
-                    beast::error_code e;
-                    self->stream.socket().shutdown(asio::ip::tcp::socket::shutdown_both, e);
-                });
+                finish_write(res, k_status_timeout);
+                http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) { self->shutdown(); });
                 return;
             }
             auto res = std::make_shared<Response>(http::status::ok, 11);
             common_headers(*res);
             res->set(http::field::content_type, mime_for(o.file));
-            if (o.set_cookie) res->insert(http::field::set_cookie, set_cookie_header());
             res->body() = std::move(body);
             res->prepare_payload();
-            keep = res;
-            http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) {
-                beast::error_code e;
-                self->stream.socket().shutdown(asio::ip::tcp::socket::shutdown_both, e);
-            });
+            finish_write(res, k_file_timeout);
+            http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) { self->shutdown(); });
         }
 
         std::string set_cookie_header() const
         {
-            return std::string(cookie_name) + "=" + impl->token + "; Path=" + url_prefix + "; HttpOnly; SameSite=Strict";
+            return impl->cookie_name + "=" + impl->token + "; Path=" + url_prefix + "; HttpOnly; SameSite=Strict";
         }
     };
 
     void do_accept()
     {
         acceptor.async_accept([self = shared_from_this()](beast::error_code ec, asio::ip::tcp::socket sock) {
-            if (ec) return; // closed by stop()
-            if (self->connections.load() >= k_max_connections) {
-                beast::error_code e;
-                sock.close(e);
-            } else {
-                self->connections++;
-                std::make_shared<Connection>(self, std::move(sock))->run();
+            if (ec == asio::error::operation_aborted || !self->running) return; // closed by stop()
+            if (ec) {
+                // Transient (EMFILE, ECONNABORTED, ...): keep serving, after a short pause so a persistent error cannot spin.
+                BOOST_LOG_TRIVIAL(warning) << "WebPageServer: accept failed: " << ec.message();
+                self->accept_retry.expires_after(k_accept_retry);
+                self->accept_retry.async_wait([self](beast::error_code wec) {
+                    if (!wec && self->running) self->do_accept();
+                });
+                return;
+            }
+            try {
+                if (self->connections.load() >= k_max_connections) {
+                    beast::error_code e;
+                    sock.close(e);
+                } else {
+                    self->connections++;
+                    std::make_shared<Connection>(self, std::move(sock))->run();
+                }
+            } catch (const std::exception& e) {
+                BOOST_LOG_TRIVIAL(error) << "WebPageServer: connection setup failed: " << e.what();
             }
             self->do_accept();
         });
+    }
+
+    // Runs the io loop; an exception escaping a handler is logged and the loop resumes, never terminating the app.
+    void run_io()
+    {
+        for (;;) {
+            try {
+                io.run();
+                return;
+            } catch (const std::exception& e) {
+                BOOST_LOG_TRIVIAL(error) << "WebPageServer: io loop exception: " << e.what();
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "WebPageServer: io loop unknown exception";
+            }
+        }
     }
 };
 
@@ -389,6 +489,8 @@ bool WebPageServer::start()
         return false;
     }
     try {
+        m_impl->io.restart(); // a stopped server can be started again
+        m_impl->token = make_token(); // a new session, a new token
         asio::ip::tcp::endpoint ep(asio::ip::make_address_v4("127.0.0.1"), 0); // loopback only
         m_impl->acceptor.open(ep.protocol());
         m_impl->acceptor.bind(ep);
@@ -396,13 +498,16 @@ bool WebPageServer::start()
         m_impl->port            = m_impl->acceptor.local_endpoint().port();
         m_impl->expected_host   = "127.0.0.1:" + std::to_string(m_impl->port);
         m_impl->expected_origin = "http://" + m_impl->expected_host;
+        m_impl->cookie_name     = "orca_wps_" + std::to_string(m_impl->port);
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(error) << "WebPageServer: cannot bind loopback: " << e.what();
+        boost::system::error_code ignored;
+        m_impl->acceptor.close(ignored);
         return false;
     }
     m_impl->running = true;
     m_impl->do_accept();
-    m_impl->threads.emplace_back([impl = m_impl] { impl->io.run(); });
+    m_impl->threads.emplace_back([impl = m_impl] { impl->run_io(); });
     return true;
 }
 
@@ -414,6 +519,7 @@ void WebPageServer::stop()
     asio::post(m_impl->io, [impl = m_impl] {
         boost::system::error_code ec;
         impl->acceptor.close(ec);
+        impl->accept_retry.cancel();
         for (auto* c : std::set<Impl::Connection*>(impl->open_connections)) c->close();
     });
     for (auto& t : m_impl->threads) t.join();
@@ -422,6 +528,7 @@ void WebPageServer::stop()
 
 bool WebPageServer::is_running() const { return m_impl->running; }
 uint16_t WebPageServer::port() const { return m_impl->port; }
+std::string WebPageServer::cookie_name() const { return m_impl->cookie_name; }
 const std::string& WebPageServer::token() const { return m_impl->token; }
 
 std::string WebPageServer::start_url() const

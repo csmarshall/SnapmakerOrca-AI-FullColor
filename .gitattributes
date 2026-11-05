@@ -13,3 +13,7 @@
 
 # OCCT BRep fixtures, kept byte for byte as OCCT wrote them.
 *.brep -text
+
+# Vendored Snapmaker Flutter bundle and its SHA-256 manifest: byte for byte, no line-ending conversion (ADR 0005).
+resources/web/flutter_web/** -text
+resources/web/flutter_web.sha256 -text
