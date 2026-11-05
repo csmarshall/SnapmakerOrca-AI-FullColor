@@ -311,13 +311,20 @@ public:
         std::string key;
         std::string before;
         std::string after;
+        bool operator==(const LocalBundleCodeChange& other) const
+        {
+            return preset == other.preset && key == other.key && after == other.after;
+        }
     };
     // Error text returned (verbatim) by reload_local_bundle() when a bundle preset changes a code-bearing
     // value and approve_code_changes is false. `code_changes` then lists every such value.
     static constexpr const char* code_settings_need_approval = "code_settings_need_approval";
-    // approve_code_changes must only be set after the user approved the listed changes in the GUI.
+    // `approved_code_changes` must only be filled from changes the user approved in the GUI. The reload is
+    // still refused if the files now hold a code-bearing value that is not in that list (preset, key and
+    // new value), so a file rewritten between the approval and the retry is not applied.
     bool reload_local_bundle(const std::string& preset_folder, const std::string& bundle_id, std::string* error = nullptr,
-                             std::vector<LocalBundleCodeChange>* code_changes = nullptr, bool approve_code_changes = false);
+                             std::vector<LocalBundleCodeChange>* code_changes = nullptr,
+                             const std::vector<LocalBundleCodeChange>* approved_code_changes = nullptr);
     std::vector<std::string> list_local_bundle_ids(const std::string& preset_folder);
     // Orca: Import subscribed bundle presets (load and save to disk in one operation), handles one bundle at a time
     PresetsConfigSubstitutions update_subscribed_presets(AppConfig& config,

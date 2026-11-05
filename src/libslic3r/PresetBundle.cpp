@@ -1632,7 +1632,8 @@ std::vector<std::string> PresetBundle::list_local_bundle_ids(const std::string& 
 }
 
 bool PresetBundle::reload_local_bundle(const std::string& preset_folder, const std::string& bundle_id, std::string* error,
-                                       std::vector<LocalBundleCodeChange>* code_changes, bool approve_code_changes)
+                                       std::vector<LocalBundleCodeChange>* code_changes,
+                                       const std::vector<LocalBundleCodeChange>* approved_code_changes)
 {
     auto fail = [error](const std::string& message) {
         if (error != nullptr)
@@ -1739,7 +1740,14 @@ bool PresetBundle::reload_local_bundle(const std::string& preset_folder, const s
             collect_changes(prints, staged.prints);
             collect_changes(filaments, staged.filaments);
             collect_changes(printers, staged.printers);
-            if (!changes.empty() && !approve_code_changes) {
+            if (approved_code_changes != nullptr)
+                changes.erase(std::remove_if(changes.begin(), changes.end(),
+                                             [&](const LocalBundleCodeChange& change) {
+                                                 return std::find(approved_code_changes->begin(), approved_code_changes->end(),
+                                                                  change) != approved_code_changes->end();
+                                             }),
+                              changes.end());
+            if (!changes.empty()) {
                 if (code_changes != nullptr)
                     *code_changes = std::move(changes);
                 return fail(code_settings_need_approval);

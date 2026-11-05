@@ -8840,10 +8840,19 @@ TEST_CASE("Local bundle reload refuses changed code-bearing values until approve
         CHECK(changes.front().after == "M117 injected");
         check_reload_state(f.bundle, before);
 
+        SECTION("an approval for a different value is not enough")
+        {
+            std::vector<PresetBundle::LocalBundleCodeChange> other = changes;
+            other.front().after = "M117 something else";
+            CHECK_FALSE(f.bundle.reload_local_bundle("", f.id, &f.error, nullptr, &other));
+            CHECK(f.error == PresetBundle::code_settings_need_approval);
+        }
+
         SECTION("approving applies the reload")
         {
             f.error.clear();
-            REQUIRE(f.bundle.reload_local_bundle("", f.id, &f.error, &changes, true));
+            const std::vector<PresetBundle::LocalBundleCodeChange> approved = changes;
+            REQUIRE(f.bundle.reload_local_bundle("", f.id, &f.error, nullptr, &approved));
             CHECK(f.bundle.printers.get_edited_preset().config.opt_string("machine_start_gcode") == "M117 injected");
         }
     }
