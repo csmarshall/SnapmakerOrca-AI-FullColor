@@ -303,7 +303,21 @@ public:
     PresetsConfigSubstitutions load_user_presets(std::string user, ForwardCompatibilitySubstitutionRule rule, bool read_only = false);
     PresetsConfigSubstitutions load_user_presets(AppConfig &config, std::map<std::string, std::map<std::string, std::string>>& my_presets, ForwardCompatibilitySubstitutionRule rule);
 
-    bool reload_local_bundle(const std::string& preset_folder, const std::string& bundle_id, std::string* error = nullptr);
+    // One code-bearing value (is_automation_write_blocked_key) of a local bundle preset that differs
+    // from what is loaded now, or from the inherited parent for a preset that is new.
+    struct LocalBundleCodeChange
+    {
+        std::string preset;
+        std::string key;
+        std::string before;
+        std::string after;
+    };
+    // Error text returned (verbatim) by reload_local_bundle() when a bundle preset changes a code-bearing
+    // value and approve_code_changes is false. `code_changes` then lists every such value.
+    static constexpr const char* code_settings_need_approval = "code_settings_need_approval";
+    // approve_code_changes must only be set after the user approved the listed changes in the GUI.
+    bool reload_local_bundle(const std::string& preset_folder, const std::string& bundle_id, std::string* error = nullptr,
+                             std::vector<LocalBundleCodeChange>* code_changes = nullptr, bool approve_code_changes = false);
     std::vector<std::string> list_local_bundle_ids(const std::string& preset_folder);
     // Orca: Import subscribed bundle presets (load and save to disk in one operation), handles one bundle at a time
     PresetsConfigSubstitutions update_subscribed_presets(AppConfig& config,

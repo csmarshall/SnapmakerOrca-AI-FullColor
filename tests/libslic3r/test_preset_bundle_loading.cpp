@@ -8820,3 +8820,59 @@ TEST_CASE("The cloud diff force-emits a disabled override only where the cloud w
     // An ironing override defaults to nil: an absent key stays nil, so it is not sent.
     CHECK(key_values.count("filament_ironing_flow") == 0);
 }
+
+TEST_CASE("Local bundle reload refuses changed code-bearing values until approved", "[Preset][Bundle][CodeApproval]")
+{
+    LocalReloadFixture f;
+    std::vector<PresetBundle::LocalBundleCodeChange> changes;
+
+    SECTION("a changed machine_start_gcode needs approval and leaves the loaded presets untouched")
+    {
+        DynamicPrintConfig config(f.bundle.printers.get_selected_preset().config);
+        config.opt_string("machine_start_gcode") = "M117 injected";
+        write_preset_with_inherits(config, f.directory / PRESET_PRINTER_NAME / "Printer.json", "Printer", "");
+        const PresetBundle before(f.bundle);
+
+        CHECK_FALSE(f.bundle.reload_local_bundle("", f.id, &f.error, &changes));
+        CHECK(f.error == PresetBundle::code_settings_need_approval);
+        REQUIRE(changes.size() == 1);
+        CHECK(changes.front().key == "machine_start_gcode");
+        CHECK(changes.front().after == "M117 injected");
+        check_reload_state(f.bundle, before);
+
+        SECTION("approving applies the reload")
+        {
+            f.error.clear();
+            REQUIRE(f.bundle.reload_local_bundle("", f.id, &f.error, &changes, true));
+            CHECK(f.bundle.printers.get_edited_preset().config.opt_string("machine_start_gcode") == "M117 injected");
+        }
+    }
+
+    SECTION("a changed post_process needs approval")
+    {
+        DynamicPrintConfig config(f.bundle.prints.get_selected_preset().config);
+        config.opt<ConfigOptionStrings>("post_process")->values = {"/bin/evil"};
+        write_preset_with_inherits(config, f.directory / PRESET_PRINT_NAME / "Print.json", "Print", "");
+        CHECK_FALSE(f.bundle.reload_local_bundle("", f.id, &f.error, &changes));
+        CHECK(f.error == PresetBundle::code_settings_need_approval);
+        REQUIRE(changes.size() == 1);
+        CHECK(changes.front().key == "post_process");
+    }
+
+    SECTION("a new preset is compared against its default and needs approval for post_process")
+    {
+        DynamicPrintConfig config(f.bundle.prints.default_preset().config);
+        config.opt<ConfigOptionStrings>("post_process")->values = {"/bin/evil"};
+        write_preset_with_inherits(config, f.directory / PRESET_PRINT_NAME / "Other.json", "Other", "");
+        CHECK_FALSE(f.bundle.reload_local_bundle("", f.id, &f.error, &changes));
+        CHECK(f.error == PresetBundle::code_settings_need_approval);
+    }
+
+    SECTION("a layer_height-only change reloads without approval")
+    {
+        write_print_preset_with_layer_height(f.bundle.prints.default_preset().config, f.directory / PRESET_PRINT_NAME / "Print.json",
+                                             "Print", 0.28);
+        REQUIRE(f.bundle.reload_local_bundle("", f.id, &f.error, &changes));
+        CHECK(changes.empty());
+    }
+}
