@@ -279,6 +279,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
     GUI/HttpServer.hpp
+    GUI/WebPageServer.cpp
+    GUI/WebPageServer.hpp
     GUI/RemoteAPI/RemoteAPIConfig.cpp
     GUI/RemoteAPI/RemoteAPIConfig.hpp
     GUI/RemoteAPI/RemoteAPIServer.cpp
