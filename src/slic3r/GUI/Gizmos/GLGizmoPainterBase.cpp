@@ -1558,6 +1558,10 @@ void GLGizmoPainterBase::on_set_state()
         // first move would end it as if released and the first press would paint a line from its last position.
         m_button_down      = Button::None;
         m_last_mouse_click = Vec2d::Zero();
+        // Projection-mask drag/polygon state must not outlive the session either.
+        m_polygon_points.clear();
+        m_polygon_dragged_vertex = -1;
+        m_rect_dragging          = false;
 
         //Camera& camera = wxGetApp().plater()->get_camera();
         //camera.look_at(camera.get_position(), m_previous_target, Vec3d::UnitZ());
