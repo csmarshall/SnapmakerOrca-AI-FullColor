@@ -156,6 +156,8 @@
 #include "slic3r/GUI/Widgets/SideButton.hpp"
 #include "slic3r/plugin/host/PluginPages.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/IPrinterAgent.hpp"
+#include "SnapmakerDevicePage.hpp"
 #include <wx/defs.h>
 #include <cassert>
 #include <wx/display.h>
@@ -1578,6 +1580,10 @@ void MainFrame::init_tabpanel() {
     m_lazy_pages.push_back(m_monitor_page);
     m_tabpanel->AddPage(TAB_ID_MONITOR, m_monitor_page, _L("Device"), "tab_monitor_active");
 
+    // Not in the book until show_device() finds a live agent that declares the Snapmaker UI.
+    m_snapmaker_device_page = new LazyPage<SnapmakerDevicePage>(m_tabpanel, "monitor_snapmaker", 20);
+    m_lazy_pages.push_back(m_snapmaker_device_page);
+
     m_printer_view_page = new LazyPage<PrinterWebView>(m_tabpanel, TAB_ID_MONITOR_WEB, 50, [this](wxWindow* parent) {
         auto* view = new PrinterWebView(parent);
         if (!m_printer_url.empty())
@@ -1649,14 +1655,40 @@ void MainFrame::show_device(bool should_use_native) {
     }
 
     if (use_printer_agents) {
-        if (!m_monitor_page->in_book()) {
-            if ((idx = m_tabpanel->FindPage(m_printer_view_page)) != wxNOT_FOUND) {
-                m_printer_view_page->Show(false);
+        // One Device tab, two contents: the page the live agent declares (IPrinterAgent::device_ui()) takes the
+        // TAB_ID_MONITOR slot, and the other is taken out of the book. The agent decides, never the printer model.
+        auto*      net_agent = wxGetApp().getAgent();
+        const auto live      = net_agent ? net_agent->get_printer_agent() : nullptr;
+        const bool snapmaker_ui = live && live->device_ui() == DeviceUi::SnapmakerWeb;
+
+        if (snapmaker_ui) {
+            if ((idx = m_tabpanel->FindPage(m_monitor_page)) != wxNOT_FOUND) {
+                m_monitor_page->Show(false);
                 m_tabpanel->RemovePage(idx);
             }
-            m_monitor_page->Show(false);
-            m_tabpanel->InsertPage(m_tabpanel->PositionAfter({TAB_ID_PREVIEW}), TAB_ID_MONITOR, m_monitor_page,
-                                   _L("Device"), "tab_monitor_active");
+            if (!m_snapmaker_device_page->in_book()) {
+                if ((idx = m_tabpanel->FindPage(m_printer_view_page)) != wxNOT_FOUND) {
+                    m_printer_view_page->Show(false);
+                    m_tabpanel->RemovePage(idx);
+                }
+                m_snapmaker_device_page->Show(false);
+                m_tabpanel->InsertPage(m_tabpanel->PositionAfter({TAB_ID_PREVIEW}), TAB_ID_MONITOR, m_snapmaker_device_page,
+                                       _L("Device"), "tab_monitor_active");
+            }
+        } else {
+            if ((idx = m_tabpanel->FindPage(m_snapmaker_device_page)) != wxNOT_FOUND) {
+                m_snapmaker_device_page->Show(false);
+                m_tabpanel->RemovePage(idx);
+            }
+            if (!m_monitor_page->in_book()) {
+                if ((idx = m_tabpanel->FindPage(m_printer_view_page)) != wxNOT_FOUND) {
+                    m_printer_view_page->Show(false);
+                    m_tabpanel->RemovePage(idx);
+                }
+                m_monitor_page->Show(false);
+                m_tabpanel->InsertPage(m_tabpanel->PositionAfter({TAB_ID_PREVIEW}), TAB_ID_MONITOR, m_monitor_page,
+                                       _L("Device"), "tab_monitor_active");
+            }
         }
 
         if (wxGetApp().is_enable_multi_machine()) {
@@ -1698,6 +1730,10 @@ void MainFrame::show_device(bool should_use_native) {
     }
 
     if (should_use_native) {
+        if ((idx = m_tabpanel->FindPage(m_snapmaker_device_page)) != wxNOT_FOUND) {
+            m_snapmaker_device_page->Show(false);
+            m_tabpanel->RemovePage(idx);
+        }
         if (m_monitor_page->in_book()) {
             fit_tab_labels(); // ORCA on printer change - same button layout
             return;
@@ -1744,6 +1780,10 @@ void MainFrame::show_device(bool should_use_native) {
         }
         if ((idx = m_tabpanel->FindPage(m_monitor_page)) != wxNOT_FOUND) {
             m_monitor_page->Show(false);
+            m_tabpanel->RemovePage(idx);
+        }
+        if ((idx = m_tabpanel->FindPage(m_snapmaker_device_page)) != wxNOT_FOUND) {
+            m_snapmaker_device_page->Show(false);
             m_tabpanel->RemovePage(idx);
         }
         m_printer_view_page->Show(false);
