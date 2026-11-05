@@ -21,6 +21,7 @@ Preferences → **Remote API**:
 
 > Binding to the LAN exposes live control of your slicer to every machine on the
 > network. Keep the token secret and prefer localhost unless you need remote access.
+> See [`SECURITY.md`](./SECURITY.md) for the residual risks (LAN plain HTTP, `loadModel` local paths, plugin file writes).
 
 ## Authentication
 
