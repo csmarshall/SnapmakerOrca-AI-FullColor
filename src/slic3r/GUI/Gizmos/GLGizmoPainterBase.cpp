@@ -41,6 +41,7 @@
 #include <vector>
 #include <utility>
 #include <queue>
+#include <functional>
 #include "libslic3r/Color.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Preset.hpp"
@@ -217,6 +218,15 @@ bool GLGizmoPainterBase::render_follows_cursor() const
 
 void GLGizmoPainterBase::render_cursor()
 {
+    if (m_tool_type == ToolType::RECTANGLE) {
+        render_cursor_rectangle();
+        return;
+    }
+    if (m_tool_type == ToolType::POLYGON) {
+        render_cursor_polygon();
+        return;
+    }
+
     // First check that the mouse pointer is on an object.
     const Camera& camera = wxGetApp().plater()->get_camera();
 
@@ -472,6 +482,150 @@ void GLGizmoPainterBase::render_cursor_height_range(const Transform3d& trafo) co
     }
 
     shader->stop_using();
+}
+
+// Draws a dashed screen-space (NDC) line model. Mirrors the profile handling of render_cursor_circle().
+void GLGizmoPainterBase::render_screen_overlay(GLModel &model)
+{
+    if (!model.is_initialized())
+        return;
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(1.5f));
+#endif // !SLIC3R_OPENGL_ES
+
+    glsafe(::glDisable(GL_DEPTH_TEST));
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile()) {
+        glsafe(::glPushAttrib(GL_ENABLE_BIT));
+        glsafe(::glLineStipple(4, 0xAAAA));
+        glsafe(::glEnable(GL_LINE_STIPPLE));
+    }
+#endif // !SLIC3R_OPENGL_ES
+
+#if SLIC3R_OPENGL_ES
+    GLShaderProgram *shader = wxGetApp().get_shader("dashed_lines");
+#else
+    GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
+    if (shader != nullptr) {
+        shader->start_using();
+        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+        shader->set_uniform("projection_matrix", Transform3d::Identity());
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            const std::array<int, 4> &viewport = wxGetApp().plater()->get_camera().get_viewport();
+            shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
+            shader->set_uniform("width", 0.25f);
+            shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
+        }
+#endif // !SLIC3R_OPENGL_ES
+        model.render();
+        shader->stop_using();
+    }
+
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glPopAttrib());
+#endif // !SLIC3R_OPENGL_ES
+    glsafe(::glEnable(GL_DEPTH_TEST));
+}
+
+// Builds a screen-space (NDC) polyline model. Core profile draws via the dashed_thick_lines shader, which needs
+// independent segments (Lines); the legacy profile can use LineLoop / LineStrip directly.
+void GLGizmoPainterBase::init_overlay_lines(GLModel &model, const std::vector<Vec2f> &points, bool closed)
+{
+    model.reset();
+    if (points.size() < 2)
+        return;
+
+    GLModel::Geometry geometry;
+    bool use_segments = false;
+#if SLIC3R_OPENGL_ES
+    use_segments = true;
+#else
+    use_segments = OpenGLManager::get_gl_info().is_core_profile();
+#endif // SLIC3R_OPENGL_ES
+    geometry.format = {use_segments ? GLModel::Geometry::EPrimitiveType::Lines :
+                                      (closed ? GLModel::Geometry::EPrimitiveType::LineLoop : GLModel::Geometry::EPrimitiveType::LineStrip),
+                       GLModel::Geometry::EVertexLayout::P2};
+    geometry.color = {0.f, 1.f, 0.3f, 1.f};
+    geometry.reserve_vertices(points.size());
+    for (const Vec2f &point : points)
+        geometry.add_vertex(point);
+
+    const unsigned int count = unsigned(points.size());
+    if (use_segments) {
+        const unsigned int segments = closed ? count : count - 1;
+        for (unsigned int i = 0; i < segments; ++i) {
+            geometry.add_index(i);
+            geometry.add_index((i + 1) % count);
+        }
+    } else {
+        for (unsigned int i = 0; i < count; ++i)
+            geometry.add_index(i);
+    }
+    model.init_from(std::move(geometry));
+}
+
+void GLGizmoPainterBase::render_cursor_rectangle()
+{
+    if (!m_rect_dragging)
+        return;
+
+    const Size canvas_size = m_parent.get_canvas_size();
+    const float width = float(canvas_size.get_width());
+    const float height = float(canvas_size.get_height());
+    if (width <= 0.f || height <= 0.f)
+        return;
+
+    if (!m_rect_overlay.is_initialized() || !m_old_rect_start_corner.isApprox(m_rect_start_corner)
+        || !m_old_rect_end_corner.isApprox(m_rect_end_corner)) {
+        m_old_rect_start_corner = m_rect_start_corner;
+        m_old_rect_end_corner = m_rect_end_corner;
+        m_rect_overlay.reset();
+
+        const float left = float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x()));
+        const float right = float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x()));
+        const float top = float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y()));
+        const float bottom = float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y()));
+        const auto to_ndc = [width, height](float x, float y) {
+            return Vec2f(2.f * x / width - 1.f, 1.f - 2.f * y / height);
+        };
+
+        init_overlay_lines(m_rect_overlay, {to_ndc(left, top), to_ndc(right, top), to_ndc(right, bottom), to_ndc(left, bottom)}, true);
+    }
+
+    render_screen_overlay(m_rect_overlay);
+}
+
+void GLGizmoPainterBase::render_cursor_polygon()
+{
+    if (m_polygon_points.empty())
+        return;
+
+    const Size canvas_size = m_parent.get_canvas_size();
+    const float width = float(canvas_size.get_width());
+    const float height = float(canvas_size.get_height());
+    if (width <= 0.f || height <= 0.f)
+        return;
+
+    const auto to_ndc = [width, height](const Vec2d &point) {
+        return Vec2f(2.f * float(point.x()) / width - 1.f, 1.f - 2.f * float(point.y()) / height);
+    };
+
+    std::vector<Vec2f> ndc_points;
+    ndc_points.reserve(m_polygon_points.size() + 1);
+    for (const Vec2d &point : m_polygon_points)
+        ndc_points.emplace_back(to_ndc(point));
+    ndc_points.emplace_back(to_ndc(m_parent.get_local_mouse_position()));
+    init_overlay_lines(m_polygon_overlay, ndc_points, false);
+
+    render_screen_overlay(m_polygon_overlay);
 }
 
 BoundingBoxf3 GLGizmoPainterBase::bounding_box() const
@@ -776,6 +930,84 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         }
     }
 
+    if (m_tool_type == ToolType::RECTANGLE) {
+        if (action == SLAGizmoEventType::RightDown) {
+            m_rect_dragging = false;
+            m_button_down = Button::None;
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (action == SLAGizmoEventType::LeftDown) {
+            if (m_triangle_selectors.empty())
+                return false;
+            m_button_down = Button::Left;
+            m_rect_start_corner = mouse_position;
+            m_rect_end_corner = mouse_position;
+            m_rect_dragging = true;
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (action == SLAGizmoEventType::Dragging && m_button_down == Button::Left) {
+            m_rect_end_corner = mouse_position;
+            m_parent.set_as_dirty();
+            return true;
+        }
+    }
+
+    if (m_tool_type == ToolType::POLYGON
+        && (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown
+            || action == SLAGizmoEventType::LeftUp
+            || (action == SLAGizmoEventType::Dragging && m_button_down != Button::None))) {
+        if (m_triangle_selectors.empty())
+            return false;
+
+        if (action == SLAGizmoEventType::RightDown) {
+            m_polygon_points.clear();
+            m_polygon_dragged_vertex = -1;
+            m_button_down = Button::None;
+            m_parent.set_as_dirty();
+            return true;
+        }
+
+        if (action == SLAGizmoEventType::LeftUp) {
+            m_polygon_dragged_vertex = -1;
+            m_button_down = Button::None;
+            return true;
+        }
+
+        if (action == SLAGizmoEventType::Dragging) {
+            if (m_polygon_dragged_vertex >= 0 && m_polygon_dragged_vertex < int(m_polygon_points.size()))
+                m_polygon_points[m_polygon_dragged_vertex] = mouse_position;
+            m_parent.set_as_dirty();
+            return true;
+        }
+
+        m_button_down = Button::Left;
+        int hit_vertex = -1;
+        for (int i = 0; i < int(m_polygon_points.size()); ++i) {
+            if ((m_polygon_points[i] - mouse_position).norm() <= double(PolygonCloseRadiusPx)) {
+                hit_vertex = i;
+                break;
+            }
+        }
+
+        if (hit_vertex == 0 && m_polygon_points.size() >= 3) {
+            const EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE : get_left_button_state_type();
+            const wxString action_name = handle_snapshot_action_name(shift_down, Button::Left);
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()),
+                                          UndoRedo::SnapshotType::GizmoAction);
+            apply_polygon_mask(new_state);
+            update_model_object();
+            m_polygon_points.clear();
+        } else if (hit_vertex >= 0) {
+            m_polygon_dragged_vertex = hit_vertex;
+        } else {
+            m_polygon_points.push_back(mouse_position);
+        }
+        m_parent.set_as_dirty();
+        return true;
+    }
+
     if (action == SLAGizmoEventType::LeftDown
      || action == SLAGizmoEventType::RightDown
     || (action == SLAGizmoEventType::Dragging && m_button_down != Button::None)) {
@@ -856,6 +1088,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
                 std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::SinglePointCursor::cursor_factory(phr.z_world,
                     camera_pos, m_cursor_height, trafo_matrix, clp);
+                m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
                 m_triangle_selectors[mesh_idx]->select_patch(int(phr.first_facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
                     m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, get_tilt_up_direction());
 
@@ -927,12 +1160,14 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                     std::unique_ptr<TriangleSelector::Cursor> cursor         = TriangleSelector::SinglePointCursor::cursor_factory(first_position.mesh_hit,
                                                                                                                                    camera_pos, m_cursor_radius,
                                                                                                                                    m_cursor_type, trafo_matrix, clp);
+                    m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
                     m_triangle_selectors[mesh_idx]->select_patch(int(first_position.facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
                                                                  m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, get_tilt_up_direction());
                 } else {
                     for (auto first_position_it = projected_mouse_positions.cbegin(); first_position_it != projected_mouse_positions.cend() - 1; ++first_position_it) {
                         auto second_position_it = first_position_it + 1;
                         std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::DoublePointCursor::cursor_factory(first_position_it->mesh_hit, second_position_it->mesh_hit, camera_pos, m_cursor_radius, m_cursor_type, trafo_matrix, clp);
+                        m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
                         m_triangle_selectors[mesh_idx]->select_patch(int(first_position_it->facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate, m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, get_tilt_up_direction());
                     }
                 }
@@ -1021,6 +1256,12 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
     if ((action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
       && m_button_down != Button::None) {
+        if (m_tool_type == ToolType::RECTANGLE && m_rect_dragging) {
+            const EnforcerBlockerType new_state = shift_down ? EnforcerBlockerType::NONE : get_left_button_state_type();
+            apply_rectangle_mask(new_state);
+            m_rect_dragging = false;
+        }
+
         // Take snapshot and update ModelVolume data.
         wxString action_name = this->handle_snapshot_action_name(shift_down, m_button_down);
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), std::string(action_name.ToUTF8().data()), UndoRedo::SnapshotType::GizmoAction);
@@ -1032,6 +1273,104 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     }
 
     return false;
+}
+
+bool GLGizmoPainterBase::collect_projection_mask_transforms(std::vector<Transform3d> &transformations,
+                                                              std::vector<Transform3d> &transformations_no_offset) const
+{
+    const Selection     &selection      = m_parent.get_selection();
+    const ModelObject   *model_object   = m_c->selection_info()->model_object();
+    const ModelInstance *model_instance = model_object->instances[selection.get_instance_idx()];
+    const bool           assemble       = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView;
+    const Transform3d    instance_trafo           = assemble ? model_instance->get_assemble_transformation().get_matrix() : model_instance->get_transformation().get_matrix();
+    const Transform3d    instance_trafo_no_offset = assemble ? model_instance->get_assemble_transformation().get_matrix_no_offset() : model_instance->get_transformation().get_matrix_no_offset();
+
+    for (const ModelVolume *volume : model_object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        if (assemble) {
+            Transform3d transformation = instance_trafo * volume->get_matrix();
+            transformation.translate(volume->get_transformation().get_offset() * (GLVolume::explosion_ratio - 1.0)
+                                     + model_instance->get_offset_to_assembly() * (GLVolume::explosion_ratio - 1.0));
+            transformations.emplace_back(std::move(transformation));
+        } else {
+            transformations.emplace_back(instance_trafo * volume->get_matrix());
+        }
+        transformations_no_offset.emplace_back(instance_trafo_no_offset * volume->get_matrix_no_offset());
+    }
+    return transformations.size() == m_triangle_selectors.size();
+}
+
+void GLGizmoPainterBase::apply_projection_mask(EnforcerBlockerType new_state,
+                                               const std::function<std::unique_ptr<TriangleSelector::Cursor>(
+                                                   const Vec3f &, const Vec3f &, const Matrix4d &, const std::array<int, 4> &,
+                                                   const Transform3d &, const TriangleSelector::ClippingPlane &)> &make_cursor)
+{
+    std::vector<Transform3d> transformations;
+    std::vector<Transform3d> transformations_no_offset;
+    if (!collect_projection_mask_transforms(transformations, transformations_no_offset))
+        return;
+
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    const Matrix4d view_projection = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+    const std::array<int, 4> viewport = camera.get_viewport();
+    const Vec3d camera_position = camera.get_position();
+    const Vec3d camera_target   = camera_position + camera.get_dir_forward();
+
+    for (size_t mesh_idx = 0; mesh_idx < transformations.size(); ++mesh_idx) {
+        const Transform3d &transformation = transformations[mesh_idx];
+        const Transform3d inverse = transformation.inverse();
+        const Vec3f camera_position_mesh = (inverse * camera_position).cast<float>();
+        const Vec3f camera_target_mesh   = (inverse * camera_target).cast<float>();
+        const TriangleSelector::ClippingPlane &clipping_plane = get_clipping_plane_in_volume_coordinates(transformation);
+        std::unique_ptr<TriangleSelector::Cursor> cursor = make_cursor(camera_position_mesh, camera_target_mesh, view_projection, viewport,
+                                                                       transformation, clipping_plane);
+
+        m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
+        m_triangle_selectors[mesh_idx]->select_patch(0, std::move(cursor), new_state, transformations_no_offset[mesh_idx],
+                                                     m_triangle_splitting_enabled,
+                                                     m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f,
+                                                     get_tilt_up_direction());
+        m_triangle_selectors[mesh_idx]->request_update_render_data(true);
+    }
+}
+
+void GLGizmoPainterBase::apply_rectangle_mask(EnforcerBlockerType new_state)
+{
+    if (m_triangle_selectors.empty())
+        return;
+
+    const Vec2f rect_min(float(std::min(m_rect_start_corner.x(), m_rect_end_corner.x())),
+                         float(std::min(m_rect_start_corner.y(), m_rect_end_corner.y())));
+    const Vec2f rect_max(float(std::max(m_rect_start_corner.x(), m_rect_end_corner.x())),
+                         float(std::max(m_rect_start_corner.y(), m_rect_end_corner.y())));
+    if (rect_max.x() - rect_min.x() < 2.f || rect_max.y() - rect_min.y() < 2.f)
+        return;
+
+    apply_projection_mask(new_state, [&](const Vec3f &cam_pos, const Vec3f &cam_target, const Matrix4d &view_projection,
+                                         const std::array<int, 4> &viewport, const Transform3d &trafo,
+                                         const TriangleSelector::ClippingPlane &clipping_plane) {
+        return TriangleSelector::RectangleProjectionCursor::cursor_factory(cam_pos, cam_target, view_projection, viewport,
+                                                                           rect_min, rect_max, trafo, clipping_plane);
+    });
+}
+
+void GLGizmoPainterBase::apply_polygon_mask(EnforcerBlockerType new_state)
+{
+    if (m_triangle_selectors.empty() || m_polygon_points.size() < 3)
+        return;
+
+    std::vector<Vec2f> polygon;
+    polygon.reserve(m_polygon_points.size());
+    for (const Vec2d &point : m_polygon_points)
+        polygon.emplace_back(float(point.x()), float(point.y()));
+
+    apply_projection_mask(new_state, [&](const Vec3f &cam_pos, const Vec3f &cam_target, const Matrix4d &view_projection,
+                                         const std::array<int, 4> &viewport, const Transform3d &trafo,
+                                         const TriangleSelector::ClippingPlane &clipping_plane) {
+        return TriangleSelector::PolygonProjectionCursor::cursor_factory(cam_pos, cam_target, view_projection, viewport,
+                                                                         polygon, trafo, clipping_plane);
+    });
 }
 
 bool GLGizmoPainterBase::on_mouse(const wxMouseEvent &mouse_event)
@@ -1219,6 +1558,10 @@ void GLGizmoPainterBase::on_set_state()
         // first move would end it as if released and the first press would paint a line from its last position.
         m_button_down      = Button::None;
         m_last_mouse_click = Vec2d::Zero();
+        // Projection-mask drag/polygon state must not outlive the session either.
+        m_polygon_points.clear();
+        m_polygon_dragged_vertex = -1;
+        m_rect_dragging          = false;
 
         //Camera& camera = wxGetApp().plater()->get_camera();
         //camera.look_at(camera.get_position(), m_previous_target, Vec3d::UnitZ());
