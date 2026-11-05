@@ -807,6 +807,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/QidiPrinterAgent.hpp
     Utils/SnapmakerPrinterAgent.cpp
     Utils/SnapmakerPrinterAgent.hpp
+    Utils/SpoolmanJoin.cpp
+    Utils/SpoolmanJoin.hpp
     Utils/MoonrakerPrinterAgent.cpp
     Utils/MoonrakerPrinterAgent.hpp
     Utils/Moonraker.cpp
