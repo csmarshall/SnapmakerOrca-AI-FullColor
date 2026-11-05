@@ -21,6 +21,8 @@
 
 #include <pybind11/stl.h>
 
+#include <slic3r/GUI/I18N.hpp>
+#include <wx/msgdlg.h>
 #include <wx/string.h>
 
 #include <set>
@@ -600,6 +602,26 @@ void update_filament_slot(int slot_number, const std::string& key, const std::st
     transaction.commit();
 }
 
+// Asks the user, in the GUI only, to approve code-bearing values (post_process, *_gcode, print-host keys)
+// that a local bundle reload would load. Must run on the UI thread. Plugins cannot answer it.
+bool approve_code_changes(const std::string& bundle_id, const std::vector<PresetBundle::LocalBundleCodeChange>& changes)
+{
+    constexpr size_t max_value_chars = 200;
+    const auto shorten = [&](const std::string& value) {
+        return value.size() > max_value_chars ? value.substr(0, max_value_chars) + "..." : value;
+    };
+    wxString list;
+    for (const auto& change : changes)
+        list += wxString::FromUTF8((change.preset + "\n    " + change.key + ": \"" + shorten(change.before) + "\" -> \"" +
+                                    shorten(change.after) + "\"\n").c_str());
+    wxMessageDialog dialog(nullptr,
+                           wxString::Format(_L("A plugin reloaded the local bundle \"%s\" and it changes settings that can run "
+                                               "programs or send G-code to the printer:\n\n%s\nApply these changes?"),
+                                            wxString::FromUTF8(bundle_id.c_str()), list),
+                           _L("Approve code-bearing settings"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+    return dialog.ShowModal() == wxID_YES;
+}
+
 void reload_local_bundle(const std::string& bundle_id)
 {
     bool        reloaded = false;
@@ -615,7 +637,18 @@ void reload_local_bundle(const std::string& bundle_id)
         if (app.mainframe == nullptr)
             throw std::runtime_error("OrcaSlicer main window is not available");
 
-        reloaded = app.preset_bundle->reload_local_bundle(app.app_config->get("preset_folder"), bundle_id, &error);
+        std::vector<PresetBundle::LocalBundleCodeChange> code_changes;
+        reloaded = app.preset_bundle->reload_local_bundle(app.app_config->get("preset_folder"), bundle_id, &error, &code_changes);
+        if (!reloaded && error == PresetBundle::code_settings_need_approval && !code_changes.empty()) {
+            if (!approve_code_changes(bundle_id, code_changes)) {
+                error = "Code-bearing settings were not approved by the user";
+                return;
+            }
+            error.clear();
+            // The retry re-checks the files against exactly what was approved.
+            reloaded = app.preset_bundle->reload_local_bundle(app.app_config->get("preset_folder"), bundle_id, &error, nullptr,
+                                                              &code_changes);
+        }
         if (!reloaded)
             return;
 

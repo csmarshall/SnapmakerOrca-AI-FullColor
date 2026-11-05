@@ -4,7 +4,7 @@
 #include <functional>
 #include <string>
 
-namespace Slic3r { class DynamicPrintConfig; }
+namespace Slic3r { class DynamicPrintConfig; class AppConfig; }
 
 
 namespace Slic3r {
@@ -34,6 +34,27 @@ inline bool run_post_process_scripts(std::string& src_path, const DynamicPrintCo
     std::string src_path_name = src_path;
     return run_post_process_scripts(src_path, false, "File", src_path_name, config);
 }
+
+// Approval of the post_process value (programs that run on the host after export).
+//
+// post_process can be set by a preset file written by anything (an evasive plugin, an editor, a
+// bundle), so before scripts run the SHA-256 of the exact value must be in the set of values the user
+// approved in the GUI. The set lives in AppConfig section "approved_post_process"; nothing but the GUI
+// prompt below adds to it (plugins cannot write OrcaSlicer.conf, the Remote API has no way to).
+//
+// Hex SHA-256 of the post_process value of `config`, or an empty string when it holds no script.
+extern std::string post_process_hash(const DynamicPrintConfig& config);
+extern bool        is_post_process_hash_approved(const AppConfig& app_config, const std::string& hash);
+extern void        approve_post_process_hash(AppConfig& app_config, const std::string& hash);
+
+enum class PostProcessApproval { NotNeeded, Approved, NeedsApproval };
+// Reads the application's AppConfig. Safe from any thread; never shows UI.
+extern PostProcessApproval check_post_process_approval(const DynamicPrintConfig& config);
+// Asks the user (modal, UI thread only) to approve the scripts in `config`, and records a Yes. Returns
+// true when the value is approved afterwards. Never call it from the Remote API or a worker thread.
+extern bool ask_post_process_approval(const DynamicPrintConfig& config);
+// Error text of the ExportError thrown when scripts are about to run unapproved on a thread that cannot ask.
+inline constexpr const char* post_process_needs_approval = "post_process_needs_approval";
 
 // BBS
 extern void gcode_add_line_number(const std::string& path, const DynamicPrintConfig& config);

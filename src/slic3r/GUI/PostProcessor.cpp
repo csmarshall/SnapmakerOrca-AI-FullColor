@@ -39,6 +39,11 @@
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/Exception.hpp"
 #include <slic3r/plugin/PythonPluginInterface.hpp>
+#include "libslic3r/AppConfig.hpp"
+#include "GUI_App.hpp"
+#include <openssl/sha.h>
+#include <wx/msgdlg.h>
+#include <wx/utils.h>
 #include <string>
 #include <vector>
 #include <utility>
@@ -345,6 +350,74 @@ static void run_post_process_plugins(const ConfigOptionStrings& capabilities,
 // output_name is the final name of the G-code on SD card or when uploaded to PrusaLink or OctoPrint.
 // If uploading to PrusaLink or OctoPrint, then the file will be renamed to output_name first on the target host.
 // The post-processing script may change the output_name.
+static const char* const k_approved_post_process_section = "approved_post_process";
+
+std::string post_process_hash(const DynamicPrintConfig& config)
+{
+    // The gate is only meaningful while post_process is on the shared code-bearing key list.
+    assert(is_automation_write_blocked_key("post_process"));
+    const auto* post_process = config.opt<ConfigOptionStrings>("post_process");
+    if (post_process == nullptr || post_process->values.empty())
+        return {};
+    // Length-prefixed so ["a b"] and ["a", "b"] cannot collide.
+    std::string canonical;
+    for (const std::string& value : post_process->values)
+        canonical += std::to_string(value.size()) + ":" + value + "\n";
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(canonical.data()), canonical.size(), digest);
+    static const char hex[] = "0123456789abcdef";
+    std::string       out;
+    for (unsigned char byte : digest) {
+        out += hex[byte >> 4];
+        out += hex[byte & 0xF];
+    }
+    return out;
+}
+
+bool is_post_process_hash_approved(const AppConfig& app_config, const std::string& hash)
+{
+    return !hash.empty() && app_config.has_section(k_approved_post_process_section) &&
+           app_config.get_section(k_approved_post_process_section).count(hash) != 0;
+}
+
+void approve_post_process_hash(AppConfig& app_config, const std::string& hash)
+{
+    if (!hash.empty())
+        app_config.set(k_approved_post_process_section, hash, "1");
+}
+
+PostProcessApproval check_post_process_approval(const DynamicPrintConfig& config)
+{
+    const std::string hash = post_process_hash(config);
+    if (hash.empty())
+        return PostProcessApproval::NotNeeded;
+    const AppConfig* app_config = GUI::wxGetApp().app_config;
+    return app_config != nullptr && is_post_process_hash_approved(*app_config, hash) ? PostProcessApproval::Approved :
+                                                                                      PostProcessApproval::NeedsApproval;
+}
+
+bool ask_post_process_approval(const DynamicPrintConfig& config)
+{
+    const PostProcessApproval state = check_post_process_approval(config);
+    if (state != PostProcessApproval::NeedsApproval)
+        return true;
+    if (!wxIsMainThread() || GUI::wxGetApp().app_config == nullptr)
+        return false;
+    wxString scripts;
+    for (const std::string& value : config.opt<ConfigOptionStrings>("post_process")->values)
+        scripts += wxString::FromUTF8(value.c_str()) + "\n";
+    wxMessageDialog dialog(nullptr,
+                           wxString::Format(_L("The active process settings run the following program(s) on the exported G-code. "
+                                               "They were not approved on this computer yet. Only continue if you set them "
+                                               "up yourself:\n\n%s"),
+                                            scripts),
+                           _L("Approve post-processing script"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING);
+    if (dialog.ShowModal() != wxID_YES)
+        return false;
+    approve_post_process_hash(*GUI::wxGetApp().app_config, post_process_hash(config));
+    return true;
+}
+
 static bool run_post_process_scripts_impl(
     std::string& src_path, bool make_copy, const std::string& host, std::string& output_name, const DynamicPrintConfig& config)
 {
@@ -357,6 +430,12 @@ static bool run_post_process_scripts_impl(
     const bool  have_plugins            = slicing_pipeline_plugin != nullptr && !slicing_pipeline_plugin->values.empty();
     if (!have_scripts && !have_plugins)
         return false;
+
+    // Last line of defence: scripts only run for a value the user approved in the GUI. On the UI thread
+    // (3mf save) ask now; on a worker thread, or with a declined prompt, fail the export instead of
+    // waiting on a modal the UI thread may be blocked behind.
+    if (have_scripts && check_post_process_approval(config) == PostProcessApproval::NeedsApproval && !ask_post_process_approval(config))
+        throw Slic3r::ExportError(post_process_needs_approval);
 
     std::string path;
     if (make_copy) {

@@ -11639,6 +11639,10 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
         return;
     }
 
+    // Ask before the export starts, on the UI thread; the post-processing step itself refuses unapproved scripts.
+    if (printer_technology == ptFFF && !ask_post_process_approval(wxGetApp().preset_bundle->prints.get_edited_preset().config))
+        return;
+
     // bitmask of UpdateBackgroundProcessReturnState
     unsigned int state = update_background_process(true);
     if (state & priv::UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE)
@@ -11670,6 +11674,10 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
         GUI::show_error(q, _L("Another export job is running."));
         return;
     }
+
+    // Ask before the export starts, on the UI thread; the post-processing step itself refuses unapproved scripts.
+    if (printer_technology == ptFFF && !ask_post_process_approval(wxGetApp().preset_bundle->prints.get_edited_preset().config))
+        return;
 
     // bitmask of UpdateBackgroundProcessReturnState
     unsigned int state = update_background_process(true);

@@ -48,6 +48,7 @@ add_executable(${_TEST_NAME}_tests
     test_plugin_sort.cpp
     test_plugin_cloud_metadata.cpp
     test_plugin_audit.cpp
+    test_post_process_approval.cpp
     test_plugin_json_depth.cpp
     test_shortcuts.cpp
     test_texture_color_palette.cpp

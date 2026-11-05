@@ -706,6 +706,25 @@ bool PluginAuditManager::is_denied_path(const boost::filesystem::path& candidate
     return is_denied_filename(candidate) || is_denied_path_keyword(candidate);
 }
 
+bool PluginAuditManager::is_write_protected_path(const boost::filesystem::path& candidate) const
+{
+    // Preset JSON under data_dir()/user/** and the vendor profile cache under data_dir()/system/**
+    // can carry code-bearing keys (post_process, *_gcode: see is_automation_write_blocked_key).
+    // A plain open() write there would bypass the PresetTransaction gate, so a write is not
+    // covered by the data_dir() allowed root and goes through the FsReadWrite permission prompt.
+    if (data_dir().empty())
+        return false;
+    namespace fs = boost::filesystem;
+    const fs::path canon     = canonical_for_comparison(candidate);
+    const fs::path canon_dir = canonical_for_comparison(data_dir());
+    fs::path       suffix;
+    for (const char* protected_dir : {"user", "system"}) {
+        if (suffix_inside_root(canon, canon_dir / protected_dir, suffix))
+            return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Policy checks
 // ---------------------------------------------------------------------------
@@ -743,6 +762,15 @@ AuditDecision PluginAuditManager::check_path_access(const boost::filesystem::pat
         fs::path absolute_candidate = fs::absolute(candidate, ec);
         if (!ec)
             candidate = absolute_candidate;
+    }
+
+    // Writes below data_dir()/user and data_dir()/system are never covered by an allowed root
+    // (data_dir() would otherwise grant them); the caller falls back to the permission prompt,
+    // which is denied when no GUI can ask. Reads are unaffected.
+    if (is_write && is_write_protected_path(candidate)) {
+        BOOST_LOG_TRIVIAL(warning) << "[AUDIT] block path=" << candidate.string() << " is_write=1 plugin=" << plugin_key
+                                   << " reason=write-protected preset folder";
+        return {false, "write-protected preset folder"};
     }
 
     // Importing Python modules reads their source and may inspect package directories. These

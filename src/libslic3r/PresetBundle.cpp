@@ -1631,7 +1631,9 @@ std::vector<std::string> PresetBundle::list_local_bundle_ids(const std::string& 
     return ids;
 }
 
-bool PresetBundle::reload_local_bundle(const std::string& preset_folder, const std::string& bundle_id, std::string* error)
+bool PresetBundle::reload_local_bundle(const std::string& preset_folder, const std::string& bundle_id, std::string* error,
+                                       std::vector<LocalBundleCodeChange>* code_changes,
+                                       const std::vector<LocalBundleCodeChange>* approved_code_changes)
 {
     auto fail = [error](const std::string& message) {
         if (error != nullptr)
@@ -1708,6 +1710,49 @@ bool PresetBundle::reload_local_bundle(const std::string& preset_folder, const s
                             substitutions, ForwardCompatibilitySubstitutionRule::Enable, true);
         if (staged.prints.error_count() != errors_before[0] || staged.filaments.error_count() != errors_before[1] || staged.printers.error_count() != errors_before[2])
             return fail("Local bundle contains an invalid preset");
+
+        // Code-bearing values (post_process, *_gcode, print-host keys ...: is_automation_write_blocked_key)
+        // must not arrive through a reload unseen. A plugin can write bundle files freely, so every such
+        // value that differs from what is loaded (or from the inherited parent for a new preset) needs
+        // the user's approval in the GUI.
+        {
+            std::vector<LocalBundleCodeChange> changes;
+            auto collect_changes = [&](const PresetCollection& live, const PresetCollection& candidate) {
+                for (const Preset& preset : candidate.get_presets()) {
+                    if (!is_target(preset))
+                        continue;
+                    const Preset* baseline = live.find_preset(preset.name, false);
+                    if (baseline == nullptr)
+                        baseline = candidate.get_preset_parent(preset);
+                    if (baseline == nullptr)
+                        baseline = &candidate.default_preset();
+                    for (const std::string& key : preset.config.keys()) {
+                        if (!is_automation_write_blocked_key(key))
+                            continue;
+                        const std::string after  = preset.config.opt_serialize(key);
+                        const ConfigOption* old_option = baseline->config.option(key);
+                        const std::string before = old_option != nullptr ? old_option->serialize() : std::string();
+                        if (after != before)
+                            changes.push_back({preset.name, key, before, after});
+                    }
+                }
+            };
+            collect_changes(prints, staged.prints);
+            collect_changes(filaments, staged.filaments);
+            collect_changes(printers, staged.printers);
+            if (approved_code_changes != nullptr)
+                changes.erase(std::remove_if(changes.begin(), changes.end(),
+                                             [&](const LocalBundleCodeChange& change) {
+                                                 return std::find(approved_code_changes->begin(), approved_code_changes->end(),
+                                                                  change) != approved_code_changes->end();
+                                             }),
+                              changes.end());
+            if (!changes.empty()) {
+                if (code_changes != nullptr)
+                    *code_changes = std::move(changes);
+                return fail(code_settings_need_approval);
+            }
+        }
 
         auto dirty_target_was_removed = [&](const Selection& selection, const PresetCollection& collection) {
             if (selection.dirty_options.empty() || !is_target(selection.base))
