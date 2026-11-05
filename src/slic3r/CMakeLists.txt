@@ -281,6 +281,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HttpServer.hpp
     GUI/WebPageServer.cpp
     GUI/WebPageServer.hpp
+    GUI/SSWCP.cpp
+    GUI/SSWCP.hpp
     GUI/RemoteAPI/RemoteAPIConfig.cpp
     GUI/RemoteAPI/RemoteAPIConfig.hpp
     GUI/RemoteAPI/RemoteAPIServer.cpp
