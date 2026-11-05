@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cereal/types/vector.hpp>
 #include <cstddef>
+#include <functional>
 #include <glad/gl.h>
 
 #include "libslic3r/Point.hpp"
@@ -244,6 +245,10 @@ protected:
     void render_cursor_sphere(const Transform3d& trafo) const;
     // BBS
     void render_cursor_height_range(const Transform3d& trafo) const;
+    void render_cursor_rectangle();
+    void render_cursor_polygon();
+    static void init_overlay_lines(GLModel &model, const std::vector<Vec2f> &points, bool closed);
+    static void render_screen_overlay(GLModel &model);
     //BBS: add logic to distinguish the first_time_update and later_update
     virtual void update_model_object() = 0;
     virtual void update_from_model_object(bool first_update) = 0;
@@ -262,6 +267,9 @@ protected:
     static constexpr float CursorRadiusMin  = 0.4f; // cannot be zero
     static constexpr float CursorRadiusMax  = 8.f;
     static constexpr float CursorRadiusStep = 0.2f;
+    float m_precision_factor = 1.f;
+    static constexpr float PrecisionFactorMin = 1.f;
+    static constexpr float PrecisionFactorMax = 8.f;
     static constexpr float CursorHeightMin = 0.1f; // cannot be zero
     static constexpr float CursorHeightMax = 8.f;
     static constexpr float CursorHeightStep = 0.2f;
@@ -277,6 +285,8 @@ protected:
         SMART_FILL,
         // BBS
         GAP_FILL,
+        RECTANGLE,
+        POLYGON,
     };
 
     struct ProjectedMousePosition
@@ -298,6 +308,14 @@ protected:
     ToolType m_tool_type                  = ToolType::BRUSH;
     float    m_smart_fill_angle           = 30.f;
 
+    Vec2d m_rect_start_corner = Vec2d::Zero();
+    Vec2d m_rect_end_corner   = Vec2d::Zero();
+    bool  m_rect_dragging     = false;
+
+    std::vector<Vec2d> m_polygon_points;
+    int m_polygon_dragged_vertex = -1;
+    static constexpr float PolygonCloseRadiusPx = 8.f;
+
     bool     m_paint_on_overhangs_only          = false;
     float    m_highlight_by_angle_threshold_deg = 0.f;
 
@@ -307,6 +325,10 @@ protected:
     GLModel m_circle;
     Vec2d m_old_center{ Vec2d::Zero() };
     float m_old_cursor_radius{ 0.0f };
+    GLModel m_rect_overlay;
+    Vec2d m_old_rect_start_corner = Vec2d::Zero();
+    Vec2d m_old_rect_end_corner   = Vec2d::Zero();
+    GLModel m_polygon_overlay;
     static constexpr float SmartFillAngleMin  = 0.0f;
     static constexpr float SmartFillAngleMax  = 90.f;
     static constexpr float SmartFillAngleStep = 1.f;
@@ -342,6 +364,16 @@ private:
     std::vector<std::vector<ProjectedMousePosition>> get_projected_mouse_positions(const Vec2d &mouse_position, double resolution, const std::vector<Transform3d> &trafo_matrices) const;
 
     std::vector<ProjectedHeightRange> get_projected_height_range(const Vec2d& mouse_position, double resolution, const std::vector<const ModelVolume*>& part_volumes, const std::vector<Transform3d>& trafo_matrices) const;
+
+    void apply_rectangle_mask(EnforcerBlockerType new_state);
+    void apply_polygon_mask(EnforcerBlockerType new_state);
+    // Shared by both masks: builds one projection cursor per model part and paints with it.
+    void apply_projection_mask(EnforcerBlockerType new_state,
+                               const std::function<std::unique_ptr<TriangleSelector::Cursor>(
+                                   const Vec3f &, const Vec3f &, const Matrix4d &, const std::array<int, 4> &,
+                                   const Transform3d &, const TriangleSelector::ClippingPlane &)> &make_cursor);
+    bool collect_projection_mask_transforms(std::vector<Transform3d> &transformations,
+                                            std::vector<Transform3d> &transformations_no_offset) const;
 
     bool is_mesh_point_clipped(const Vec3d& point, const Transform3d& trafo) const;
     // World transforms of the model parts, in mo->volumes order.

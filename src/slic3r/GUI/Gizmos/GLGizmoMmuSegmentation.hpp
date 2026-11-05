@@ -134,6 +134,10 @@ protected:
     // ORCA: Cache used filaments to filter UI
     std::set<size_t>                  m_used_filaments;      // Set of used filament indices (cached)
 
+    bool                              m_rectangle_mask_active = false;
+    bool                              m_polygon_mask_active = false;
+    void reset_projection_masks();
+
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
 private:
