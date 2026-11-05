@@ -144,6 +144,12 @@
 	"full_fan_speed_layer": [
 		"0"
 	],
+	"graphic_effect_plate_temp": [
+		"0"
+	],
+	"graphic_effect_plate_temp_initial_layer": [
+		"0"
+	],
 	"fan_max_speed": [
 		"100"
 	],

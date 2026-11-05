@@ -1,6 +1,7 @@
 {
 	"type": "filament",
 	"name": "Snapmaker PETG HF @U1 0.4 nozzle",
+	"renamed_from": "Snapmaker PETG HF",
 	"inherits": "Snapmaker PETG HF @U1 base2",
 	"from": "system",
 	"setting_id": "9NnYt52azW8zCp4a",

@@ -1,0 +1,12 @@
+{
+	"type": "process",
+	"name": "0.20mm Standard @Snapmaker U1 (0.4 nozzle)",
+	"inherits": "0.20 Standard @Snapmaker U1 (0.4 nozzle)",
+	"from": "system",
+	"setting_id": "IDVb0VkeZwbqLLk9",
+	"instantiation": "true",
+	"description": "Alias of '0.20 Standard @Snapmaker U1 (0.4 nozzle)' under the name Snapmaker Orca 2.4.1 used, so projects saved by 2.4.1 resolve to a real preset.",
+	"compatible_printers": [
+		"Snapmaker U1 (0.4 nozzle)"
+	]
+}
