@@ -4,7 +4,9 @@
     ORCA_API_TOKEN=... python3 live_api_check.py [--url http://127.0.0.1:13130]
     python3 live_api_check.py --selftest     # detector check: must pass only the controls against a server that accepts everything, and fail only them against one that refuses everything
 
-It only sends requests that are either refused or idempotent (a value written back unchanged), so it is safe on a
+The tool-level checks (run_tool_checks: read-only tools leave /status unchanged, apply_and_slice, compare_slices, set_object_config,
+set_layer_height, set_height_range, render_plate) DO change the scratch project (object config, layer height, a slice) and put it back afterwards.
+The guard checks only send requests that are either refused or idempotent (a value written back unchanged), so it is safe on a
 scratch profile. Exit code 0 = every guard held, 1 = at least one check failed, 2 = could not run (unreachable, no token, or an unexpected response shape).
 """
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -38,6 +41,15 @@ class Api:
                 return r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
+
+    def raw(self, path: str) -> tuple[int, bytes]:
+        """GET returning the undecoded body (for the PNG from /plate/render)."""
+        req = urllib.request.Request(self.base + path, headers={"X-Api-Token": self.token})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
 
     def j(self, method: str, path: str, body=None):
         status, text = self.call(method, path, body)
@@ -493,6 +505,143 @@ _STATUS = {"app": "fake", "presets": {"printer": "P", "print": "Q", "filaments":
            "modified": {"print": [], "filament": [], "printer": []}}
 
 
+# ---------------------------------------------------------------------------------------------------------------------------------
+# Tool-level checks (#4, #5). The MCP tool names come from MaxEllis orcaslicer-mcp; these checks drive the REST calls behind them:
+#   get_preset_config -> POST /preset/config     apply_and_slice -> PUT /config, POST /slice, poll GET /slice/status
+#   compare_slices    -> two apply_and_slice runs, compare GET /slice/status stats
+#   set_object_config -> PUT /objects/{id}/config   set_layer_height -> PUT /objects/{id}/layer_height
+#   set_height_range  -> PUT /objects/{id}/height_range   render_plate -> GET /plate/render?angle=...
+# The mapping is inferred from openapi.yaml and the tool names, not read from the MCP source (not available locally).
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+RENDER_ANGLES = ["iso", "top", "front", "left", "right", "rear", "bottom"]
+SLICE_TIMEOUT_S = 180
+
+
+def _names(coll) -> list[str]:
+    return [x if isinstance(x, str) else str(x.get("name", "")) for x in (coll or [])]
+
+
+def _wait_slice(api: Api, timeout: float = SLICE_TIMEOUT_S) -> dict:
+    """Start a slice and poll until it is done or errors. Returns the final /slice/status body (or {"state": "timeout"})."""
+    status, r = api.j("POST", "/slice")
+    if status not in (200, 202):
+        return {"state": "start_failed", "message": f"HTTP {status} {json.dumps(r)[:80]}"}
+    end = time.time() + timeout
+    st: dict = {}
+    while time.time() < end:
+        _, st = api.j("GET", "/slice/status")
+        if st.get("state") in ("done", "error"):
+            return st
+        time.sleep(0.2 if timeout < 30 else 1.0)
+    return {"state": "timeout", **st}
+
+
+def _read_only_calls(api: Api, oid) -> list[tuple[str, str, str, object]]:
+    """(tool, method, path, body) for every read-only call. get_preset_config is aimed at presets OTHER than the selected ones,
+    because the field report (#4) was a printer preset changing after it."""
+    _, st = api.j("GET", "/status")
+    cur = st.get("presets", {})
+    calls = [("getStatus", "GET", "/status", None), ("getConfig", "GET", "/config?keys=layer_height,wall_loops", None),
+             ("getObjects", "GET", "/objects", None), ("getObject", "GET", f"/objects/{oid}", None),
+             ("getPresets", "GET", "/presets?visible=1", None), ("getSliceStatus", "GET", "/slice/status", None),
+             ("getPlates", "GET", "/plates", None), ("getJobsStatus", "GET", "/jobs/status", None),
+             ("getGcode", "GET", "/gcode", None)]
+    for typ, selected in (("printer", cur.get("printer")), ("print", cur.get("print")), ("filament", (cur.get("filaments") or [None])[0])):
+        _, pr = api.j("GET", f"/presets?type={typ}&visible=1")
+        others = [n for n in _names(pr.get(typ)) if n and n != selected][:2]
+        calls += [("getPresetConfig", "POST", "/preset/config", {"type": typ, "name": n}) for n in others]
+        if selected:
+            calls.append(("getPresetConfig", "POST", "/preset/config", {"type": typ, "name": selected}))
+    return calls
+
+
+def run_tool_checks(api: Api) -> list[tuple[str, bool, str]]:
+    out: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = ""):
+        out.append((name, bool(ok), detail))
+
+    status, objs = api.j("GET", "/objects")
+    olist = objs.get("objects", []) if isinstance(objs, dict) else []
+    check("tool fixture: an object is loaded", status == 200 and bool(olist), f"HTTP {status}")
+    if not olist:
+        return out
+    oid = olist[0]["id"]
+
+    # (a) every read-only tool leaves getStatus identical. Both snapshots come from the same endpoint, so this catches a read that
+    # changes what /status reports; it cannot see state that /status does not report (selected-but-unlisted edits, GUI state).
+    for tool, method, path, body in _read_only_calls(api, oid):
+        _, before = api.j("GET", "/status")
+        code, _txt = api.call(method, path, body)
+        _, after = api.j("GET", "/status")
+        label = f"read-only {tool}" + (f" {body['type']}:{body['name']}" if body else "")
+        diff = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        check(f"status unchanged by {label}", before == after and code < 500, f"HTTP {code}; /status changed in {diff}")
+
+    # (b) set_object_config
+    _, o0 = api.j("GET", f"/objects/{oid}")
+    prev = (o0.get("config") or {}).get("wall_loops")
+    s1, r1 = api.j("PUT", f"/objects/{oid}/config", {"wall_loops": 4})
+    _, o1 = api.j("GET", f"/objects/{oid}")
+    check("tool set_object_config: value applied and read back", s1 == 200 and str((o1.get("config") or {}).get("wall_loops")) == "4",
+          f"HTTP {s1} {json.dumps(r1)[:80]} read back {(o1.get('config') or {}).get('wall_loops')}")
+    s2, r2 = api.j("PUT", f"/objects/{oid}/config", {"wall_loops": 6, "not_a_real_key": 1})
+    _, o2 = api.j("GET", f"/objects/{oid}")
+    check("tool set_object_config: a bad key applies nothing (atomic)", s2 >= 400 and str((o2.get("config") or {}).get("wall_loops")) == "4",
+          f"HTTP {s2} wall_loops now {(o2.get('config') or {}).get('wall_loops')}")
+    s3, r3 = api.j("PUT", f"/objects/{oid}/config", {"post_process": "x"})
+    _, o3 = api.j("GET", f"/objects/{oid}")
+    check("tool set_object_config: forbidden key refused", s3 >= 400 and "post_process" not in (o3.get("config") or {}), f"HTTP {s3} {json.dumps(r3)[:80]}")
+    _, g = api.j("GET", "/config?keys=wall_loops")
+    api.j("PUT", f"/objects/{oid}/config", {"wall_loops": prev if prev is not None else g.get("config", {}).get("wall_loops", 2)})
+
+    # (c) set_layer_height
+    s, r = api.j("PUT", f"/objects/{oid}/layer_height", {"mode": "adaptive", "quality": 0.5})
+    check("tool set_layer_height: adaptive accepted", s == 200 and "error" not in r, f"HTTP {s} {json.dumps(r)[:80]}")
+    s, r = api.j("PUT", f"/objects/{oid}/layer_height", {"mode": "adaptive", "quality": 7})
+    check("tool set_layer_height: quality out of range refused", s >= 400, f"HTTP {s} {json.dumps(r)[:80]}")
+    s, r = api.j("PUT", f"/objects/{oid}/layer_height", {"mode": "sideways"})
+    check("tool set_layer_height: unknown mode refused", s >= 400, f"HTTP {s} {json.dumps(r)[:80]}")
+    s, r = api.j("PUT", f"/objects/{oid}/layer_height", {"mode": "reset"})
+    check("tool set_layer_height: reset accepted", s == 200 and "error" not in r, f"HTTP {s} {json.dumps(r)[:80]}")
+
+    # (d) set_height_range
+    s, r = api.j("PUT", f"/objects/{oid}/height_range", {"min_z": 0, "max_z": 2, "layer_height": 0.1})
+    check("tool set_height_range: range accepted", s == 200 and "error" not in r, f"HTTP {s} {json.dumps(r)[:80]}")
+    for label, body in (("min above max", {"min_z": 5, "max_z": 1, "layer_height": 0.1}), ("layer_height 0", {"min_z": 0, "max_z": 2, "layer_height": 0}),
+                        ("layer_height negative", {"min_z": 0, "max_z": 2, "layer_height": -0.2})):
+        s, r = api.j("PUT", f"/objects/{oid}/height_range", body)
+        check(f"tool set_height_range: {label} refused", s >= 400, f"HTTP {s} {json.dumps(r)[:80]}")
+    s, r = api.j("PUT", f"/objects/{oid}/height_range", {"clear": True})
+    check("tool set_height_range: clear accepted", s == 200 and "error" not in r, f"HTTP {s} {json.dumps(r)[:80]}")
+
+    # (e) render_plate: a real PNG for every angle, in both views
+    for angle in RENDER_ANGLES:
+        code, body = api.raw(f"/plate/render?view=editor&angle={angle}&width=320&height=240")
+        check(f"tool render_plate: editor {angle} is a PNG", code == 200 and body[:8] == PNG_MAGIC and len(body) > 100, f"HTTP {code} {len(body)} bytes {body[:8]!r}")
+    code, body = api.raw("/plate/render?angle=sideways")
+    check("tool render_plate: unknown angle refused", code >= 400, f"HTTP {code}")
+
+    # (f) apply_and_slice and compare_slices. The first slice is not asserted on its own beyond "done with stats": with the same
+    # model, a larger layer height must give fewer layers and a shorter estimate, which is what makes the two runs distinguishable.
+    _, g = api.j("GET", "/config?keys=layer_height")
+    orig_lh = g.get("config", {}).get("layer_height", "0.2")
+    results = {}
+    for lh in ("0.2", "0.4"):
+        s, r = api.j("PUT", "/config", {"layer_height": lh})
+        applied = "layer_height" in _applied_keys(r)
+        sl = _wait_slice(api)
+        stats = sl.get("stats") or {}
+        results[lh] = stats.get("estimated_time_seconds")
+        check(f"tool apply_and_slice: layer_height {lh} applied, slice done with stats",
+              s == 200 and applied and sl.get("state") == "done" and bool(stats.get("estimated_time_seconds")),
+              f"PUT HTTP {s} applied={applied} state={sl.get('state')} {sl.get('message', '')} stats={stats}")
+    a, b = results.get("0.2"), results.get("0.4")
+    check("tool compare_slices: 0.4 mm layers estimate shorter than 0.2 mm", bool(a and b and b < a), f"0.2 -> {a}s, 0.4 -> {b}s")
+    api.j("PUT", "/config", {"layer_height": orig_lh})
+    return out
+
+
 class _Fake(BaseHTTPRequestHandler):
     """Shared plumbing for the fake slicers."""
     HOST_VALUE = "<redacted>"
@@ -694,6 +843,126 @@ def _run_against(handler: type[BaseHTTPRequestHandler]) -> list[tuple[str, bool,
         server.server_close()
 
 
+class _Stateful(_Fake):
+    """A fake slicer that KEEPS state, so the tool-level checks have something to be wrong about. It models a printer selection,
+    a global layer height, one object with a config and layer-height state, and a slice whose estimate depends on the layer height.
+    Set `server.state["bugs"]` to inject a fault: nozzle_flip (a read-only call changes the selected printer, the #4 report),
+    slice_ignores_config (the estimate never changes), objconfig_not_stored, render_not_png, height_range_accepts_bad."""
+    PRINTERS = {"U1 0.2 nozzle": "0.2", "U1 0.4 nozzle": "0.4"}
+
+    def _st(self) -> dict:
+        st = self.server.state
+        st.setdefault("bugs", set())
+        st.setdefault("printer", "U1 0.2 nozzle")
+        st.setdefault("lh", "0.2")
+        st.setdefault("obj", {})
+        st.setdefault("sliced", False)
+        return st
+
+    def _bug(self, name: str) -> bool:
+        return name in self._st()["bugs"]
+
+    def do_GET(self):
+        st = self._st()
+        path = self.path.split("?")[0]
+        if path == "/api/v1/status":
+            return self._send(200, {"app": "fake", "presets": {"printer": st["printer"], "print": "Q", "filaments": ["F1"]},
+                                    "modified": {"print": [], "filament": [], "printer": []}, "slicing": False, "slice_result_valid": st["sliced"]})
+        if path == "/api/v1/objects":
+            return self._send(200, {"objects": [{"id": 7, "name": "mushroom"}], "count": 1})
+        if path == "/api/v1/objects/7":
+            return self._send(200, {"id": 7, "config": dict(st["obj"]), "volumes": [{"index": 0, "type": "part", "config": {}}]})
+        if path == "/api/v1/config":
+            keys = (self.path.split("keys=", 1) + [""])[1].split(",")
+            live = {"layer_height": st["lh"], "wall_loops": "2"}
+            return self._send(200, {"config": {k: live[k] for k in keys if k in live}})
+        if path == "/api/v1/presets":
+            typ = (self.path.split("type=", 1) + [""])[1].split("&")[0]
+            return self._send(200, {"printer": list(self.PRINTERS), "print": ["Q", "Q2"], "filament": ["F1", "F2"]} if not typ else
+                              {typ: {"printer": list(self.PRINTERS), "print": ["Q", "Q2"], "filament": ["F1", "F2"]}[typ]})
+        if path == "/api/v1/slice/status":
+            if not st["sliced"]:
+                return self._send(200, {"state": "idle", "percent": -1, "message": "", "warnings": []})
+            secs = 1000 if self._bug("slice_ignores_config") else int(2000 / float(st["lh"]) / 10)
+            return self._send(200, {"state": "done", "percent": -1, "message": "", "warnings": [], "stats": {"estimated_time_seconds": secs}})
+        if path in ("/api/v1/plates", "/api/v1/jobs/status"):
+            return self._send(200, {"plates": [], "jobs": []})
+        if path == "/api/v1/gcode":
+            return self._send(409 if not st["sliced"] else 200, {"error": "no_slice"})
+        if path == "/api/v1/plate/render":
+            angle = (self.path.split("angle=", 1) + [""])[1].split("&")[0]
+            if angle not in RENDER_ANGLES:
+                return self._send(400, {"error": "bad_angle"})
+            data = (b"not a png" if self._bug("render_not_png") else PNG_MAGIC) + b"\0" * 200
+            self.send_response(200); self.send_header("Content-Type", "image/png"); self.send_header("Content-Length", str(len(data)))
+            self.end_headers(); self.wfile.write(data)
+            return None
+        return self._send(404, {"error": "not_found"})
+
+    def do_PUT(self):
+        st, body = self._st(), self._body()
+        path = self.path.split("?")[0]
+        if path == "/api/v1/config":
+            if "layer_height" in body:
+                st["lh"] = str(body["layer_height"]); st["sliced"] = False
+            return self._send(200, {"applied": list(body), "errors": {}})
+        if path == "/api/v1/objects/7/config":
+            bad = [k for k in body if k == "post_process" or k.startswith("not_a_real")]
+            if bad:
+                return self._send(422, {"error": "invalid_keys", "errors": {k: "refused" for k in bad}})
+            if not self._bug("objconfig_not_stored"):
+                st["obj"].update({k: str(v) for k, v in body.items()})
+            return self._send(200, {"applied": list(body), "errors": {}})
+        if path == "/api/v1/objects/7/layer_height":
+            if body.get("mode") not in ("adaptive", "reset") or not 0 <= body.get("quality", 0.5) <= 1:
+                return self._send(400, {"error": "bad_layer_height"})
+            return self._send(200, {"mode": body["mode"]})
+        if path == "/api/v1/objects/7/height_range":
+            if body.get("clear"):
+                return self._send(200, {"cleared": True})
+            ok = body.get("layer_height", 0) > 0 and body.get("min_z", 0) < body.get("max_z", 0)
+            if not ok and not self._bug("height_range_accepts_bad"):
+                return self._send(400, {"error": "bad_range"})
+            return self._send(200, {"ranges": 1})
+        return self._send(404, {"error": "not_found"})
+
+    def do_POST(self):
+        st, body = self._st(), self._body()
+        if self.path == "/api/v1/slice":
+            st["sliced"] = True
+            return self._send(202, {"started": True})
+        if self.path == "/api/v1/preset/config":
+            if self._bug("nozzle_flip") and body.get("type") == "printer":
+                st["printer"] = body.get("name", st["printer"])   # the fault: reading a preset selects it
+            return self._send(200, {"config": {"nozzle_diameter": self.PRINTERS.get(body.get("name"), "0.4")}})
+        return self._send(404, {"error": "not_found"})
+
+    def do_DELETE(self):
+        self._send(404, {"error": "not_found"})
+
+
+# Which tool checks each injected fault must break (and nothing else). Clean fake: none.
+TOOL_FAULTS = {
+    # both: reading the other printer flips the selection, and reading the originally selected one then flips it back (also a change)
+    "nozzle_flip": {"status unchanged by read-only getPresetConfig printer:U1 0.4 nozzle", "status unchanged by read-only getPresetConfig printer:U1 0.2 nozzle"},
+    "slice_ignores_config": {"tool compare_slices: 0.4 mm layers estimate shorter than 0.2 mm"},
+    "objconfig_not_stored": {"tool set_object_config: value applied and read back", "tool set_object_config: a bad key applies nothing (atomic)"},
+    "render_not_png": {f"tool render_plate: editor {a} is a PNG" for a in RENDER_ANGLES},
+    "height_range_accepts_bad": {f"tool set_height_range: {x} refused" for x in ("min above max", "layer_height 0", "layer_height negative")},
+}
+
+
+def _run_tools_against(bug: str | None) -> list[tuple[str, bool, str]]:
+    server = _QuietServer(("127.0.0.1", 0), _Stateful)
+    server.state["bugs"] = {bug} if bug else set()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        return run_tool_checks(Api(f"http://127.0.0.1:{server.server_port}", "t"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def _compare(label: str, got: set[str], want: set[str]) -> bool:
     if got == want:
         return True
@@ -707,9 +976,14 @@ def selftest() -> int:
     refused = _run_against(_RefuseEverything)
     ok = _compare("accept-everything: checks that PASSED", {n for n, good, _ in accepted if good}, EXPECTED_PASS_WHEN_ACCEPTING)
     ok = _compare("refuse-everything: checks that FAILED", {n for n, good, _ in refused if not good}, EXPECTED_FAIL_WHEN_REFUSING) and ok
+    clean = _run_tools_against(None)
+    ok = _compare("tool checks, clean stateful fake: FAILED", {n for n, good, _ in clean if not good}, set()) and ok
+    for bug, expect in TOOL_FAULTS.items():
+        ok = _compare(f"tool checks, injected fault {bug}: FAILED", {n for n, good, _ in _run_tools_against(bug) if not good}, expect) and ok
     if ok:
         print(f"selftest OK: accept-everything passed exactly {len(EXPECTED_PASS_WHEN_ACCEPTING)} of {len(accepted)} checks; "
-              f"refuse-everything failed exactly {len(EXPECTED_FAIL_WHEN_REFUSING)} of {len(refused)}")
+              f"refuse-everything failed exactly {len(EXPECTED_FAIL_WHEN_REFUSING)} of {len(refused)}; "
+              f"{len(clean)} tool checks pass on a clean stateful fake and each of {len(TOOL_FAULTS)} injected faults breaks exactly its own checks")
         return 0
     print("selftest FAILED: the checker cannot reliably tell broken guards or broken controls from working ones")
     return 1
@@ -727,7 +1001,8 @@ def main(argv: list[str] | None = None) -> int:
         print("set ORCA_API_TOKEN", file=sys.stderr)
         return 2
     try:
-        results = run_checks(Api(args.url, token))
+        api = Api(args.url, token)
+        results = run_checks(api) + run_tool_checks(api)
     except OSError as exc:
         print(f"cannot reach {args.url}: {exc}", file=sys.stderr)
         return 2
