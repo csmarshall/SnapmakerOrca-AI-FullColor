@@ -1721,7 +1721,14 @@ bool PresetBundle::reload_local_bundle(const std::string& preset_folder, const s
                 for (const Preset& preset : candidate.get_presets()) {
                     if (!is_target(preset))
                         continue;
-                    const Preset* baseline = live.find_preset(preset.name, false);
+                    // Compare with the stored preset, not find_preset(): that can return the edited copy,
+                    // whose unsaved edits are not what is loaded from the files.
+                    const Preset* baseline = nullptr;
+                    for (const Preset& stored : live.get_presets())
+                        if (stored.name == preset.name) {
+                            baseline = &stored;
+                            break;
+                        }
                     if (baseline == nullptr)
                         baseline = candidate.get_preset_parent(preset);
                     if (baseline == nullptr)
