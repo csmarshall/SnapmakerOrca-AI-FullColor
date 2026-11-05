@@ -76,6 +76,7 @@ class PrintHostQueueDialog;
 class DiffPresetDialog;
 class ParamsPanel;
 class MonitorPanel;
+class SnapmakerDevicePage;
 class MultiMachinePage;
 class ProjectPanel;
 class CalibrationPanel;
@@ -525,6 +526,8 @@ public:
     void set_undo_redo_enabled(bool undo, bool redo);
     //BBS: GUI refactor
     LazyPage<MonitorPanel>* m_monitor_page{ nullptr };
+    // Takes the Device tab's place (same TAB_ID_MONITOR) while the live printer agent declares DeviceUi::SnapmakerWeb.
+    LazyPage<SnapmakerDevicePage>* m_snapmaker_device_page{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
     LazyPage<MultiMachinePage>* m_multi_machine_page{ nullptr };
