@@ -554,6 +554,10 @@ void MoonrakerPrinterAgent::build_ams_payload(int ams_count, int max_lane_index,
                 if (tray->nozzle_temp > 0) {
                     tray_json["nozzle_temp_max"] = std::to_string(tray->nozzle_temp);
                 }
+                // Read-only Spoolman data under its own key; DevFilaSystemParser ignores keys it does not know,
+                // and nothing here overwrites the values above.
+                if (tray->spoolman.valid())
+                    tray_json["spoolman"] = spoolman_to_json(tray->spoolman);
             } else {
                 tray_json["tray_info_idx"] = "";
                 tray_json["tray_type"] = "";

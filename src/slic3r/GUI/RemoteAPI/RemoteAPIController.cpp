@@ -20,6 +20,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp" // LoadStrategy (used by Plater::load_files)
 #include "libslic3r/Slicing.hpp"          // M4c: layer_height_profile_adaptive, t_layer_height_range
 #include "slic3r/GUI/GUI_ObjectList.hpp" // M4c: obj_list()->update_info_items
+#include "slic3r/Utils/SpoolmanJoin.hpp" // GET /status: read-only Spoolman spools joined to RFID slots
 #include "slic3r/GUI/I18N.hpp"     // _L for the object list's "default" filament label
 #include "slic3r/GUI/GLCanvas3D.hpp"      // plate_render: offscreen thumbnail/gcode render
 #include "slic3r/GUI/Camera.hpp"          // plate_render
@@ -350,6 +351,9 @@ Response Controller::handle_status()
         };
     });
     j["slicing"] = slice_state().state == "slicing";
+    // Read-only: spools the last filament sync joined to a printer's RFID slots (empty when none). Carries
+    // no credentials; Spoolman values use spoolman_* names and never alter any preset.
+    j["spoolman"] = spoolman_cache_get();
     return { 200, j };
 }
 

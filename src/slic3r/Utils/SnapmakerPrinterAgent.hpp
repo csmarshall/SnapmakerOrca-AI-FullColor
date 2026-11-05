@@ -3,7 +3,9 @@
 #include "IPrinterAgent.hpp"
 #include "MoonrakerPrinterAgent.hpp"
 
+#include <map>
 #include <string>
+#include "SpoolmanJoin.hpp"
 
 namespace Slic3r {
 
@@ -19,6 +21,9 @@ public:
     bool fetch_filament_info(std::string dev_id, FilamentSyncMode sync_mode = FilamentSyncMode::pull) override;
 
 private:
+    // Read-only: POST /server/spoolman/proxy (GET /v1/spool). Fails soft: returns an empty map and logs when
+    // Spoolman is not connected, the proxy is missing, or the reply is not what we expect.
+    std::map<std::string, SpoolmanSpoolInfo> fetch_spoolman_spools_by_uid();
     // Combine filament_type + filament_sub_type into a unified type string
     static std::string combine_filament_type(const std::string& type, const std::string& sub_type);
 };

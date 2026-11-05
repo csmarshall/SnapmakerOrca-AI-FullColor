@@ -18,6 +18,7 @@
 #include <vector>
 
 namespace Slic3r { class ICloudServiceAgent; }
+#include "SpoolmanJoin.hpp"
 
 namespace Slic3r {
 
@@ -109,6 +110,7 @@ protected:
         std::string tray_info_idx;       // Filament ID (optional)
         int         bed_temp = 0;        // Optional
         int         nozzle_temp = 0;     // Optional
+        SpoolmanSpoolInfo spoolman;      // Optional, read-only Spoolman spool joined by RFID UID (valid() when matched)
     };
 
     // Build ams JSON and call parser

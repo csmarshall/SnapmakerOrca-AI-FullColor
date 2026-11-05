@@ -1,5 +1,6 @@
 #include "SnapmakerPrinterAgent.hpp"
 #include "Http.hpp"
+#include "SpoolmanJoin.hpp"
 #include "MoonrakerPrinterAgent.hpp"
 #include "IPrinterAgent.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -7,6 +8,7 @@
 
 #include "nlohmann/json.hpp"
 #include <boost/log/trivial.hpp>
+#include <algorithm>
 #include <vector>
 #include <string>
 #include "libslic3r/Preset.hpp"
@@ -109,6 +111,59 @@ std::string SnapmakerPrinterAgent::combine_filament_type(const std::string& type
     return base;
 }
 
+std::map<std::string, SpoolmanSpoolInfo> SnapmakerPrinterAgent::fetch_spoolman_spools_by_uid()
+{
+    const char* tag = "SnapmakerPrinterAgent::fetch_spoolman_spools_by_uid: ";
+
+    // Both requests are short-lived and sequential on the caller's thread; any failure just means no Spoolman data.
+    auto do_request = [&](Http http, const std::string& body, std::string& out) {
+        if (!device_info.api_key.empty())
+            http.header("X-Api-Key", device_info.api_key);
+        bool        ok = false;
+        std::string err;
+        if (!body.empty())
+            http.header("Content-Type", "application/json").set_post_body(body);
+        http.timeout_connect(3)
+            .timeout_max(6)
+            .on_complete([&](std::string b, unsigned status) {
+                if (status == 200) {
+                    out = std::move(b);
+                    ok  = true;
+                } else {
+                    err = "HTTP " + std::to_string(status);
+                }
+            })
+            .on_error([&](std::string, std::string e, unsigned status) {
+                err = e + (status > 0 ? " (HTTP " + std::to_string(status) + ")" : "");
+            })
+            .perform_sync();
+        if (!ok)
+            BOOST_LOG_TRIVIAL(info) << tag << err;
+        return ok;
+    };
+
+    try {
+        std::string status_body;
+        if (!do_request(Http::get(join_url(device_info.base_url, "/server/spoolman/status")), "", status_body))
+            return {};
+        auto status = nlohmann::json::parse(status_body, nullptr, false);
+        if (status.is_discarded() || !status.contains("result") || !status["result"].is_object() ||
+            !status["result"].value("spoolman_connected", false)) {
+            BOOST_LOG_TRIVIAL(info) << tag << "Spoolman not connected, skipping";
+            return {};
+        }
+
+        const std::string req = nlohmann::json{{"request_method", "GET"}, {"path", "/v1/spool"}, {"query", "allow_archived=false"}}.dump();
+        std::string       spools_body;
+        if (!do_request(Http::post(join_url(device_info.base_url, "/server/spoolman/proxy")), req, spools_body))
+            return {};
+        return spoolman_parse_spools(spools_body);
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << tag << "unexpected error: " << e.what();
+        return {};
+    }
+}
+
 bool SnapmakerPrinterAgent::fetch_filament_info(std::string dev_id, FilamentSyncMode /*sync_mode*/)
 {
     std::string url = join_url(device_info.base_url, "/printer/objects/query?print_task_config&filament_detect");
@@ -179,6 +234,17 @@ bool SnapmakerPrinterAgent::fetch_filament_info(std::string dev_id, FilamentSync
         nfc_info = json["result"]["status"]["filament_detect"]["info"];
     }
 
+    // Optional read-only Spoolman join by RFID UID; slots without a match are left exactly as before.
+    std::vector<SpoolmanSpoolInfo> spoolman_slots;
+    {
+        const auto uids = spoolman_slot_uids(nfc_info);
+        if (std::any_of(uids.begin(), uids.end(), [](const std::string& u) { return !u.empty(); })) {
+            auto by_uid = fetch_spoolman_spools_by_uid();
+            if (!by_uid.empty())
+                spoolman_slots = spoolman_join_slots(uids, by_uid);
+        }
+    }
+
     static const std::string empty_str;
     static const std::string default_color = "FFFFFFFF";
 
@@ -225,9 +291,13 @@ bool SnapmakerPrinterAgent::fetch_filament_info(std::string dev_id, FilamentSync
             }
         }
 
+        if (i < static_cast<int>(spoolman_slots.size()))
+            tray.spoolman = spoolman_slots[i];
         trays.emplace_back(std::move(tray));
     }
 
+    spoolman_slots.resize(slot_count);
+    spoolman_cache_set(dev_id, spoolman_slots);
     build_ams_payload(1, slot_count - 1, trays);
     return true;
 }

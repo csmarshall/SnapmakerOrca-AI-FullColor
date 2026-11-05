@@ -840,6 +840,31 @@ components:
           type: array
           items: { type: string }
           example: [status, config, slice, events, plates]
+        spoolman:
+          type: array
+          description: Read-only. Spoolman spools that the last filament sync of each Moonraker printer joined to its RFID slots (by card UID, through the printer's own Moonraker Spoolman proxy). Empty when Spoolman is not connected or nothing matched. Spoolman's tool settings use spoolman_* names and are never applied to any preset.
+          items:
+            type: object
+            properties:
+              dev_id: { type: string }
+              slots:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    slot: { type: integer, description: "0-based filament slot" }
+                    spool_id: { type: integer }
+                    name: { type: string }
+                    material: { type: string }
+                    vendor: { type: string }
+                    color: { type: string, description: "RRGGBB, no #" }
+                    remaining_weight_g: { type: number, nullable: true }
+                    used_weight_g: { type: number, nullable: true }
+                    initial_weight_g: { type: number, nullable: true }
+                    spoolman_nozzle_temp: { type: integer, description: "0 = unknown" }
+                    spoolman_bed_temp: { type: integer, description: "0 = unknown" }
+                    spoolman_density: { type: number, description: "g/cm3, 0 = unknown" }
+                    spoolman_diameter: { type: number, description: "mm, 0 = unknown" }
         plates:
           type: object
           description: How many plates the project has and which one is current.
