@@ -627,7 +627,7 @@ def run_tool_checks(api: Api) -> list[tuple[str, bool, str]]:
     _, g = api.j("GET", "/config?keys=layer_height")
     orig_lh = g.get("config", {}).get("layer_height", "0.2")
     results = {}
-    for lh in ("0.2", "0.4"):
+    for lh in ("0.2", "0.3"):  # 0.3: the 0.4 mm nozzle allows at most 0.32
         s, r = api.j("PUT", "/config", {"layer_height": lh})
         applied = "layer_height" in _applied_keys(r)
         sl = _wait_slice(api)
@@ -636,8 +636,8 @@ def run_tool_checks(api: Api) -> list[tuple[str, bool, str]]:
         check(f"tool apply_and_slice: layer_height {lh} applied, slice done with stats",
               s == 200 and applied and sl.get("state") == "done" and bool(stats.get("estimated_time_seconds")),
               f"PUT HTTP {s} applied={applied} state={sl.get('state')} {sl.get('message', '')} stats={stats}")
-    a, b = results.get("0.2"), results.get("0.4")
-    check("tool compare_slices: 0.4 mm layers estimate shorter than 0.2 mm", bool(a and b and b < a), f"0.2 -> {a}s, 0.4 -> {b}s")
+    a, b = results.get("0.2"), results.get("0.3")
+    check("tool compare_slices: 0.3 mm layers estimate shorter than 0.2 mm", bool(a and b and b < a), f"0.2 -> {a}s, 0.3 -> {b}s")
     api.j("PUT", "/config", {"layer_height": orig_lh})
     return out
 
@@ -945,7 +945,7 @@ class _Stateful(_Fake):
 TOOL_FAULTS = {
     # both: reading the other printer flips the selection, and reading the originally selected one then flips it back (also a change)
     "nozzle_flip": {"status unchanged by read-only getPresetConfig printer:U1 0.4 nozzle", "status unchanged by read-only getPresetConfig printer:U1 0.2 nozzle"},
-    "slice_ignores_config": {"tool compare_slices: 0.4 mm layers estimate shorter than 0.2 mm"},
+    "slice_ignores_config": {"tool compare_slices: 0.3 mm layers estimate shorter than 0.2 mm"},
     "objconfig_not_stored": {"tool set_object_config: value applied and read back", "tool set_object_config: a bad key applies nothing (atomic)"},
     "render_not_png": {f"tool render_plate: editor {a} is a PNG" for a in RENDER_ANGLES},
     "height_range_accepts_bad": {f"tool set_height_range: {x} refused" for x in ("min above max", "layer_height 0", "layer_height negative")},
