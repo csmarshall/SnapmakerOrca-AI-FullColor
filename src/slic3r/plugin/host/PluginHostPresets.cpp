@@ -21,6 +21,7 @@
 
 #include <pybind11/stl.h>
 
+#include <slic3r/GUI/I18N.hpp>
 #include <wx/msgdlg.h>
 #include <wx/string.h>
 
