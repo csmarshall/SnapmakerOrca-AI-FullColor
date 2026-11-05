@@ -18,6 +18,8 @@ public:
     static AgentInfo get_agent_info_static();
     AgentInfo        get_agent_info() override { return get_agent_info_static(); }
 
+    DeviceUi         device_ui() const override { return DeviceUi::SnapmakerWeb; }
+
     bool fetch_filament_info(std::string dev_id, FilamentSyncMode sync_mode = FilamentSyncMode::pull) override;
 
 private:

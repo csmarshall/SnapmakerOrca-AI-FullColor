@@ -68,6 +68,13 @@ enum class CameraStreamMode {
     http_snapshot // HTTP endpoint returning one image per request
 };
 
+// Which Device-tab experience an agent's printers use. Declared by the agent (and so by the printer
+// preset that names it), never inferred from a printer model.
+enum class DeviceUi {
+    Native,        // upstream's Device tab (MonitorPanel)
+    SnapmakerWeb,  // Snapmaker's Flutter Home/Device page, hosted in a webview and bridged by SSWCP
+};
+
 /**
  * IPrinterAgent - Interface for printer operations.
  *
@@ -453,6 +460,11 @@ public:
      * @return CameraStreamMode indicating how the camera stream is obtained or used:
      */
     virtual CameraStreamMode get_camera_stream_mode() const { return CameraStreamMode::none; }
+
+    /**
+     * Which UI the Device tab shows while this agent is the live one. Native unless an agent says otherwise.
+     */
+    virtual DeviceUi device_ui() const { return DeviceUi::Native; }
 
     /**
      * Refresh filament info from the printer synchronously.
