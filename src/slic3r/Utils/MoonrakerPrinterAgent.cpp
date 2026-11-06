@@ -1,4 +1,5 @@
 #include "MoonrakerPrinterAgent.hpp"
+#include <cstring>
 #include "AsioUtils.hpp"
 #include "Http.hpp"
 #include "IPrinterAgent.hpp"
@@ -203,6 +204,49 @@ std::string MoonrakerPrinterAgent::last_connect_error() const
 {
     std::lock_guard<std::mutex> lock(connect_error_mutex);
     return connect_error;
+}
+
+bool MoonrakerPrinterAgent::is_readable_resource_path(const std::string& p)
+{
+    if (p.empty() || p.size() > 1024 || p.front() != '/')
+        return false;
+    for (unsigned char c : p)
+        if (c < 0x21 || c == 0x7f || c == '\\') // controls, space, DEL, backslash (everything else must arrive percent-encoded)
+            return false;
+    if (p.find("..") != std::string::npos || p.find("//") != std::string::npos || p.find('#') != std::string::npos)
+        return false;
+    auto starts = [&p](const char* prefix) { return p.compare(0, std::strlen(prefix), prefix) == 0; };
+    return p == "/machine/system_info" || starts("/server/files/metadata?filename=") ||
+           starts("/server/files/thumbnails?filename=") || (starts("/server/files/gcodes/") && p.size() > std::strlen("/server/files/gcodes/"));
+}
+
+void MoonrakerPrinterAgent::read_machine_resource_async(const std::string& path_and_query, size_t max_bytes,
+                                                        std::function<void(bool ok, std::string body)> done)
+{
+    std::string base_url, api_key;
+    {
+        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+        base_url = device_info.base_url;
+        api_key  = device_info.api_key;
+    }
+    if (base_url.empty() || !is_readable_resource_path(path_and_query)) {
+        if (done) done(false, std::string());
+        return;
+    }
+    auto http = Http::get(join_url(base_url, path_and_query));
+    if (!api_key.empty())
+        http.header("X-Api-Key", api_key);
+    http.timeout_connect(3)
+        .timeout_max(10)
+        .on_complete([done, max_bytes](std::string body, unsigned status) {
+            if (status == 200 && body.size() <= max_bytes) { if (done) done(true, std::move(body)); }
+            else if (done) done(false, std::string());
+        })
+        .on_error([done](std::string, std::string err, unsigned status) {
+            BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: machine resource read failed: " << err << " (HTTP " << status << ")";
+            if (done) done(false, std::string());
+        })
+        .perform();
 }
 
 void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::string>& object_names,
