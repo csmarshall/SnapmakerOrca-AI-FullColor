@@ -40,6 +40,8 @@ private:
     std::vector<SnapmakerDeviceInfo> current_devices() const;
 
     std::unique_ptr<WebPageServer>        m_server;
+    std::string                           m_camera_origin;   // the origin the page's policy was started with (empty = none)
+    std::string                           selected_camera_origin() const;
     std::unique_ptr<SnapmakerDeviceBridge> m_bridge;
     wxWebView*                            m_browser{nullptr};        // null once torn down
     wxWebView*                            m_browser_window{nullptr}; // the window itself, until reset() destroys it

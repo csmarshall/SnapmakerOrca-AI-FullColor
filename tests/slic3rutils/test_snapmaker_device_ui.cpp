@@ -1,10 +1,19 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <map>
 #include <fstream>
 #include <sstream>
 #include <set>
 #include <boost/filesystem.hpp>
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
 #include <vector>
 
 #include "slic3r/GUI/SnapmakerDeviceBridge.hpp"
@@ -1078,5 +1087,184 @@ TEST_CASE("snapmaker_camera_origin: http://<bare host> of the machine, or empty"
     for (const char* bad : {"", "a b", "a;b", "evil.com; script-src *", "h'", "*", "a\r\nb"}) {
         CAPTURE(bad);
         CHECK(snapmaker_camera_origin(bad).empty());
+    }
+}
+
+TEST_CASE("camera origin follows the selected machine: fallback to the dev id, and when the page must reload", "[SSWCP][device_ui][camera]")
+{
+    CHECK(snapmaker_camera_origin_for("192.168.1.5", "x") == "http://192.168.1.5");
+    CHECK(snapmaker_camera_origin_for("", "3d-printer:7125") == "http://3d-printer");          // no ip: the dev id
+    // The dev id fallback can be unusable: then there is no origin to serve (rejected, not passed through).
+    CHECK(snapmaker_camera_origin_for("", "fe80::1").empty());                                  // unbracketed IPv6
+    CHECK(snapmaker_camera_origin_for("", "my printer").empty());
+    CHECK(snapmaker_camera_origin_for("", "evil.com; script-src *").empty());
+    CHECK(snapmaker_camera_origin_for("", "").empty());
+    // ... and the page server refuses what is not a plain origin even if one slipped through.
+    // Reload decision: any change, an origin appearing or going away; no change (even both empty) means no reload.
+    CHECK_FALSE(snapmaker_camera_origin_needs_reload("http://a", "http://a"));
+    CHECK(snapmaker_camera_origin_needs_reload("http://a", "http://b"));
+    CHECK(snapmaker_camera_origin_needs_reload("", "http://b"));                                // machine selected after the page started
+    CHECK(snapmaker_camera_origin_needs_reload("http://a", ""));
+    CHECK_FALSE(snapmaker_camera_origin_needs_reload("", ""));
+}
+
+TEST_CASE("camera RPC in-flight gate: one at a time", "[SSWCP][device_ui][camera]")
+{
+    MoonrakerPrinterAgent::InFlightGate g;
+    CHECK(g.try_acquire());
+    CHECK_FALSE(g.try_acquire());
+    CHECK(g.busy_now());
+    g.release();
+    CHECK(g.try_acquire());
+}
+
+namespace {
+// A one-connection websocket server on 127.0.0.1:<ephemeral>, standing in for the printer's /websocket.
+struct LoopbackPrinter
+{
+    enum class Mode { Success, NotificationFirst, ErrorReply, Silent } mode;
+    boost::asio::io_context                 ioc;
+    boost::asio::ip::tcp::acceptor          acceptor{ioc, {boost::asio::ip::make_address("127.0.0.1"), 0}};
+    std::thread                             thread;
+    std::atomic<int>                        accepted{0};
+    std::mutex                              m;
+    std::string                             request;     // the first message the client sent
+    std::string                             api_key;
+    std::atomic<bool>                       release{false}; // Silent: keep the connection until set
+
+    explicit LoopbackPrinter(Mode md) : mode(md)
+    {
+        thread = std::thread([this] {
+            namespace ws = boost::beast::websocket;
+            try {
+                boost::asio::ip::tcp::socket sock{ioc};
+                acceptor.accept(sock);
+                ++accepted;
+                ws::stream<boost::asio::ip::tcp::socket> conn{std::move(sock)};
+                boost::beast::http::request<boost::beast::http::string_body> req;
+                boost::beast::flat_buffer hb;
+                boost::beast::http::read(conn.next_layer(), hb, req);
+                { std::lock_guard<std::mutex> l(m); api_key = std::string(req["X-Api-Key"]); }
+                conn.accept(req);
+                boost::beast::flat_buffer buf;
+                conn.read(buf);
+                const std::string msg = boost::beast::buffers_to_string(buf.data());
+                { std::lock_guard<std::mutex> l(m); request = msg; }
+                const json r = json::parse(msg, nullptr, false);
+                const int id = r.is_object() && r.contains("id") ? r["id"].get<int>() : -1;
+                conn.text(true);
+                if (mode == Mode::NotificationFirst)
+                    conn.write(boost::asio::buffer(std::string(R"({"jsonrpc":"2.0","method":"notify_proc_stat_update","params":[{}]})")));
+                if (mode == Mode::Success || mode == Mode::NotificationFirst)
+                    conn.write(boost::asio::buffer(json{{"jsonrpc", "2.0"}, {"result", {{"state", "success"}, {"url", "/files/camera/monitor.jpg"}}}, {"id", id}}.dump()));
+                else if (mode == Mode::ErrorReply)
+                    conn.write(boost::asio::buffer(json{{"jsonrpc", "2.0"}, {"error", {{"code", -32601}, {"message", "nope"}}}, {"id", id}}.dump()));
+                else
+                    while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                boost::beast::error_code ec;
+                conn.read(buf, ec); // wait for the client's close
+            } catch (...) {}
+        });
+    }
+    ~LoopbackPrinter()
+    {
+        release = true;
+        boost::beast::error_code ec;
+        acceptor.close(ec); // unblocks a server nobody connected to
+        if (thread.joinable()) thread.join();
+    }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(acceptor.local_endpoint().port()); }
+    std::string last_request() { std::lock_guard<std::mutex> l(m); return request; }
+};
+
+struct CameraResult
+{
+    std::promise<void> first;
+    std::atomic<int>   calls{0};
+    bool               ok = false;
+    json               result;
+    std::function<void(bool, json)> callback()
+    {
+        return [this](bool o, json r) { if (calls++ == 0) { ok = o; result = std::move(r); first.set_value(); } };
+    }
+    bool wait(std::chrono::milliseconds t) { return first.get_future().wait_for(t) == std::future_status::ready; }
+};
+const json kStartParams = {{"domain", "lan"}, {"interval", 0}, {"expect_pw", true}, {"clientid", "orca-3d-printer"}};
+using Run = MoonrakerPrinterAgent;
+} // namespace
+
+TEST_CASE("camera RPC over a loopback websocket: success, notification first, error, silence, https, one call at a time", "[SSWCP][device_ui][camera][loopback]")
+{
+    using namespace std::chrono_literals;
+    SECTION("success: sends exactly camera.start_monitor with the params and the api key, unwraps the result") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::Success);
+        CameraResult r;
+        Run::camera_monitor_run(p.url(), "KEY", true, kStartParams, 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK(r.ok);
+        CHECK(r.result["url"] == "/files/camera/monitor.jpg");
+        const json sent = json::parse(p.last_request());
+        CHECK(sent["method"] == "camera.start_monitor");
+        CHECK(sent["params"] == kStartParams);
+        CHECK(sent["id"] == 1);
+        { std::lock_guard<std::mutex> l(p.m); CHECK(p.api_key == "KEY"); }
+        std::this_thread::sleep_for(200ms);
+        CHECK(r.calls == 1);
+    }
+    SECTION("stop uses camera.stop_monitor") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::Success);
+        CameraResult r;
+        Run::camera_monitor_run(p.url(), "", false, json{{"domain", "lan"}, {"clientid", "orca-x"}}, 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK(r.ok);
+        CHECK(json::parse(p.last_request())["method"] == "camera.stop_monitor");
+    }
+    SECTION("a notification before the reply is skipped") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::NotificationFirst);
+        CameraResult r;
+        Run::camera_monitor_run(p.url(), "", true, kStartParams, 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK(r.ok);
+        CHECK(r.result["state"] == "success");
+    }
+    SECTION("an error reply fails") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::ErrorReply);
+        CameraResult r;
+        Run::camera_monitor_run(p.url(), "", true, kStartParams, 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK_FALSE(r.ok);
+        CHECK(r.result == json::object());
+    }
+    SECTION("no reply: fails at the deadline, bounded, done once; a second call meanwhile is refused with no connection") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::Silent);
+        auto gate = std::make_shared<Run::InFlightGate>();
+        CameraResult r, second;
+        const auto t0 = std::chrono::steady_clock::now();
+        Run::camera_monitor_run(p.url(), "", true, kStartParams, 800ms, gate, r.callback());
+        // The first call holds the gate: the second is answered at once, on this thread, without any new connection.
+        Run::camera_monitor_run(p.url(), "", true, kStartParams, 800ms, gate, second.callback());
+        CHECK(second.calls == 1);
+        CHECK_FALSE(second.ok);
+        REQUIRE(r.wait(5s));
+        const auto took = std::chrono::steady_clock::now() - t0;
+        CHECK_FALSE(r.ok);
+        CHECK(took >= 700ms);
+        CHECK(took < 3s);
+        CHECK(p.accepted == 1);
+        std::this_thread::sleep_for(100ms);
+        CHECK_FALSE(gate->busy_now());   // released: the next call may go
+        CHECK(r.calls == 1);
+    }
+    SECTION("an https machine, bad params and an empty url are refused without connecting") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::Success);
+        CameraResult a, b, c;
+        auto gate = std::make_shared<Run::InFlightGate>();
+        std::string https = p.url(); https.replace(0, 4, "https");
+        Run::camera_monitor_run(https, "", true, kStartParams, 2000ms, gate, a.callback());
+        Run::camera_monitor_run(p.url(), "", true, json{{"domain", "wan"}, {"clientid", "x"}}, 2000ms, gate, b.callback());
+        Run::camera_monitor_run("", "", true, kStartParams, 2000ms, gate, c.callback());
+        for (CameraResult* x : {&a, &b, &c}) { CHECK(x->calls == 1); CHECK_FALSE(x->ok); }
+        CHECK(p.accepted == 0);
+        CHECK_FALSE(gate->busy_now());
     }
 }

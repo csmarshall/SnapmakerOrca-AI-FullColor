@@ -54,6 +54,14 @@ std::string snapmaker_bare_host(const std::string& address);
 // "http://<bare host>" of a machine address, the one extra origin the page may load the camera snapshot from; "" if the host is
 // not a plain DNS name, IPv4 address or bracketed IPv6 literal (no credentials, port, path or anything CSP-significant).
 std::string snapmaker_camera_origin(const std::string& address);
+// The origin for a machine record: its ip, else its dev id. Empty (never served) when that address is not a plain host.
+inline std::string snapmaker_camera_origin_for(const std::string& ip, const std::string& dev_id)
+{
+    return snapmaker_camera_origin(ip.empty() ? dev_id : ip);
+}
+// Whether the page (whose policy was built for `served`) has to be reloaded for the machine now selected (`current`). Any
+// difference counts, including an origin appearing (was empty) or going away.
+inline bool snapmaker_camera_origin_needs_reload(const std::string& served, const std::string& current) { return served != current; }
 
 // True only for http://127.0.0.1:<port>/... (the WebPageServer's own origin). Anything else - another host,
 // another port, https, userinfo tricks like http://127.0.0.1:1@evil/, localhost, empty - is false.

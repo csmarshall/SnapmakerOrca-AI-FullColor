@@ -45,7 +45,7 @@ public:
     WebPageServer& operator=(const WebPageServer&) = delete;
 
     // One extra origin ("http://<host>", plain http, bare host, no credentials, port or path) the NEXT start() adds to the policy's
-    // img-src and connect-src (and media-src, as csp_with_extra_origin() does), so a page can load the connected machine's camera
+    // img-src and connect-src (nothing else), so a page can load the connected machine's camera
     // snapshot. "" clears it. A rejected value also clears it and returns false, so the static policy stays in force. The origin is
     // fixed at start(): a machine change after that needs a restart (docs/third-party/flutter_web.md).
     bool set_extra_origin(const std::string& origin);
@@ -84,9 +84,9 @@ int resolve_within(const boost::filesystem::path& canonical_root, const boost::f
 // Parses a policy file: '#' lines and blank lines are ignored, the rest is joined into one line. Returns "" (refuse) for an
 // empty result, one containing control characters, 'unsafe-inline' / 'unsafe-eval', or longer than 8 KiB.
 std::string parse_csp_file(const std::string& text);
-// The policy with `origin` ("http://192.168.1.5", "https://host:8443", no path) added to connect-src, img-src and
-// media-src (media-src is created if absent), for pages that must reach the connected printer (camera, print, send). Returns ""
-// for anything that is not a plain http(s) origin. Not used yet: the code path is ready for when those routes are enabled.
+// The policy with `origin` ("http://192.168.1.5", "https://host:8443", no path) added to connect-src and img-src ONLY (no other
+// directive, media-src included, is touched or created), for the camera snapshot. Returns "" for anything that is not a plain
+// http(s) origin.
 std::string csp_with_extra_origin(const std::string& policy, const std::string& origin);
 } // namespace web_page_server_detail
 

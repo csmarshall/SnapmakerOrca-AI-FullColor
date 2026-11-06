@@ -36,7 +36,11 @@ SnapmakerDevicePage::~SnapmakerDevicePage()
 bool SnapmakerDevicePage::Show(bool show)
 {
     const bool changed = wxPanel::Show(show);
-    if (show && !m_started) {
+    if (show && m_started && snapmaker_camera_origin_needs_reload(m_camera_origin, selected_camera_origin())) {
+        // Another machine is selected since the page started: its policy names the old machine, so the page is rebuilt.
+        reset();
+        start();
+    } else if (show && !m_started) {
         start();
     } else if (m_bridge) {
         m_bridge->set_active(show);
@@ -59,20 +63,27 @@ void SnapmakerDevicePage::reset()
     m_started = false;
 }
 
+std::string SnapmakerDevicePage::selected_camera_origin() const
+{
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    const MachineObject* selected = dev ? dev->get_selected_machine() : nullptr;
+    return selected ? snapmaker_camera_origin_for(selected->get_dev_ip(), selected->get_dev_id()) : std::string();
+}
+
 bool SnapmakerDevicePage::start()
 {
     m_started = true; // one attempt per page; a failure shows a message instead of retrying every Show()
 
     m_server = std::make_unique<WebPageServer>(boost::filesystem::path(resources_dir()) / "web" / "flutter_web");
     // The camera snapshot is loaded by the page straight from the selected machine, so its origin (and only that one) is added to
-    // the policy for this page load. It is fixed here: selecting another machine later needs the page reloaded.
-    if (DeviceManager* dev = wxGetApp().getDeviceManager())
-        if (const MachineObject* selected = dev->get_selected_machine()) {
-            const std::string address = selected->get_dev_ip().empty() ? selected->get_dev_id() : selected->get_dev_ip();
-            const std::string origin  = snapmaker_camera_origin(address);
-            if (!origin.empty() && m_server->set_extra_origin(origin))
-                BOOST_LOG_TRIVIAL(info) << "SnapmakerDevicePage: camera origin " << origin;
-        }
+    // the policy for this page load. Show(true) restarts the page when the selected machine's origin has changed since.
+    m_camera_origin = selected_camera_origin();
+    if (m_camera_origin.empty())
+        BOOST_LOG_TRIVIAL(warning) << "SnapmakerDevicePage: no camera origin (no machine selected or its address is not a plain host); the camera tile will be blocked";
+    else if (!m_server->set_extra_origin(m_camera_origin)) // kept in m_camera_origin, so Show() does not reload in a loop
+        BOOST_LOG_TRIVIAL(warning) << "SnapmakerDevicePage: camera origin refused by the page server: " << m_camera_origin;
+    else
+        BOOST_LOG_TRIVIAL(info) << "SnapmakerDevicePage: camera origin " << m_camera_origin;
     if (!m_server->start()) {
         BOOST_LOG_TRIVIAL(error) << "SnapmakerDevicePage: the page server did not start";
         m_server.reset();
