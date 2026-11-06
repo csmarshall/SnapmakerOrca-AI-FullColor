@@ -71,6 +71,28 @@ nlohmann::json snapmaker_empty_machine_state();
 // The Klipper objects asked for when the page names none (the set the 2.3.40 Device page reads, contract doc 7.3).
 const std::vector<std::string>& snapmaker_default_state_objects();
 
+// ---- pure helpers for the read-only machine resources (unit-tested) ----
+
+// machine.system_info result -> product_info.serial_number ("" when absent or not a string). Accepts the bare result
+// ({system_info:{...}}) or a Moonraker HTTP body ({result:{system_info:{...}}}).
+std::string snapmaker_serial_from_system_info(const nlohmann::json& body);
+// The machine.system_info `result` object the page expects ({system_info:{...}}), or {} when `body` has none.
+nlohmann::json snapmaker_system_info_result(const nlohmann::json& body);
+// A gcode file name the page may ask about: 1..512 bytes, no control characters, no backslash, not absolute, no ".."
+// segment. Used before a name goes into a URL.
+bool snapmaker_valid_gcode_name(const std::string& name);
+// Percent-encodes everything but unreserved characters (and '/' when keep_slash), for a query value or URL path.
+std::string snapmaker_percent_encode(const std::string& s, bool keep_slash);
+// A thumbnail_path from /server/files/thumbnails: relative, valid name, no '?', '#', ':' (so it cannot become another URL).
+bool snapmaker_valid_thumbnail_path(const std::string& path);
+std::string snapmaker_base64(const std::string& bytes);
+constexpr std::size_t SNAPMAKER_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
+// The thumbnails_base64-shaped reply {width,height,size,data,state,path}; {state:"error",...} when the image is empty or over the cap.
+nlohmann::json snapmaker_thumbnail_reply(const std::string& path, int width, int height, const std::string& image);
+nlohmann::json snapmaker_thumbnail_error(const std::string& path);
+// Of a /server/files/thumbnails result list, the entry with the most pixels whose reported size fits the cap ({} if none).
+nlohmann::json snapmaker_pick_thumbnail(const nlohmann::json& list);
+
 // The bridge adds the device-oriented commands to the SSWCP core's 13. All READ-ONLY. Bridge-level emulation (ADR 0005,
 // decision 2 amendment): the page believes it talks to a machine over MQTT; here it is answered from the Moonraker
 // connection the app already has, and the sw_mqtt_* commands are accepted and ignored. Anything that could change printer
@@ -89,6 +111,9 @@ public:
         // called on the UI thread (the adapter hops threads), exactly once. Null = no machine source: state replies are
         // the empty state.
         std::function<void(const std::vector<std::string>& objects, std::function<void(bool ok, nlohmann::json result)> done)> query_state;
+        // Read-only GET of one allow-listed machine resource (IPrinterAgent::read_machine_resource_async); `done(ok, body)`
+        // on the UI thread, exactly once. Null = no machine source.
+        std::function<void(const std::string& path_and_query, std::size_t max_bytes, std::function<void(bool ok, std::string body)> done)> fetch_resource;
         // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
         std::function<bool(SnapmakerTab)>                    switch_tab;
     };
@@ -116,6 +141,8 @@ public:
 
 private:
     Options        m_options;
+    std::map<std::string, std::string>     m_serials;      // dev_id -> serial_number (declared before m_sswcp: its services read it)
+    std::map<std::string, nlohmann::json>  m_system_info;  // dev_id -> machine.system_info result
     SSWCP          m_sswcp;
     // Throttled machine-state pushes: every kStatePushEveryTicks ticks (tick() is about 1 s) while someone subscribes.
     static constexpr int kStatePushEveryTicks = 3;
@@ -123,6 +150,12 @@ private:
     void run_query(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done);
     void push_state(bool force);
     std::vector<std::string> objects_from(const nlohmann::json& params) const;
+
+    // dev_id -> machine.system_info result / serial, filled by read-only fetches; a record's sn is the serial once known.
+    void fetch_system_info(const std::string& dev_id, std::function<void()> then);
+    std::vector<SnapmakerDeviceInfo> current_devices() const;
+    int                                 m_serial_retry_at = 0;
+    std::map<std::string, std::vector<std::function<void()>>> m_sysinfo_waiters; // dev_id -> callbacks of a fetch in flight
 
     nlohmann::json                      m_last_devices = nlohmann::json::array();
     bool                                m_closed       = false;

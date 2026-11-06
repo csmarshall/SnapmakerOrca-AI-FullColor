@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <map>
 #include <set>
 #include <vector>
 
@@ -60,6 +61,9 @@ struct BridgeHarness
     bool                              have_source = true;
     std::vector<SnapmakerTab>         tabs;
     bool                              tab_ok = true;
+    // Read-only resource source: path -> body (absent = failure). Every request is recorded.
+    std::map<std::string, std::string> resources;
+    std::vector<std::string>          fetched;
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -74,6 +78,11 @@ struct BridgeHarness
                   queries.push_back({objs, std::move(done)});
               };
               o.switch_tab = [this](SnapmakerTab t) { tabs.push_back(t); return tab_ok; };
+              o.fetch_resource = [this](const std::string& path, std::size_t, std::function<void(bool, std::string)> done) {
+                  fetched.push_back(path);
+                  auto it = resources.find(path);
+                  if (it == resources.end()) done(false, std::string()); else done(true, it->second);
+              };
               return o;
           }())
     {}
@@ -480,17 +489,17 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_UnSubscribeMachineState", "sw_StopMachineStateSubscription", "sw_create_mqtt_client", "sw_mqtt_connect", "sw_mqtt_disconnect",
         "sw_mqtt_subscribe", "sw_mqtt_unsubscribe", "sw_mqtt_publish", "sw_UpdateMachineFilamentInfo", "sw_GetMachineSystemInfo",
         "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query", "sw_MachineFilesRoots", "sw_MachineFilesMetadata",
-        "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys"};
+        "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys", "sw_FilesThumbnailsBase64", "sw_MachineHeartbeat"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 37);
+    CHECK(expected.size() == 39);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
 {
     BridgeHarness h;
     for (const char* cmd : {"sw_GetMachineSystemInfo", "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query", "sw_MachineFilesRoots",
-                            "sw_MachineFilesMetadata", "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys"}) {
+                            "sw_MachineFilesMetadata", "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys"}) {
         CAPTURE(cmd);
         h.sent.clear();
         h.bridge.on_script_message(h.good, BridgeHarness::msg(cmd));
@@ -498,4 +507,170 @@ TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui
         CHECK(h.reply(0)["payload"]["code"] == 200);
         CHECK(h.reply(0)["payload"]["data"] == json::object());
     }
+}
+
+// ---- 7f: real serial, system info, metadata, thumbnail ----
+
+namespace {
+const char* kSysInfoBody = R"({"result":{"system_info":{"product_info":{"machine_type":"Snapmaker U1","serial_number":"U1REAL123","device_name":"U1","firmware_version":"2.0.0"}}}})";
+SnapmakerDeviceInfo connected_u1()
+{
+    SnapmakerDeviceInfo d;
+    d.dev_id = "3d-printer"; d.name = "U1"; d.ip = "3d-printer"; d.model = "Snapmaker U1"; d.online = true; d.connected = true;
+    return d;
+}
+} // namespace
+
+TEST_CASE("serial and system_info helpers", "[SSWCP][device_ui]")
+{
+    CHECK(snapmaker_serial_from_system_info(json::parse(kSysInfoBody)) == "U1REAL123");
+    CHECK(snapmaker_serial_from_system_info(json::parse(kSysInfoBody)["result"]) == "U1REAL123"); // bare result too
+    CHECK(snapmaker_system_info_result(json::parse(kSysInfoBody)).contains("system_info"));
+    for (const char* bad : {"{}", "[]", "5", R"({"result":{}})", R"({"result":{"system_info":{}}})", R"({"result":{"system_info":{"product_info":{"serial_number":5}}}})"}) {
+        CAPTURE(bad);
+        CHECK(snapmaker_serial_from_system_info(json::parse(bad)).empty());
+    }
+    CHECK(snapmaker_system_info_result(json::parse("{}")) == json::object());
+}
+
+TEST_CASE("filename and thumbnail-path validation and encoding", "[SSWCP][device_ui]")
+{
+    CHECK(snapmaker_valid_gcode_name("a.gcode"));
+    CHECK(snapmaker_valid_gcode_name("dir/sub dir/a b.gcode"));
+    for (const char* bad : {"", "/etc/passwd", "../x", "a/../b", "a//b", "a/./b", "a\\b"})
+        CHECK_FALSE(snapmaker_valid_gcode_name(bad));
+    CHECK_FALSE(snapmaker_valid_gcode_name(std::string("a\nb")));
+    CHECK_FALSE(snapmaker_valid_gcode_name(std::string("a\0b", 3)));
+    CHECK_FALSE(snapmaker_valid_gcode_name(std::string(513, 'a')));
+    CHECK(snapmaker_valid_gcode_name(std::string(512, 'a')));
+
+    CHECK(snapmaker_percent_encode("a b&c=d?e#f%g", false) == "a%20b%26c%3Dd%3Fe%23f%25g");
+    CHECK(snapmaker_percent_encode("d/a b.png", true) == "d/a%20b.png");
+    CHECK(snapmaker_percent_encode("d/a", false) == "d%2Fa");
+    CHECK(snapmaker_percent_encode("\xc3\xa4", false) == "%C3%A4");
+
+    CHECK(snapmaker_valid_thumbnail_path(".thumbs/x-300x300.png"));
+    for (const char* bad : {"http://evil/x", "x?y=1", "x#y", "../x.png", "/abs.png", "c:/x.png", ""})
+        CHECK_FALSE(snapmaker_valid_thumbnail_path(bad));
+}
+
+TEST_CASE("thumbnail reply shaping, base64 and the size cap", "[SSWCP][device_ui]")
+{
+    CHECK(snapmaker_base64("") == "");
+    CHECK(snapmaker_base64("f") == "Zg==");
+    CHECK(snapmaker_base64("fo") == "Zm8=");
+    CHECK(snapmaker_base64("foo") == "Zm9v");
+    CHECK(snapmaker_base64("foob") == "Zm9vYg==");
+    CHECK(snapmaker_base64(std::string("\xff\xfe\x00", 3)) == "//4A");
+
+    json ok = snapmaker_thumbnail_reply("a.gcode", 300, 300, "PNGDATA");
+    CHECK(ok == json{{"width", 300}, {"height", 300}, {"size", 7}, {"data", snapmaker_base64("PNGDATA")}, {"state", "success"}, {"path", "a.gcode"}});
+    CHECK(snapmaker_thumbnail_reply("a", 1, 1, std::string(SNAPMAKER_THUMBNAIL_MAX_BYTES, 'x'))["state"] == "success");
+    json big = snapmaker_thumbnail_reply("a", 1, 1, std::string(SNAPMAKER_THUMBNAIL_MAX_BYTES + 1, 'x'));
+    CHECK(big["state"] == "error");
+    CHECK(big["data"] == "");
+    CHECK(snapmaker_thumbnail_reply("a", 1, 1, "")["state"] == "error");
+
+    json list = json::array({json{{"width", 96}, {"height", 96}, {"size", 100}, {"thumbnail_path", ".thumbs/a-96x96.png"}},
+                             json{{"width", 300}, {"height", 300}, {"size", 900}, {"thumbnail_path", ".thumbs/a-300x300.png"}},
+                             json{{"width", 999}, {"height", 999}, {"size", 99999999}, {"thumbnail_path", ".thumbs/huge.png"}},
+                             json{{"width", 400}, {"height", 400}, {"size", 10}, {"thumbnail_path", "http://evil/x.png"}}});
+    CHECK(snapmaker_pick_thumbnail(list)["thumbnail_path"] == ".thumbs/a-300x300.png"); // biggest valid one under the cap
+    CHECK(snapmaker_pick_thumbnail(json::array()).empty());
+    CHECK(snapmaker_pick_thumbnail(json::object()).empty());
+}
+
+TEST_CASE("the record's sn becomes the machine's serial and subscribers are told", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices = {connected_u1()};
+    h.resources["/machine/system_info"] = kSysInfoBody;
+
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeLocalDevices", "ls"));
+    h.bridge.tick();                                   // first sight of the connected machine: fetch + push the list
+    REQUIRE(h.fetched.size() == 1);
+    CHECK(h.fetched[0] == "/machine/system_info");
+    // The list pushed first carried dev_id as sn; once the serial arrives (synchronously in the fake) the same tick
+    // already sees the real one, and whatever was pushed last must agree with it.
+    h.sent.clear();
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetLocalDevices"));
+    CHECK(h.reply(0)["payload"]["data"][0]["sn"] == "U1REAL123");
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetConnectedMachine"));
+    CHECK(h.reply(1)["payload"]["data"]["sn"] == "U1REAL123");
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineSystemInfo"));
+    json info = h.reply(2)["payload"]["data"];
+    CHECK(info["system_info"]["product_info"]["serial_number"] == "U1REAL123"); // same serial the record carries
+    CHECK(h.fetched.size() == 1);                      // cached: not fetched again
+
+    for (int i = 0; i < 5; ++i) h.bridge.tick();
+    CHECK(h.fetched.size() == 1);
+}
+
+TEST_CASE("a late serial is pushed to local-device subscribers", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices = {connected_u1()};
+    // Hold the fetch: capture its completion instead of answering at once.
+    std::function<void(bool, std::string)> pending;
+    SnapmakerDeviceBridge::Options o;
+    // (reuse the harness bridge but swap the source through resources: absent = failure first)
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeLocalDevices", "ls"));
+    h.bridge.tick();                                   // fetch fails (no resource): record keeps dev_id as sn
+    h.sent.clear();
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetLocalDevices"));
+    CHECK(h.reply(0)["payload"]["data"][0]["sn"] == "3d-printer");
+    h.resources["/machine/system_info"] = kSysInfoBody;
+    for (int i = 0; i < 12; ++i) h.bridge.tick();      // retry after the back-off
+    // The retry got the serial and pushed the changed list to the subscriber.
+    bool pushed = false;
+    for (std::size_t n = 0; n < h.sent.size(); ++n) {
+        json r = h.reply(n);
+        if (r["header"] == json{{"event_id", "ls"}} && r["payload"]["data"][0]["sn"] == "U1REAL123") pushed = true;
+    }
+    CHECK(pushed);
+}
+
+TEST_CASE("sw_MachineFilesMetadata replies the flat result, fail-soft", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.resources["/server/files/metadata?filename=dir%2Fmy%20file.gcode"] = R"({"result":{"size":123,"layer_count":103,"estimated_time":11793}})";
+    json p = {{"filename", "dir/my file.gcode"}};
+    h.bridge.on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_MachineFilesMetadata"}, {"params", p}}}}.dump());
+    CHECK(h.reply(0)["payload"]["data"] == json{{"size", 123}, {"layer_count", 103}, {"estimated_time", 11793}}); // flat, not wrapped
+    // Unknown file -> {} ; hostile names never reach a URL.
+    for (const char* name : {"missing.gcode", "../../etc/passwd", "a?b=c", ""}) {
+        CAPTURE(name);
+        h.fetched.clear();
+        h.bridge.on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_MachineFilesMetadata"}, {"params", {{"filename", name}}}}}}.dump());
+        CHECK(h.reply(h.sent.size() - 1)["payload"]["data"] == json::object());
+        if (std::string(name) == "missing.gcode") CHECK(h.fetched.size() == 1); else CHECK(h.fetched.empty() == (std::string(name) != "a?b=c"));
+    }
+}
+
+TEST_CASE("sw_FilesThumbnailsBase64 fetches the list then the image, bounded and fail-soft", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.resources["/server/files/thumbnails?filename=a%20b.gcode"] =
+        R"({"result":[{"width":96,"height":96,"size":10,"thumbnail_path":".thumbs/a b-96x96.png"},{"width":300,"height":300,"size":7,"thumbnail_path":".thumbs/a b-300x300.png"}]})";
+    h.resources["/server/files/gcodes/.thumbs/a%20b-300x300.png"] = "PNGDATA";
+    auto ask = [&](const std::string& path) {
+        h.bridge.on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_FilesThumbnailsBase64"}, {"params", {{"path", path}}}}}}.dump());
+        return h.reply(h.sent.size() - 1)["payload"]["data"];
+    };
+    json r = ask("a b.gcode");
+    CHECK(r == json{{"width", 300}, {"height", 300}, {"size", 7}, {"data", snapmaker_base64("PNGDATA")}, {"state", "success"}, {"path", "a b.gcode"}});
+    CHECK(h.fetched.size() == 2);
+
+    h.fetched.clear();
+    CHECK(ask("nothing.gcode")["state"] == "error");           // no thumbnails for the file
+    CHECK(h.fetched.size() == 1);
+    h.fetched.clear();
+    CHECK(ask("../../secret")["state"] == "error");            // never reaches a URL
+    CHECK(h.fetched.empty());
+    h.resources["/server/files/thumbnails?filename=evil.gcode"] = R"({"result":[{"width":300,"height":300,"size":7,"thumbnail_path":"http://evil.example/x.png"}]})";
+    CHECK(ask("evil.gcode")["state"] == "error");              // a thumbnail_path that is not a relative path is ignored
+    h.fetched.clear();
+    h.resources["/server/files/thumbnails?filename=img.gcode"] = R"({"result":[{"width":300,"height":300,"size":7,"thumbnail_path":"t.png"}]})";
+    h.resources["/server/files/gcodes/t.png"] = std::string(SNAPMAKER_THUMBNAIL_MAX_BYTES + 1, 'x');
+    CHECK(ask("img.gcode")["state"] == "error");               // oversized image
 }

@@ -76,6 +76,17 @@ bool SnapmakerDevicePage::start()
             wxGetApp().CallAfter([done, ok, result = std::move(result)]() mutable { done(ok, std::move(result)); });
         });
     };
+    opt.fetch_resource = [](const std::string& path, std::size_t max_bytes, std::function<void(bool, std::string)> done) {
+        auto* net   = wxGetApp().getAgent();
+        auto  agent = net ? net->get_printer_agent() : nullptr;
+        if (!agent) {
+            done(false, std::string());
+            return;
+        }
+        agent->read_machine_resource_async(path, max_bytes, [done](bool ok, std::string body) {
+            wxGetApp().CallAfter([done, ok, body = std::move(body)]() mutable { done(ok, std::move(body)); });
+        });
+    };
     opt.switch_tab = [](SnapmakerTab tab) {
         MainFrame* frame = wxGetApp().mainframe;
         if (!frame)
