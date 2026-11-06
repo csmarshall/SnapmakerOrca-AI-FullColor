@@ -44,6 +44,12 @@ public:
     WebPageServer(const WebPageServer&)            = delete;
     WebPageServer& operator=(const WebPageServer&) = delete;
 
+    // One extra origin ("http://<host>", plain http, bare host, no credentials, port or path) the NEXT start() adds to the policy's
+    // img-src and connect-src (and media-src, as csp_with_extra_origin() does), so a page can load the connected machine's camera
+    // snapshot. "" clears it. A rejected value also clears it and returns false, so the static policy stays in force. The origin is
+    // fixed at start(): a machine change after that needs a restart (docs/third-party/flutter_web.md).
+    bool set_extra_origin(const std::string& origin);
+
     // Returns false (and logs) if the root does not exist, the policy file is missing/empty/malformed, or the socket cannot be bound.
     bool start();
     void stop();

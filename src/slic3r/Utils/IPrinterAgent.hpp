@@ -501,6 +501,20 @@ public:
         if (done) done(false, std::string());
     }
 
+    /**
+     * Camera preview: ask the selected machine to start (`start`) or stop streaming its monitor snapshot, by the machine's own
+     * Moonraker JSON-RPC methods camera.start_monitor / camera.stop_monitor (and nothing else; `params` must pass
+     * camera_monitor_params_valid()). `done(ok, result)` gets the printer's "result" object, exactly once, from ANY thread;
+     * ok=false (empty object) for refused params, no machine, an error reply or a timeout. Agents without the notion keep the
+     * default (fails at once).
+     */
+    virtual void camera_monitor_async(bool start, const nlohmann::json& params,
+                                      std::function<void(bool ok, nlohmann::json result)> done)
+    {
+        (void) start; (void) params;
+        if (done) done(false, nlohmann::json::object());
+    }
+
     virtual void query_machine_objects_async(const std::vector<std::string>& object_names,
                                              std::function<void(bool ok, nlohmann::json result)> done)
     {
@@ -554,6 +568,36 @@ inline std::string strip_url_userinfo(const std::string& url)
 
 // Locale-independent character classes (std::isalnum depends on the C locale).
 inline bool ascii_alnum(unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+// The whitelist for camera_monitor_async() and the page bridge: an object with exactly the keys domain ("lan"), clientid
+// (^[A-Za-z0-9_.-]{1,64}$) and optionally interval (integer 0..10) and expect_pw (bool). Anything else is refused.
+inline bool camera_monitor_params_valid(const nlohmann::json& p)
+{
+    if (!p.is_object()) return false;
+    bool has_domain = false, has_client = false;
+    for (auto it = p.begin(); it != p.end(); ++it) {
+        const std::string& k = it.key();
+        const nlohmann::json& v = it.value();
+        if (k == "domain") {
+            if (!v.is_string() || v.get<std::string>() != "lan") return false;
+            has_domain = true;
+        } else if (k == "clientid") {
+            if (!v.is_string()) return false;
+            const std::string& id = v.get_ref<const std::string&>();
+            if (id.empty() || id.size() > 64) return false;
+            for (unsigned char c : id)
+                if (!(ascii_alnum(c) || c == '_' || c == '.' || c == '-')) return false;
+            has_client = true;
+        } else if (k == "interval") {
+            if (!v.is_number_integer() || v.get<long long>() < 0 || v.get<long long>() > 10) return false;
+        } else if (k == "expect_pw") {
+            if (!v.is_boolean()) return false;
+        } else {
+            return false;
+        }
+    }
+    return has_domain && has_client;
+}
 
 // The sidebar's Connection (physical printer) button. BBL printers keep their own flow (hidden); with printer agents
 // off it is the classic always-visible button; with agents on it is shown only for an agent that needs a typed-in host.

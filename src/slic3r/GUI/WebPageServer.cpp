@@ -210,6 +210,7 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
     fs::path                root;           // as given
     fs::path                csp_file;
     std::string             csp;            // the policy sent on every response; set by start()
+    std::string             extra_origin;   // validated by set_extra_origin(); added to csp by start()
     fs::path                canonical_root; // set by start()
     std::string             token = make_token();
     std::string             expected_host;
@@ -545,6 +546,16 @@ WebPageServer::WebPageServer(fs::path root, fs::path csp_file) : m_impl(std::mak
     m_impl->root     = std::move(root);
 }
 
+bool WebPageServer::set_extra_origin(const std::string& origin)
+{
+    m_impl->extra_origin.clear();
+    if (origin.empty()) return true;
+    static const std::regex ok(R"(^http://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])$)");
+    if (!std::regex_match(origin, ok)) return false;
+    m_impl->extra_origin = origin;
+    return true;
+}
+
 const std::string& WebPageServer::content_security_policy() const { return m_impl->csp; }
 
 WebPageServer::~WebPageServer() { stop(); }
@@ -567,6 +578,13 @@ bool WebPageServer::start()
         if (m_impl->csp.empty()) {
             BOOST_LOG_TRIVIAL(error) << "WebPageServer: refusing to start without a valid Content-Security-Policy file: " << m_impl->csp_file.string();
             return false;
+        }
+        if (!m_impl->extra_origin.empty()) {
+            const std::string widened = web_page_server_detail::csp_with_extra_origin(m_impl->csp, m_impl->extra_origin);
+            if (widened.empty())
+                BOOST_LOG_TRIVIAL(warning) << "WebPageServer: extra origin refused, serving the static policy";
+            else
+                m_impl->csp = widened;
         }
     }
     try {
