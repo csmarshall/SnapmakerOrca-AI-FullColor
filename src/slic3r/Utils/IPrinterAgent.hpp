@@ -538,6 +538,23 @@ public:
 // It is only ever meaningful to Bambu-style agents.
 inline constexpr const char* kBambuLanPlaceholderAccessCode = "88888888";
 
+// A URL or address with any "user:password@" removed from its authority ("http://u:p@h:7125/x" -> "http://h:7125/x",
+// "u:p@h" -> "h"). Used before an address is logged, shown to the page or put in an error message.
+inline std::string strip_url_userinfo(const std::string& url)
+{
+    const std::size_t scheme_end = url.find("://");
+    const std::size_t auth_begin = scheme_end == std::string::npos ? 0 : scheme_end + 3;
+    std::size_t       auth_end   = url.find_first_of("/?#", auth_begin);
+    if (auth_end == std::string::npos) auth_end = url.size();
+    const std::size_t at = url.rfind('@', auth_end == 0 ? 0 : auth_end - 1);
+    if (at == std::string::npos || at < auth_begin || at >= auth_end)
+        return url;
+    return url.substr(0, auth_begin) + url.substr(at + 1);
+}
+
+// Locale-independent character classes (std::isalnum depends on the C locale).
+inline bool ascii_alnum(unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
 // The sidebar's Connection (physical printer) button. BBL printers keep their own flow (hidden); with printer agents
 // off it is the classic always-visible button; with agents on it is shown only for an agent that needs a typed-in host.
 inline bool connection_button_visible(bool use_bbl_network, bool use_printer_agents, bool agent_needs_print_host)

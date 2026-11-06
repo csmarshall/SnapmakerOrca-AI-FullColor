@@ -160,3 +160,30 @@ TEST_CASE("Moonraker read-only resource allow-list", "[printhost][device_ui]")
         CHECK_FALSE(MoonrakerPrinterAgent::is_readable_resource_path(bad));
     }
 }
+
+TEST_CASE("dev_id rule: case, trailing dot, userinfo, IPv6, and preset host+port vs typed address", "[printhost][DeviceManager]")
+{
+    CHECK(MachineObject::dev_id_from_address("U1.Local:7125") == "u1.local:7125");
+    CHECK(MachineObject::dev_id_from_address("u1.local.") == "u1.local");
+    CHECK(MachineObject::dev_id_from_address("http://user:pw@u1.local:7125/x") == "u1.local:7125");
+    CHECK(MachineObject::dev_id_from_address("user:pw@u1.local", "7125") == "u1.local:7125");
+    CHECK(MachineObject::dev_id_from_address("[::1]:7125") == "[::1]:7125");
+    CHECK(MachineObject::dev_id_from_address("[::1]", "7125") == "[::1]:7125");
+    CHECK(MachineObject::dev_id_from_address("fe80::1") == "fe80::1");
+    CHECK(MachineObject::dev_id_from_address("  u1.local  ") == "u1.local");
+
+    // The reviewer's mismatch: the preset names host '192.168.1.5' + port '7125' (select_machine derives .5:7125) ...
+    const std::string select_id = MachineObject::dev_id_from_address("192.168.1.5", "7125");
+    CHECK(select_id == "192.168.1.5:7125");
+    // ... a typed '192.168.1.5:7125' is the same id ...
+    CHECK(MachineObject::dev_id_for_insert("192.168.1.5:7125", "192.168.1.5", "7125") == select_id);
+    CHECK(MachineObject::dev_id_for_insert("192.168.1.5:7125", "", "") == select_id);
+    // ... and a typed '192.168.1.5' joins the preset's machine instead of making a second one without the port.
+    CHECK(MachineObject::dev_id_for_insert("192.168.1.5", "192.168.1.5", "7125") == select_id);
+    CHECK(MachineObject::dev_id_for_insert("http://192.168.1.5/", "192.168.1.5", "7125") == select_id);
+    // A different host stays different.
+    CHECK(MachineObject::dev_id_for_insert("192.168.1.6", "192.168.1.5", "7125") == "192.168.1.6");
+    CHECK(MachineObject::dev_id_for_insert("192.168.1.6:7125", "192.168.1.5", "7125") == "192.168.1.6:7125");
+    // No preset host: the typed id.
+    CHECK(MachineObject::dev_id_for_insert("192.168.1.5", "", "") == "192.168.1.5");
+}

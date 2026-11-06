@@ -494,26 +494,48 @@ std::string MachineObject::get_ftp_folder()
 
 std::string MachineObject::dev_id_from_address(const std::string& host, const std::string& port)
 {
-    std::string result = host;
-    // Normalize host: strip protocol and path
-    if (result.find("http://") == 0)
-        result = result.substr(7);
-    else if (result.find("https://") == 0)
-        result = result.substr(8);
-    auto slash = result.find('/');
-    if (slash != std::string::npos)
-        result = result.substr(0, slash);
+    std::string r = host;
+    // trim blanks
+    r.erase(0, r.find_first_not_of(" \t"));
+    r.erase(r.find_last_not_of(" \t") + 1);
+    if (auto p = r.find("://"); p != std::string::npos)
+        r.erase(0, p + 3);
+    if (auto p = r.find_first_of("/?#"); p != std::string::npos)
+        r.erase(p);
+    if (auto p = r.rfind('@'); p != std::string::npos) // user:password@
+        r.erase(0, p + 1);
+    std::transform(r.begin(), r.end(), r.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-    // Build full address (host:port)
-    if (!port.empty()) {
-        // Strip inline port if present (port comes from printhost_port)
-        auto colon = result.find(':');
-        if (colon != std::string::npos)
-            result = result.substr(0, colon);
-
-        result += ":" + port;
+    std::string h, inline_port;
+    if (!r.empty() && r.front() == '[') {
+        const auto close = r.find(']');
+        h = close == std::string::npos ? r : r.substr(0, close + 1);
+        if (close != std::string::npos && close + 1 < r.size() && r[close + 1] == ':')
+            inline_port = r.substr(close + 2);
+    } else if (std::count(r.begin(), r.end(), ':') == 1) {
+        h           = r.substr(0, r.find(':'));
+        inline_port = r.substr(r.find(':') + 1);
+    } else {
+        h = r; // no port, or an unbracketed IPv6 literal
     }
-    return result;
+    while (h.size() > 1 && h.back() == '.')
+        h.pop_back();
+
+    const std::string& p = !port.empty() ? port : inline_port;
+    return p.empty() ? h : h + ":" + p;
+}
+
+std::string MachineObject::dev_id_for_insert(const std::string& dev_ip, const std::string& preset_host, const std::string& preset_port)
+{
+    const std::string typed = dev_id_from_address(dev_ip);
+    if (preset_host.empty())
+        return typed;
+    const std::string preset = dev_id_from_address(preset_host, preset_port);
+    auto host_part = [](const std::string& id) {
+        if (!id.empty() && id.front() == '[') return id.substr(0, id.find(']') + 1);
+        return std::count(id.begin(), id.end(), ':') == 1 ? id.substr(0, id.find(':')) : id;
+    };
+    return host_part(typed) == host_part(preset) ? preset : typed;
 }
 
 bool MachineObject::HasRecentCloudMessage()
