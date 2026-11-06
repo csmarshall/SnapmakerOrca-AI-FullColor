@@ -1,7 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <map>
+#include <fstream>
+#include <sstream>
 #include <set>
+#include <boost/filesystem.hpp>
 #include <vector>
 
 #include "slic3r/GUI/SnapmakerDeviceBridge.hpp"
@@ -187,7 +190,12 @@ TEST_CASE("device record carries the keys the page needs, sn above all", "[SSWCP
     CHECK(snapmaker_bare_host("u1.local:7125") == "u1.local");
     CHECK(snapmaker_bare_host("https://u1.local/x") == "u1.local");
     CHECK(snapmaker_bare_host("192.168.1.5") == "192.168.1.5");
-    CHECK(snapmaker_bare_host("[::1]:7125") == "[::1]:7125"); // IPv6 literal left alone
+    CHECK(snapmaker_bare_host("[::1]:7125") == "[::1]");               // bracketed IPv6 with a port
+    CHECK(snapmaker_bare_host("[::1]") == "[::1]");
+    CHECK(snapmaker_bare_host("http://[fe80::1]:7125/x") == "[fe80::1]");
+    CHECK(snapmaker_bare_host("fe80::1") == "fe80::1");                  // unbracketed IPv6: left whole, not cut at a colon
+    CHECK(snapmaker_bare_host("http://user:pw@u1.local:7125/x") == "u1.local"); // credentials never reach the page
+    CHECK(snapmaker_bare_host("user:pw@u1.local") == "u1.local");
 }
 
 TEST_CASE("sw_GetConnectedMachine returns the connected machine's record, {} when none", "[SSWCP][device_ui]")
@@ -310,16 +318,30 @@ TEST_CASE("machine state fails soft: no source, failed query, late answer after 
         h.queries.at(0).done(true, moonraker_result(1));
         CHECK(h.sent.empty());
     }
-    SECTION("a query that never answers times out with -2 and a late answer sends nothing more") {
+    SECTION("a second callback must not double-reply") {
         BridgeHarness h;
         h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
-        // The dispatcher's own clock is the real one here; force expiry through its API with a far-future sweep.
-        // (The harness does not inject a clock into the bridge, so check the instance is still open instead.)
-        CHECK(h.bridge.sswcp().instance_count() == 1);
         h.queries.at(0).done(true, moonraker_result(2));
         CHECK(h.sent.size() == 1);
-        h.queries.at(0).done(true, moonraker_result(3)); // a second callback must not double-reply
+        h.queries.at(0).done(true, moonraker_result(3));
         CHECK(h.sent.size() == 1);
+    }
+    SECTION("a query that never answers: the watchdog gives the waiter the empty state, a late answer is ignored") {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+        REQUIRE(h.queries.size() == 1);
+        for (int i = 0; i < 14; ++i) h.bridge.tick();
+        CHECK(h.sent.empty());                                       // not yet
+        h.bridge.tick();                                              // 15th tick: abandoned
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["data"] == snapmaker_empty_machine_state());
+        h.queries[0].done(true, moonraker_result(5));                // late
+        CHECK(h.sent.size() == 1);
+        // And polling is not wedged: a new request starts a new query.
+        h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+        CHECK(h.queries.size() == 2);
+        h.queries[1].done(true, moonraker_result(6));
+        CHECK(h.reply(1)["payload"]["data"] == moonraker_result(6));
     }
 }
 
@@ -457,13 +479,17 @@ TEST_CASE("the read-only guarantee: no control action is registered, each gets a
     BridgeHarness h;
     const std::vector<std::string> controls = {
         "sw_SendGCodes", "sw_MachinePrintStart", "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel",
-        "sw_UploadFiletoMachine", "sw_UploadFile", "sw_UploadFileResult", "sw_DeleteMachineFile", "sw_DeleteDevices", "sw_RenameDevice",
+        "sw_UploadFiletoMachine", "sw_UploadFile", "sw_UploadFileResult", "sw_DeleteCameraTimelapse", "sw_DeleteRecentFiles", "sw_DeleteDevices", "sw_RenameDevice",
         "sw_SetDeviceName", "sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlPurifier", "sw_ControlMainFan", "sw_ControlGenericFan",
         "sw_ControlBedTemp", "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
         "sw_SendCommand", "sw_Query", "sw_AddDevice", "sw_SwitchModel", "sw_UpdateDeviceInfo", "sw_mqtt_set_engine",
         "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping", "sw_DownloadMachineFile", "sw_DownLoadFile",
         "sw_CameraStartMonitor", "sw_CameraStopMonitor", "sw_PullCloudFile", "sw_ServerClientManagerSetUserinfo",
-        "sw_Connect", "sw_Disconnect", "sw_ConnectOtherMachine", "sw_GetPincode", "sw_OpenBrowser", "sw_Exit"};
+        "sw_Connect", "sw_Disconnect", "sw_ConnectOtherMachine", "sw_GetPincode", "sw_OpenBrowser", "sw_Exit",
+        // opens files, windows, consoles or logs outside the app log, or starts discovery (pinned in snapmaker_bridge_commands.txt)
+        "sw_OpenProject", "sw_OpenRecentFile", "sw_NewProject", "sw_LaunchConsole", "sw_OpenOrcaWebview", "sw_GetFileStream", "sw_FileView",
+        "sw_GetFilesFromDir", "sw_OpenTimelapseFolder", "sw_DownLoadFileAndOpen", "sw_UploadCameraTimelapse", "sw_SetLogLevel", "sw_Log",
+        "sw_SnapLog", "sw_StartMachineFind", "sw_UserLogout", "sw_OpenNetworkDialog"};
     for (const auto& cmd : controls) {
         CAPTURE(cmd);
         CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
@@ -673,4 +699,169 @@ TEST_CASE("sw_FilesThumbnailsBase64 fetches the list then the image, bounded and
     h.resources["/server/files/thumbnails?filename=img.gcode"] = R"({"result":[{"width":300,"height":300,"size":7,"thumbnail_path":"t.png"}]})";
     h.resources["/server/files/gcodes/t.png"] = std::string(SNAPMAKER_THUMBNAIL_MAX_BYTES + 1, 'x');
     CHECK(ask("img.gcode")["state"] == "error");               // oversized image
+}
+
+// ---- review fixes: flood, queued subscribe, machine change, object allow-list, pause, userinfo, command gate ----
+
+TEST_CASE("GetMachineState callers share ONE Moonraker query", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    for (int i = 0; i < 20; ++i)
+        h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState")); // no event_id: same one-shot path
+    CHECK(h.queries.size() == 1);                      // coalesced
+    CHECK(h.sent.empty());
+    h.queries[0].done(true, moonraker_result(59));
+    REQUIRE(h.sent.size() == 21);                      // every caller got the shared result
+    for (std::size_t i = 0; i < h.sent.size(); ++i)
+        CHECK(h.reply(i)["payload"]["data"] == moonraker_result(59));
+    CHECK(h.bridge.sswcp().instance_count() == 0);
+    // The next request starts a fresh query.
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    CHECK(h.queries.size() == 2);
+}
+
+TEST_CASE("a flood of GetMachineState hits the pending cap with a 429 and still one query", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    for (std::size_t i = 0; i < SSWCP_MAX_PENDING + 50; ++i)
+        h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    CHECK(h.queries.size() == 1);
+    CHECK(h.bridge.sswcp().instance_count() == SSWCP_MAX_PENDING);
+    std::size_t too_many = 0;
+    for (std::size_t i = 0; i < h.sent.size(); ++i)
+        if (h.reply(i)["payload"]["code"] == 429) ++too_many;
+    CHECK(too_many == 50);
+}
+
+TEST_CASE("a subscriber added while a poll is in flight still gets an initial state", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "first"));
+    REQUIRE(h.queries.size() == 1);                    // the first subscriber's initial query, still out
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "second"));
+    CHECK(h.queries.size() == 1);                      // shares it
+    h.queries[0].done(true, moonraker_result(59));
+    std::set<std::string> got;
+    for (std::size_t i = 0; i < h.sent.size(); ++i) {
+        json r = h.reply(i);
+        if (r["header"].contains("event_id") && r["payload"]["data"].contains("status")) got.insert(r["header"]["event_id"].get<std::string>());
+    }
+    CHECK(got == std::set<std::string>{"first", "second"});
+}
+
+TEST_CASE("selecting a different machine resets the cached state and drops replies from the old one", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    SnapmakerDeviceInfo a = connected_u1();
+    h.devices = {a};
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "s"));
+    h.bridge.tick();                                   // sees machine A
+    REQUIRE_FALSE(h.queries.empty());
+    h.queries.back().done(true, moonraker_result(59));
+    const auto before = h.sent.size();
+
+    // A request is out for machine A when the selection moves to B.
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    const auto out_idx = h.queries.size() - 1;
+    SnapmakerDeviceInfo b = connected_u1();
+    b.dev_id = "other:7125"; b.name = "B"; b.ip = "other";
+    h.devices = {b};
+    h.bridge.tick();
+    // The waiting GetMachineState got the empty state; the late answer for machine A is dropped.
+    json waiting = h.reply(h.sent.size() - 1);
+    (void) before;
+    bool got_empty = false;
+    for (std::size_t i = before; i < h.sent.size(); ++i)
+        if (h.reply(i)["payload"]["data"] == snapmaker_empty_machine_state()) got_empty = true;
+    CHECK(got_empty);
+    const auto sent_now = h.sent.size();
+    h.queries[out_idx].done(true, moonraker_result(1));
+    CHECK(h.sent.size() == sent_now);
+    // B's first state is pushed even though A's status was identical.
+    h.queries.back().done(true, moonraker_result(59));
+    json last = h.reply(h.sent.size() - 1);
+    CHECK(last["header"] == json{{"event_id", "s"}});
+}
+
+TEST_CASE("only allow-listed Klipper objects are ever queried", "[SSWCP][device_ui]")
+{
+    for (const char* ok : {"extruder", "extruder1", "extruder3", "heater_bed", "print_stats", "fan", "fan_generic cavity_fan", "led cavity_led",
+                           "filament_feed left", "machine_state_manager", "print_task_config", "temperature_sensor chamber"})
+        CHECK(snapmaker_state_object_allowed(ok));
+    for (const char* bad : {"configfile", "bed_mesh", "gcode_macro START_PRINT", "extruderX", "extruder 1", "fan_generic ", "led", "", "save_variables",
+                            "heater_bed\n", "toolhead; rm", "printer", "firmware_retraction", "exclude_object", "output_pin x"})
+        CHECK_FALSE(snapmaker_state_object_allowed(bad));
+    CHECK_FALSE(snapmaker_state_object_allowed(std::string(65, 'a')));
+
+    BridgeHarness h;
+    json p = {{"objects", {{"extruder", nullptr}, {"configfile", nullptr}, {"gcode_macro X", nullptr}}}};
+    h.bridge.on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_GetMachineState"}, {"params", p}}}}.dump());
+    REQUIRE(h.queries.size() == 1);
+    CHECK(h.queries[0].objects == std::vector<std::string>{"extruder"});     // refused names are not queried
+    h.queries[0].done(true, moonraker_result(1));
+    json st = h.reply(0)["payload"]["data"]["status"];
+    CHECK(st["configfile"] == json::object());                              // ... but answered with empty entries
+    CHECK(st["gcode_macro X"] == json::object());
+    CHECK(st.contains("extruder"));
+
+    // Everything refused: no query at all.
+    BridgeHarness g;
+    json q = {{"objects", {{"configfile", nullptr}}}};
+    g.bridge.on_script_message(g.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_GetMachineState"}, {"params", q}}}}.dump());
+    CHECK(g.queries.empty());
+    CHECK(g.reply(0)["payload"]["data"] == json{{"eventtime", 0}, {"status", {{"configfile", json::object()}}}});
+}
+
+TEST_CASE("a hidden page polls and pushes nothing, and resumes when shown", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices = {connected_u1()};
+    h.resources["/machine/system_info"] = kSysInfoBody;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "s"));
+    h.queries.at(0).done(true, moonraker_result(59));
+    h.bridge.set_active(false);
+    const auto q = h.queries.size();
+    const auto f = h.fetched.size();
+    const auto n = h.sent.size();
+    for (int i = 0; i < 30; ++i) h.bridge.tick();
+    CHECK(h.queries.size() == q);                      // no Moonraker polling while hidden
+    CHECK(h.fetched.size() == f);
+    CHECK(h.sent.size() == n);
+    h.bridge.set_active(true);
+    CHECK(h.queries.size() == q + 1);                  // resumed: one state query for the subscribers
+}
+
+TEST_CASE("credentials in an address never reach the page", "[SSWCP][device_ui]")
+{
+    CHECK(strip_url_userinfo("http://u:p@h:7125/x") == "http://h:7125/x");
+    CHECK(strip_url_userinfo("u:p@h") == "h");
+    CHECK(strip_url_userinfo("http://h/a@b") == "http://h/a@b");   // an @ in the path is not userinfo
+    CHECK(strip_url_userinfo("http://h:1") == "http://h:1");
+    SnapmakerDeviceInfo d;
+    d.dev_id = "h:7125"; d.name = "N"; d.ip = "http://user:secret@h:7125/";
+    const std::string dumped = snapmaker_device_to_json(d).dump();
+    CHECK(dumped.find("secret") == std::string::npos);
+    CHECK(snapmaker_device_to_json(d)["ip"] == "h");
+}
+
+TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_commands.txt", "[SSWCP][device_ui]")
+{
+    const boost::filesystem::path file = boost::filesystem::path(PROFILES_DIR).parent_path() / "web" / "snapmaker_bridge_commands.txt";
+    std::ifstream in(file.string());
+    REQUIRE(in.good());
+    std::set<std::string> registered, denied;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        std::string cls, name;
+        if (!(ss >> cls >> name) || cls[0] == '#') continue;
+        REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
+        (cls == "REGISTERED" ? registered : denied).insert(name);
+    }
+    CHECK(registered.size() == 39);
+    BridgeHarness h;
+    for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
+    for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
+    for (const auto& n : registered) CHECK(denied.count(n) == 0);
 }
