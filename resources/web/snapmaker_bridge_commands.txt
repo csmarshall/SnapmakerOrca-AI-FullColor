@@ -1,0 +1,129 @@
+# Every sw_* command name the vendored Flutter bundle (resources/web/flutter_web/main.*.js) contains, classified.
+# Checked by scripts/verify_bridge_commands.cmake (names vs bundle) and test_snapmaker_device_ui.cpp (REGISTERED vs the live
+# registry). One name per line: '<REGISTERED|DENIED> <name>'. A new name in a bundle update fails the gate until it is
+# classified here; moving a name to REGISTERED needs the code AND this line AND a read-only review.
+# DENIED = not registered, the dispatcher answers 501. Names marked RISKY open files/windows/consoles, write logs outside the
+# app log, start discovery, or change printer or app state: they must stay DENIED.
+
+REGISTERED sw_FileGetStatus
+REGISTERED sw_FileLog
+REGISTERED sw_FilesThumbnailsBase64
+REGISTERED sw_GetCache
+REGISTERED sw_GetConnectedMachine
+REGISTERED sw_GetLocalDevices
+REGISTERED sw_GetMachineState
+REGISTERED sw_GetMachineSystemInfo
+REGISTERED sw_GetSoftwareInfo
+REGISTERED sw_GetUserLoginState
+REGISTERED sw_MachineFilesMetadata
+REGISTERED sw_MachineFilesRoots
+REGISTERED sw_MachineHeartbeat
+REGISTERED sw_RemoveCache
+REGISTERED sw_SetCache
+REGISTERED sw_SetSubscribeFilter
+REGISTERED sw_StopMachineStateSubscription
+REGISTERED sw_SubUserUpdatePrivacy
+REGISTERED sw_SubscribeCacheKey
+REGISTERED sw_SubscribeForegroundChange
+REGISTERED sw_SubscribeLocalDevices
+REGISTERED sw_SubscribeMachineState
+REGISTERED sw_SubscribePageStateChange
+REGISTERED sw_SubscribeRecentFiles
+REGISTERED sw_SubscribeUserLoginState
+REGISTERED sw_SwitchTab
+REGISTERED sw_SystemGetDeviceInfo
+REGISTERED sw_UnSubscribeMachineState
+REGISTERED sw_UnsubscribeCacheKeys
+REGISTERED sw_UpdateMachineFilamentInfo
+REGISTERED sw_UploadEvent
+REGISTERED sw_UserLogin
+REGISTERED sw_create_mqtt_client
+REGISTERED sw_exception_query
+REGISTERED sw_mqtt_connect
+REGISTERED sw_mqtt_disconnect
+REGISTERED sw_mqtt_publish
+REGISTERED sw_mqtt_subscribe
+REGISTERED sw_mqtt_unsubscribe
+
+DENIED sw_AddDevice
+DENIED sw_AskUserLogin
+DENIED sw_BedMesh_AbortProbeMesh
+DENIED sw_CameraStartMonitor
+DENIED sw_CameraStopMonitor
+DENIED sw_CancelPullCloudFile
+DENIED sw_Connect
+DENIED sw_ConnectOtherMachine
+DENIED sw_ControlBedTemp
+DENIED sw_ControlExtruderTemp
+DENIED sw_ControlGenericFan
+DENIED sw_ControlLed
+DENIED sw_ControlMainFan
+DENIED sw_ControlPrintSpeed
+DENIED sw_ControlPurifier
+DENIED sw_DeleteCameraTimelapse
+DENIED sw_DeleteDevices
+DENIED sw_DeleteRecentFiles
+DENIED sw_Disconnect
+DENIED sw_DownLoadFile
+DENIED sw_DownLoadFileAndOpen  # RISKY
+DENIED sw_DownloadMachineFile
+DENIED sw_Exit
+DENIED sw_FileView  # RISKY
+DENIED sw_FinishFilamentMapping
+DENIED sw_GetActiveFile
+DENIED sw_GetCameraTimelapseInstance
+DENIED sw_GetDeviceDataStorageSpace
+DENIED sw_GetFileFilamentMapping
+DENIED sw_GetFileListPage
+DENIED sw_GetFileStream  # RISKY
+DENIED sw_GetFilesFromDir  # RISKY
+DENIED sw_GetMachineFilamentMapping
+DENIED sw_GetMachineObjects
+DENIED sw_GetPincode
+DENIED sw_GetPrinterInfo
+DENIED sw_GetRecentProjects
+DENIED sw_GetUserUpdatePrivacy
+DENIED sw_LaunchConsole  # RISKY
+DENIED sw_Log  # RISKY
+DENIED sw_MachineFilesGetDirectory
+DENIED sw_MachineFilesThumbnails
+DENIED sw_MachinePrintCancel
+DENIED sw_MachinePrintPause
+DENIED sw_MachinePrintResume
+DENIED sw_MachinePrintStart
+DENIED sw_NewProject  # RISKY
+DENIED sw_NotifyUploadTimelaspe
+DENIED sw_OpenBrowser
+DENIED sw_OpenNetworkDialog  # RISKY
+DENIED sw_OpenOrcaWebview  # RISKY
+DENIED sw_OpenProject  # RISKY
+DENIED sw_OpenRecentFile  # RISKY
+DENIED sw_OpenTimelapseFolder  # RISKY
+DENIED sw_PrinterDefectDetection
+DENIED sw_PullCloudFile
+DENIED sw_Query
+DENIED sw_RenameDevice
+DENIED sw_SendCommand
+DENIED sw_SendGCodes
+DENIED sw_ServerClientManagerSetUserinfo
+DENIED sw_SetDeviceName
+DENIED sw_SetFilamentMappingComplete
+DENIED sw_SetLogLevel  # RISKY
+DENIED sw_SnapLog  # RISKY
+DENIED sw_StartCloudPrint
+DENIED sw_StartLocalPrint
+DENIED sw_StartMachineFind  # RISKY
+DENIED sw_StopMachineFind
+DENIED sw_SubscribeDownloadState
+DENIED sw_SwitchModel
+DENIED sw_Unsubscribe_Filter
+DENIED sw_UpdateDeviceInfo
+DENIED sw_UploadAsyncTimelapseInstance
+DENIED sw_UploadCameraTimelapse  # RISKY
+DENIED sw_UploadFile
+DENIED sw_UploadFileResult
+DENIED sw_UploadFiletoMachine
+DENIED sw_UserLogout  # RISKY
+DENIED sw_Webview_Unsubscribe
+DENIED sw_mqtt_set_engine
+DENIED sw_test_mqtt_moonraker

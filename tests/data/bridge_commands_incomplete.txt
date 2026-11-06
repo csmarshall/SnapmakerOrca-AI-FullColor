@@ -1,0 +1,2 @@
+REGISTERED sw_FileLog
+DENIED sw_NoSuchCommandInTheBundle
