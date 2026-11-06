@@ -9,6 +9,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -57,6 +60,22 @@ bool snapmaker_is_page_origin(const std::string& url, uint16_t port);
 // form Snapmaker's WebView.cpp sets; the bundle (and Snapmaker's cloud) key off the SM-Slicer token.
 std::string snapmaker_user_agent(const std::string& version, bool dark);
 
+// The host tabs the page can ask for with sw_SwitchTab {target}. Names are Snapmaker's (case-insensitive); the page
+// adapter maps each to the tab of the same meaning. "Auxiliary" and "DebugTool" have no counterpart here.
+enum class SnapmakerTab { Home, Prepare, Preview, Monitor, MultiDevice, Project, Calibration };
+std::optional<SnapmakerTab> snapmaker_tab_for_target(const std::string& target);
+
+// What an empty machine state looks like: Moonraker's printer.objects.query result with nothing in it.
+nlohmann::json snapmaker_empty_machine_state();
+
+// The Klipper objects asked for when the page names none (the set the 2.3.40 Device page reads, contract doc 7.3).
+const std::vector<std::string>& snapmaker_default_state_objects();
+
+// The bridge adds the device-oriented commands to the SSWCP core's 13. All READ-ONLY. Bridge-level emulation (ADR 0005,
+// decision 2 amendment): the page believes it talks to a machine over MQTT; here it is answered from the Moonraker
+// connection the app already has, and the sw_mqtt_* commands are accepted and ignored. Anything that could change printer
+// state (G-code, print control, uploads, deletes, renames, firmware, fan/heater/LED control) is deliberately NOT registered
+// and gets the core's 501; test_snapmaker_device_ui.cpp pins that list.
 class SnapmakerDeviceBridge
 {
 public:
@@ -66,11 +85,18 @@ public:
         std::function<std::vector<SnapmakerDeviceInfo>()>    devices;    // the current agent's machines
         uint16_t                                             port = 0;   // the page server's port
         std::string                                          http_host;  // for sw_GetSoftwareInfo
+        // Read-only fetch of Klipper objects from the selected machine, without blocking. `done(ok, result)` MUST be
+        // called on the UI thread (the adapter hops threads), exactly once. Null = no machine source: state replies are
+        // the empty state.
+        std::function<void(const std::vector<std::string>& objects, std::function<void(bool ok, nlohmann::json result)> done)> query_state;
+        // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
+        std::function<bool(SnapmakerTab)>                    switch_tab;
     };
 
     explicit SnapmakerDeviceBridge(Options options);
     SnapmakerDeviceBridge(const SnapmakerDeviceBridge&)            = delete;
     SnapmakerDeviceBridge& operator=(const SnapmakerDeviceBridge&) = delete;
+    ~SnapmakerDeviceBridge() { *m_alive = false; }
 
     // Returns false (and does nothing) after shutdown() or when `page_url` is not the page's own origin.
     bool on_script_message(const std::string& page_url, const std::string& message);
@@ -82,14 +108,30 @@ public:
     // Drops all subscriptions and ignores everything afterwards.
     void shutdown();
 
+    // Latest sw_UpdateMachineFilamentInfo value per sn (the page's JSON string, untouched). Stored only; nothing consumes it yet.
+    const std::map<std::string, std::string>& filament_info() const { return m_filament_info; }
+
     SSWCP&       sswcp() { return m_sswcp; }
     bool         is_shut_down() const { return m_closed; }
 
 private:
     Options        m_options;
     SSWCP          m_sswcp;
-    nlohmann::json m_last_devices = nlohmann::json::array();
-    bool           m_closed       = false;
+    // Throttled machine-state pushes: every kStatePushEveryTicks ticks (tick() is about 1 s) while someone subscribes.
+    static constexpr int kStatePushEveryTicks = 3;
+    void register_commands();
+    void run_query(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done);
+    void push_state(bool force);
+    std::vector<std::string> objects_from(const nlohmann::json& params) const;
+
+    nlohmann::json                      m_last_devices = nlohmann::json::array();
+    bool                                m_closed       = false;
+    std::shared_ptr<bool>               m_alive        = std::make_shared<bool>(true); // delayed replies check it
+    std::vector<std::string>            m_state_objects; // the subscription's / SetSubscribeFilter's object names
+    nlohmann::json                      m_last_state_status; // last pushed `status`
+    bool                                m_state_in_flight = false;
+    int                                 m_ticks           = 0;
+    std::map<std::string, std::string>  m_filament_info;
 };
 
 }} // namespace Slic3r::GUI

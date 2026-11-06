@@ -8,6 +8,7 @@
 
 #include "I18N.hpp"
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "DeviceManager.hpp"
 #include "DeviceCore/DevManager.h"
 #include "Widgets/WebView.hpp"
@@ -62,6 +63,36 @@ bool SnapmakerDevicePage::start()
             WebView::RunScript(m_browser, wxString::FromUTF8(js));
     }); };
     opt.devices = [this]() { return current_devices(); };
+    // Machine state: the live agent's read-only object query runs on Http's thread; the result is handed to the UI thread
+    // through the app (not this page, which may be gone by then). The bridge ignores results after its shutdown.
+    opt.query_state = [](const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done) {
+        auto* net   = wxGetApp().getAgent();
+        auto  agent = net ? net->get_printer_agent() : nullptr;
+        if (!agent) {
+            done(false, nlohmann::json::object());
+            return;
+        }
+        agent->query_machine_objects_async(objects, [done](bool ok, nlohmann::json result) {
+            wxGetApp().CallAfter([done, ok, result = std::move(result)]() mutable { done(ok, std::move(result)); });
+        });
+    };
+    opt.switch_tab = [](SnapmakerTab tab) {
+        MainFrame* frame = wxGetApp().mainframe;
+        if (!frame)
+            return false;
+        const char* id = TAB_ID_HOME;
+        switch (tab) {
+        case SnapmakerTab::Home: id = TAB_ID_HOME; break;
+        case SnapmakerTab::Prepare: id = TAB_ID_PREPARE; break;
+        case SnapmakerTab::Preview: id = TAB_ID_PREVIEW; break;
+        case SnapmakerTab::Monitor: id = TAB_ID_MONITOR; break; // this page's own tab: the Device view
+        case SnapmakerTab::MultiDevice: id = TAB_ID_MULTI_DEVICE; break;
+        case SnapmakerTab::Project: id = TAB_ID_PROJECT; break;
+        case SnapmakerTab::Calibration: id = TAB_ID_CALIBRATION; break;
+        }
+        wxGetApp().CallAfter([frame, id]() { frame->request_select_tab(id); });
+        return true;
+    };
     m_bridge    = std::make_unique<SnapmakerDeviceBridge>(std::move(opt));
 
     m_browser = WebView::CreateWebView(this, "");
@@ -80,7 +111,8 @@ bool SnapmakerDevicePage::start()
     Layout();
 
     m_timer.Start(1000);
-    m_browser->LoadURL(wxString::FromUTF8(m_server->start_url()));
+    // path=2 is the bundle's Device route (Home is path=1); the Home card's Control button asks for it with sw_SwitchTab.
+    m_browser->LoadURL(wxString::FromUTF8(m_server->start_url("path=2")));
     return true;
 }
 
