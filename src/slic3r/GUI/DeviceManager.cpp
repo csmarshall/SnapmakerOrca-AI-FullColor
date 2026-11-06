@@ -532,7 +532,7 @@ bool MachineObject::HasRecentLanMessage()
 
 bool MachineObject::has_access_right() const
 {
-    return !m_access_revoked && (printer_agent_id == MOONRAKER_PRINTER_AGENT_ID || !get_access_code().empty());
+    return !m_access_revoked && (NetworkAgentFactory::printer_agent_needs_print_host(printer_agent_id) || !get_access_code().empty());
 }
 
 void MachineObject::revoke_access()
@@ -2705,7 +2705,7 @@ int MachineObject::connect()
 
         // Refresh credentials from the matching preset for connections that bypass GUI_App::select_machine().
         const std::string print_host = config.opt_string("print_host");
-        if (printer_agent_id == MOONRAKER_PRINTER_AGENT_ID && config.opt_string("printer_agent") == MOONRAKER_PRINTER_AGENT_ID &&
+        if (NetworkAgentFactory::printer_agent_needs_print_host(printer_agent_id) && config.opt_string("printer_agent") == printer_agent_id &&
             !print_host.empty() && dev_id_from_address(print_host, config.opt_string("printhost_port")) == get_dev_id()) {
             password = config.opt_string("printhost_apikey");
             use_ssl  = boost::istarts_with(print_host, "https://");

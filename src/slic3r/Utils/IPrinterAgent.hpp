@@ -467,6 +467,22 @@ public:
     virtual DeviceUi device_ui() const { return DeviceUi::Native; }
 
     /**
+     * True when this agent reaches its printers by a host (and optional port) that the user types in, held in the printer
+     * preset's print_host / printhost_port / printhost_apikey (the Moonraker family). Such an agent
+     *  - needs the physical-printer (Connection) dialog, since nothing else can supply the host;
+     *  - identifies a machine by MachineObject::dev_id_from_address(host, port), so one host is one machine;
+     *  - treats the API key as optional: a blank key is sent as no key, never as a made-up access code.
+     * Bambu-style agents (access code mandatory, serial-number ids) and agents that discover their own devices return false.
+     */
+    virtual bool needs_print_host() const { return false; }
+
+    /**
+     * The reason the last connect_printer() attempt failed, empty while connecting, once connected, or when nothing
+     * failed. Host and port are not secrets and may appear; keys never do. Thread-safe.
+     */
+    virtual std::string last_connect_error() const { return {}; }
+
+    /**
      * Refresh filament info from the printer synchronously.
      * Should only be called when get_filament_sync_mode() returns FilamentSyncMode::pull.
      * Populates the MachineObject's DevFilaSystem with fetched filament data.
@@ -489,6 +505,30 @@ public:
      */
     virtual std::string get_camera_url() const { return {}; }
 };
+
+// ---- Pure policy, kept free of wx so it can be unit-tested --------------------------------------------------------
+
+// Bambu's LAN protocol requires an access code and the old UI filled in this placeholder when the user left it blank.
+// It is only ever meaningful to Bambu-style agents.
+inline constexpr const char* kBambuLanPlaceholderAccessCode = "88888888";
+
+// The sidebar's Connection (physical printer) button. BBL printers keep their own flow (hidden); with printer agents
+// off it is the classic always-visible button; with agents on it is shown only for an agent that needs a typed-in host.
+inline bool connection_button_visible(bool use_bbl_network, bool use_printer_agents, bool agent_needs_print_host)
+{
+    if (use_bbl_network)
+        return false;
+    return use_printer_agents ? agent_needs_print_host : true;
+}
+
+// The access code / API key to hand to the machine. A host-based agent gets exactly what the user entered (blank means no
+// key); every other agent keeps the Bambu placeholder for a blank code.
+inline std::string effective_access_code(const std::string& entered, bool agent_needs_print_host)
+{
+    if (!entered.empty() || agent_needs_print_host)
+        return entered;
+    return kBambuLanPlaceholderAccessCode;
+}
 
 } // namespace Slic3r
 

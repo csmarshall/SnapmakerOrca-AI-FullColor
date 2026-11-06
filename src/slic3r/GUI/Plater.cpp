@@ -1,6 +1,7 @@
 #include "Plater.hpp"
 #include "../Utils/NetworkAgent.hpp"
 #include "IPrinterAgent.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "CalibUtils.hpp"
 #include "Flashforge.hpp"
 #include "RemoteAPI/RemoteAPIController.hpp"
@@ -3810,18 +3811,25 @@ void Sidebar::update_all_preset_comboboxes()
     const bool use_printer_agents = wxGetApp().app_config->get_bool("use_printer_agents");
     const bool use_native_device_tab = preset_bundle.use_bbl_device_tab() || use_printer_agents;
 
+    // Connection button: by the agent's capability, not by the global agents switch. The agent id comes from the
+    // preset, so the answer is right even before the live agent has been swapped in.
+    const bool agent_needs_print_host = NetworkAgentFactory::printer_agent_needs_print_host(
+        wxGetApp().resolve_printer_agent_id(cfg.opt_string("printer_agent")));
+    const bool show_connection_button = connection_button_visible(preset_bundle.use_bbl_network(), use_printer_agents, agent_needs_print_host);
+
     if (preset_bundle.use_bbl_network()) {
         //only show connection button for not-BBL printer
         //p->btn_connect_printer->Hide();
-        p->m_printer_connect->Hide();
+        p->m_printer_connect->Show(show_connection_button);
         //only show sync-ams button for BBL printer
         p->m_bpButton_ams_filament->Show();
         //update print button default value for bbl or third-party printer
         p_mainframe->set_print_button_to_default(MainFrame::PrintSelectType::ePrintPlate);
     } else {
         //p->btn_connect_printer->Show();
-        // ORCA: hide the physical-printer connection button when printer agents are enabled
-        p->m_printer_connect->Show(!use_printer_agents);
+        // ORCA: with printer agents on, only an agent that needs a typed-in host gets the physical-printer
+        // (Connection) button; see connection_button_visible()
+        p->m_printer_connect->Show(show_connection_button);
 
         // ORCA: show/hide sync-ams button based on filament sync mode
         auto agent = wxGetApp().getAgent();

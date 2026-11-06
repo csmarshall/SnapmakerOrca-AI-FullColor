@@ -31,6 +31,10 @@ public:
     static AgentInfo get_agent_info_static();
     AgentInfo        get_agent_info() override { return get_agent_info_static(); }
 
+    // Moonraker family (Qidi, Creality, Snapmaker inherit): the user types the host, the API key is optional.
+    bool        needs_print_host() const override { return true; }
+    std::string last_connect_error() const override;
+
     // Cloud Agent Dependency
     void set_cloud_agent(std::shared_ptr<ICloudServiceAgent> cloud) override;
 
@@ -249,6 +253,9 @@ private:
     std::atomic<uint64_t>  connect_generation{0};
     std::thread            connect_thread;
     std::recursive_mutex   connect_mutex;
+    mutable std::mutex     connect_error_mutex;
+    std::string            connect_error; // see last_connect_error()
+    void                   set_connect_error(std::string error);
 };
 
 } // namespace Slic3r

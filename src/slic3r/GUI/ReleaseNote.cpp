@@ -5,6 +5,10 @@
 #include "libslic3r/Utils.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "DeviceManager.hpp"
+#include "DeviceCore/DevManager.h"
+#include "slic3r/Utils/IPrinterAgent.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "GUI_Utils.hpp"
 #include "GUI_Preview.hpp"
 #include "MainFrame.hpp"
@@ -1888,6 +1892,13 @@ bool InputIpAddressDialog::isValidEndpoint(std::string endpoint)
     return true;
 }
 
+// Whether the live printer agent takes a typed-in host with an optional API key (IPrinterAgent::needs_print_host()).
+static bool current_agent_needs_print_host()
+{
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    return dev && NetworkAgentFactory::printer_agent_needs_print_host(dev->get_current_printer_agent_id());
+}
+
 void InputIpAddressDialog::on_ok(wxMouseEvent& evt)
 {
     if (!m_need_input_sn) {
@@ -1900,8 +1911,7 @@ void InputIpAddressDialog::on_ok(wxMouseEvent& evt)
     m_trouble_shoot->Hide();
     std::string str_ip = m_input_ip->GetTextCtrl()->GetValue().ToStdString();
     std::string str_access_code = m_input_access_code->GetTextCtrl()->GetValue().ToStdString();
-    if (str_access_code.empty())
-        str_access_code = "88888888";
+    str_access_code = effective_access_code(str_access_code, current_agent_needs_print_host());
     std::string str_name = m_input_printer_name->GetTextCtrl()->GetValue().Strip(wxString::both).ToStdString();
     // Serial number should not contain lower case letters, and bambu_network plugin crashes
     // if user entered the wrong serial number, so we call `Upper()` here.
@@ -1947,8 +1957,8 @@ void InputIpAddressDialog::on_send_retry()
     Fit();
     wxString ip              = m_input_ip->GetTextCtrl()->GetValue();
     wxString str_access_code = m_input_access_code->GetTextCtrl()->GetValue();
-    if (str_access_code.IsEmpty())
-        str_access_code = "88888888";
+    if (str_access_code.IsEmpty() && !current_agent_needs_print_host())
+        str_access_code = kBambuLanPlaceholderAccessCode;
 
     // check support function
     if (!m_obj) return;
@@ -2170,8 +2180,8 @@ void InputIpAddressDialog::on_text(wxCommandEvent &evt)
     auto str_ip              = m_input_ip->GetTextCtrl()->GetValue();
     auto str_access_code     = m_input_access_code->GetTextCtrl()->GetValue();
 
-    if (str_access_code.IsEmpty()) {
-        str_access_code = "88888888";
+    if (str_access_code.IsEmpty() && !current_agent_needs_print_host()) {
+        str_access_code = kBambuLanPlaceholderAccessCode;
     }
 
     auto str_name            = m_input_printer_name->GetTextCtrl()->GetValue().Strip(wxString::both);

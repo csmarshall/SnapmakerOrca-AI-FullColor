@@ -31,6 +31,7 @@ struct PrinterAgentInfo
     std::string         display_name; // e.g., "Orca Native", "Bambu Lab"
     std::string         plugin_identifier;     // Empty for built-ins, otherwise <plugin_key>;<uuid>;<capability_name>
     PrinterAgentFactory factory;      // Function to create the agent
+    bool                needs_print_host = false; // IPrinterAgent::needs_print_host() of this agent, read once at registration
 
     bool is_plugin() const { return !plugin_identifier.empty(); }
     PrinterAgentInfo(const std::string& id_, const std::string& display_name_, PrinterAgentFactory factory_)
@@ -86,7 +87,8 @@ public:
      * @param factory Factory function to create the agent
      * @return true if registration succeeded, false if already registered
      */
-    static bool register_printer_agent(const std::string& id, const std::string& display_name, PrinterAgentFactory factory);
+    static bool register_printer_agent(const std::string& id, const std::string& display_name, PrinterAgentFactory factory,
+                                       bool needs_print_host = false);
 
     /**
      * Check if an agent registry/config key is registered
@@ -97,6 +99,12 @@ public:
      * Get info about a registered agent by registry/config key
      */
     static const PrinterAgentInfo* get_printer_agent_info(const std::string& id);
+
+    /**
+     * IPrinterAgent::needs_print_host() for a registry key, usable where only the id is at hand (a saved machine, a preset).
+     * The built-in "moonraker" id counts even before registration, so headless code behaves the same.
+     */
+    static bool printer_agent_needs_print_host(const std::string& id);
 
     /**
      * Return the full plugin reference for a plugin-backed printer agent ID, or empty for built-ins.

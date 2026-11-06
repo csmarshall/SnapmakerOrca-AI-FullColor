@@ -199,6 +199,18 @@ int MoonrakerPrinterAgent::send_message_to_printer(std::string dev_id, std::stri
     return handle_request(dev_id, json_str);
 }
 
+std::string MoonrakerPrinterAgent::last_connect_error() const
+{
+    std::lock_guard<std::mutex> lock(connect_error_mutex);
+    return connect_error;
+}
+
+void MoonrakerPrinterAgent::set_connect_error(std::string error)
+{
+    std::lock_guard<std::mutex> lock(connect_error_mutex);
+    connect_error = std::move(error);
+}
+
 int MoonrakerPrinterAgent::connect_printer(const PrinterConnectionParams& params)
 {
     if (params.dev_id.empty() || params.host.empty()) {
@@ -206,6 +218,7 @@ int MoonrakerPrinterAgent::connect_printer(const PrinterConnectionParams& params
         return BAMBU_NETWORK_ERR_INVALID_HANDLE;
     }
 
+    set_connect_error({});
     std::string base_url;
     std::string api_key;
     uint64_t gen;
@@ -2296,7 +2309,9 @@ void MoonrakerPrinterAgent::perform_connection_async(const std::string& dev_id, 
         MoonrakerDeviceInfo fetched_info;
         if (!fetch_device_info(base_url, api_key, fetched_info, error_msg, is_stale)) {
             if (!is_stale()) {
-                BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: Failed to fetch server info: " << error_msg;
+                // base_url is scheme://host[:port] only; the API key is never part of it.
+                BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: could not connect to " << base_url << ": " << error_msg;
+                set_connect_error("Could not connect to " + base_url + (error_msg.empty() ? std::string() : ": " + error_msg));
             }
             // Orca todo: revist here, for now don't send error, this is set current MachineObject to null
             // dispatch_local_connect(ConnectStatusFailed, dev_id, "server_info_failed");
@@ -2354,6 +2369,7 @@ void MoonrakerPrinterAgent::perform_connection_async(const std::string& dev_id, 
         // Under connect_mutex, so a superseded connection never reports itself connected
         std::lock_guard<std::recursive_mutex> lock(connect_mutex);
         if (!is_stale()) {
+            set_connect_error({});
             dispatch_local_connect(ConnectStatusOk, dev_id, "0");
             dispatch_printer_connected(dev_id);
             BOOST_LOG_TRIVIAL(info) << "MoonrakerPrinterAgent: connect_printer completed - dev_id=" << dev_id;
@@ -2361,6 +2377,10 @@ void MoonrakerPrinterAgent::perform_connection_async(const std::string& dev_id, 
     } else if (result != BAMBU_NETWORK_ERR_CANCELED) {
         // Orca todo: revist here, for now don't send error, this is set current MachineObject to null
         // dispatch_local_connect(ConnectStatusFailed, dev_id, error_msg);
+        // The failure is reported through last_connect_error() instead (set where it happened), which the
+        // Snapmaker Device page shows without deselecting the machine.
+        if (last_connect_error().empty() && !is_stale())
+            set_connect_error("Could not connect to " + base_url + (error_msg.empty() ? std::string() : ": " + error_msg));
     }
 }
 

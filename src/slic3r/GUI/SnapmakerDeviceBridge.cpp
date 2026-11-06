@@ -11,7 +11,7 @@ nlohmann::json snapmaker_devices_to_json(const std::vector<SnapmakerDeviceInfo>&
 {
     nlohmann::json out = nlohmann::json::array();
     for (const auto& d : devices)
-        out.push_back({{"dev_id", d.dev_id}, {"name", d.name}, {"ip", d.ip}, {"model", d.model}, {"online", d.online}});
+        out.push_back({{"dev_id", d.dev_id}, {"name", d.name}, {"ip", d.ip}, {"model", d.model}, {"online", d.online}, {"error", d.error}});
     return out;
 }
 

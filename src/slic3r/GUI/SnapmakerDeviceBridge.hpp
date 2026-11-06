@@ -27,6 +27,7 @@ struct SnapmakerDeviceInfo
     std::string ip;
     std::string model;
     bool        online = false;
+    std::string error;   // why the last connect attempt failed (IPrinterAgent::last_connect_error()); empty when fine
 };
 
 nlohmann::json snapmaker_devices_to_json(const std::vector<SnapmakerDeviceInfo>& devices);
