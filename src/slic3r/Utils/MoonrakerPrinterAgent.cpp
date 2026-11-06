@@ -205,6 +205,58 @@ std::string MoonrakerPrinterAgent::last_connect_error() const
     return connect_error;
 }
 
+void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::string>& object_names,
+                                                        std::function<void(bool ok, nlohmann::json result)> done)
+{
+    std::string base_url, api_key;
+    {
+        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+        base_url = device_info.base_url;
+        api_key  = device_info.api_key;
+    }
+    if (base_url.empty() || object_names.empty()) {
+        if (done) done(false, nlohmann::json::object());
+        return;
+    }
+    // Names are percent-encoded ("fan_generic cavity_fan" has a space); a bare name asks Moonraker for every field.
+    std::string query;
+    for (const std::string& name : object_names) {
+        std::string enc;
+        for (unsigned char c : name) {
+            if (std::isalnum(c) || c == '_')
+                enc += static_cast<char>(c);
+            else if (c == ' ')
+                enc += "%20";
+            // anything else cannot be part of a Klipper object name and is dropped
+        }
+        if (!enc.empty())
+            query += (query.empty() ? "" : "&") + enc;
+    }
+    if (query.empty()) {
+        if (done) done(false, nlohmann::json::object());
+        return;
+    }
+    auto http = Http::get(join_url(base_url, "/printer/objects/query?" + query));
+    if (!api_key.empty())
+        http.header("X-Api-Key", api_key);
+    // Read-only GET with short timeouts; completes on Http's own thread, never the caller's.
+    http.timeout_connect(3)
+        .timeout_max(5)
+        .on_complete([done](std::string body, unsigned status) {
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+            if (status == 200 && j.is_object() && j.contains("result") && j["result"].is_object()) {
+                if (done) done(true, j["result"]);
+            } else if (done) {
+                done(false, nlohmann::json::object());
+            }
+        })
+        .on_error([done](std::string, std::string err, unsigned status) {
+            BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: machine object query failed: " << err << " (HTTP " << status << ")";
+            if (done) done(false, nlohmann::json::object());
+        })
+        .perform();
+}
+
 void MoonrakerPrinterAgent::set_connect_error(std::string error)
 {
     std::lock_guard<std::mutex> lock(connect_error_mutex);

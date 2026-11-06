@@ -483,6 +483,19 @@ public:
     virtual std::string last_connect_error() const { return {}; }
 
     /**
+     * Read-only: fetch the selected machine's Klipper objects (the Moonraker printer.objects.query "result" object,
+     * {eventtime, status:{...}}) without blocking the caller. `done` is called exactly once, from ANY thread, with
+     * ok=false and an empty object when there is no connected machine, the request fails or times out. Agents that have
+     * no such notion keep the default (reports failure at once).
+     */
+    virtual void query_machine_objects_async(const std::vector<std::string>& object_names,
+                                             std::function<void(bool ok, nlohmann::json result)> done)
+    {
+        (void) object_names;
+        if (done) done(false, nlohmann::json::object());
+    }
+
+    /**
      * Refresh filament info from the printer synchronously.
      * Should only be called when get_filament_sync_mode() returns FilamentSyncMode::pull.
      * Populates the MachineObject's DevFilaSystem with fetched filament data.

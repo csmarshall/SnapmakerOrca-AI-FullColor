@@ -204,6 +204,8 @@ void SSWCP_Instance::on_timeout()
 
 void SSWCP_Instance::reply_ok(json data)
 {
+    if (m_done) // already answered (e.g. timed out before a delayed result arrived)
+        return;
     if (m_subscription && !m_event_id.empty()) {
         // The acknowledgement already went out in process(); the instance now waits for pushes.
         subscribe();
@@ -419,6 +421,31 @@ std::size_t SSWCP::push(const std::string& cmd, const json& data, int code, cons
     for (const auto& id : targets)
         m_core->emit(json{{"event_id", id}}, code, message, data);
     return targets.size();
+}
+
+std::size_t SSWCP::subscriber_count(const std::string& cmd) const
+{
+    std::lock_guard<std::mutex> lock(m_core->mutex);
+    std::size_t                 n = 0;
+    for (const auto& kv : m_core->subscribe_map)
+        if (kv.second && kv.second->cmd() == cmd)
+            ++n;
+    return n;
+}
+
+std::size_t SSWCP::drop_subscriptions(const std::string& cmd)
+{
+    std::vector<std::shared_ptr<SSWCP_Instance>> dropped; // destroy outside the lock
+    std::lock_guard<std::mutex>                  lock(m_core->mutex);
+    for (auto it = m_core->subscribe_map.begin(); it != m_core->subscribe_map.end();) {
+        if (it->second && it->second->cmd() == cmd) {
+            m_core->list.erase(it->second.get());
+            dropped.push_back(std::move(it->second));
+            it = m_core->subscribe_map.erase(it);
+        } else
+            ++it;
+    }
+    return dropped.size();
 }
 
 void SSWCP::drop_all_subscriptions()

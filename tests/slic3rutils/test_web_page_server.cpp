@@ -169,6 +169,18 @@ TEST_CASE("WebPageServer answers the token-bearing navigation with a redirect th
     CHECK(r2.raw.find(s.token()) == std::string::npos);
 }
 
+TEST_CASE("WebPageServer start_url carries the Device route through the token redirect", "[WebPageServer]")
+{
+    WebPageServer s(bundle_root());
+    REQUIRE(s.start());
+    CHECK(s.start_url("path=2") == s.start_url() + "&path=2");
+    const std::string url = s.start_url("path=2");
+    const std::string target = url.substr(url.find(P));
+    const Reply r = send(s, Req(target).anon());
+    CHECK(r.status == 302);
+    CHECK(r.header("location") == P + "index.html?path=2"); // token gone, route kept
+}
+
 TEST_CASE("WebPageServer keeps other query parameters when it strips the token", "[WebPageServer]")
 {
     WebPageServer s(bundle_root());
