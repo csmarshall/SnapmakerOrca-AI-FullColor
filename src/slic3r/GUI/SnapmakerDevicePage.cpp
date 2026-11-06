@@ -169,8 +169,8 @@ void SnapmakerDevicePage::on_script_message(wxWebViewEvent& evt)
     // the frame that posted the message, so a message from a sub-frame is judged by the page that contains it. That is
     // acceptable only because the page cannot navigate away (on_navigating vetoes foreign origins) and the bundle is
     // vendored with a checked hash; sub-frames inside it are not otherwise restricted.
-    // TODO(#75): once the CSP being tested in docs/snapmaker-page-contract.md 7g ships, add `frame-src 'none'` to it so the
-    // page cannot host a frame at all; until then do NOT rely on the origin check to separate frames.
+    // The page server's Content-Security-Policy now carries frame-src 'none' (resources/web/flutter_web.csp), so the bundle cannot host a
+    // sub-frame at all; the origin check is still top-level only and is not what separates frames.
     wxString url = evt.GetURL();
     if (url.empty())
         url = m_browser->GetCurrentURL();
