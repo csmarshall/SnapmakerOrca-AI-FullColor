@@ -5,6 +5,8 @@
 # DENIED = not registered, the dispatcher answers 501. Names marked RISKY open files/windows/consoles, write logs outside the
 # app log, start discovery, or change printer or app state: they must stay DENIED.
 
+REGISTERED sw_CameraStartMonitor  # camera.start_monitor on the machine (whitelisted params); the page then loads the snapshot itself
+REGISTERED sw_CameraStopMonitor
 REGISTERED sw_FileGetStatus
 REGISTERED sw_FileLog
 REGISTERED sw_FilesThumbnailsBase64
@@ -48,8 +50,6 @@ REGISTERED sw_mqtt_unsubscribe
 DENIED sw_AddDevice
 DENIED sw_AskUserLogin
 DENIED sw_BedMesh_AbortProbeMesh
-DENIED sw_CameraStartMonitor
-DENIED sw_CameraStopMonitor
 DENIED sw_CancelPullCloudFile
 DENIED sw_Connect
 DENIED sw_ConnectOtherMachine

@@ -51,6 +51,9 @@ nlohmann::json snapmaker_devices_to_json(const std::vector<SnapmakerDeviceInfo>&
 nlohmann::json snapmaker_device_to_json(const SnapmakerDeviceInfo& device);
 // The host part of an address as typed or stored: "http://u1.local:7125/x" -> "u1.local".
 std::string snapmaker_bare_host(const std::string& address);
+// "http://<bare host>" of a machine address, the one extra origin the page may load the camera snapshot from; "" if the host is
+// not a plain DNS name, IPv4 address or bracketed IPv6 literal (no credentials, port, path or anything CSP-significant).
+std::string snapmaker_camera_origin(const std::string& address);
 
 // True only for http://127.0.0.1:<port>/... (the WebPageServer's own origin). Anything else - another host,
 // another port, https, userinfo tricks like http://127.0.0.1:1@evil/, localhost, empty - is false.
@@ -119,6 +122,9 @@ public:
         // Read-only GET of one allow-listed machine resource (IPrinterAgent::read_machine_resource_async); `done(ok, body)`
         // on the UI thread, exactly once. Null = no machine source.
         std::function<void(const std::string& path_and_query, std::size_t max_bytes, std::function<void(bool ok, std::string body)> done)> fetch_resource;
+        // Camera preview: IPrinterAgent::camera_monitor_async (start or stop the machine's monitor stream) with the page's
+        // whitelisted params; `done(ok, result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
+        std::function<void(bool start, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> camera_monitor;
         // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
         std::function<bool(SnapmakerTab)>                    switch_tab;
     };

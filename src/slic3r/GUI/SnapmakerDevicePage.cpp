@@ -64,6 +64,15 @@ bool SnapmakerDevicePage::start()
     m_started = true; // one attempt per page; a failure shows a message instead of retrying every Show()
 
     m_server = std::make_unique<WebPageServer>(boost::filesystem::path(resources_dir()) / "web" / "flutter_web");
+    // The camera snapshot is loaded by the page straight from the selected machine, so its origin (and only that one) is added to
+    // the policy for this page load. It is fixed here: selecting another machine later needs the page reloaded.
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (const MachineObject* selected = dev->get_selected_machine()) {
+            const std::string address = selected->get_dev_ip().empty() ? selected->get_dev_id() : selected->get_dev_ip();
+            const std::string origin  = snapmaker_camera_origin(address);
+            if (!origin.empty() && m_server->set_extra_origin(origin))
+                BOOST_LOG_TRIVIAL(info) << "SnapmakerDevicePage: camera origin " << origin;
+        }
     if (!m_server->start()) {
         BOOST_LOG_TRIVIAL(error) << "SnapmakerDevicePage: the page server did not start";
         m_server.reset();
@@ -105,6 +114,17 @@ bool SnapmakerDevicePage::start()
         }
         agent->read_machine_resource_async(path, max_bytes, [done](bool ok, std::string body) {
             wxGetApp().CallAfter([done, ok, body = std::move(body)]() mutable { done(ok, std::move(body)); });
+        });
+    };
+    opt.camera_monitor = [](bool start, const nlohmann::json& params, std::function<void(bool, nlohmann::json)> done) {
+        auto* net   = wxGetApp().getAgent();
+        auto  agent = net ? net->get_printer_agent() : nullptr;
+        if (!agent) {
+            done(false, nlohmann::json::object());
+            return;
+        }
+        agent->camera_monitor_async(start, params, [done](bool ok, nlohmann::json result) {
+            wxGetApp().CallAfter([done, ok, result = std::move(result)]() mutable { done(ok, std::move(result)); });
         });
     };
     opt.switch_tab = [](SnapmakerTab tab) {

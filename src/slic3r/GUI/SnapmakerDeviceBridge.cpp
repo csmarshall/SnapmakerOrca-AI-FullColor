@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <regex>
 
 #include <boost/log/trivial.hpp>
 
@@ -25,6 +26,13 @@ std::string snapmaker_bare_host(const std::string& address)
     }
     // zero colons: a plain host; two or more without brackets: a bare IPv6 literal, left whole
     return h;
+}
+
+std::string snapmaker_camera_origin(const std::string& address)
+{
+    static const std::regex ok(R"(^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])$)");
+    const std::string host = snapmaker_bare_host(address);
+    return std::regex_match(host, ok) ? "http://" + host : std::string();
 }
 
 nlohmann::json snapmaker_device_to_json(const SnapmakerDeviceInfo& d)
@@ -565,6 +573,27 @@ void SnapmakerDeviceBridge::register_commands()
             });
         },
         false);
+
+    // --- camera preview: the page asks the machine to start/stop its monitor stream, then loads the snapshot itself from the
+    // machine (the page server's CSP carries that one origin). Timelapse commands are not part of this and stay denied. ---
+    for (const bool start : {true, false}) {
+        m_sswcp.register_command(
+            start ? "sw_CameraStartMonitor" : "sw_CameraStopMonitor",
+            [this, start](SSWCP_Instance& i) {
+                if (!camera_monitor_params_valid(i.params())) { i.handle_general_fail(SSWCPCode::BadRequest, "invalid camera parameters"); return; }
+                if (!m_options.camera_monitor) { i.handle_general_fail(SSWCPCode::Failure, "no machine connected"); return; }
+                auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+                auto alive = m_alive;
+                m_options.camera_monitor(start, i.params(), [weak, alive](bool ok, nlohmann::json result) {
+                    if (!*alive) return;
+                    if (auto inst = weak.lock()) {
+                        if (ok) inst->reply_ok(std::move(result));
+                        else    inst->handle_general_fail(SSWCPCode::Failure, "camera request failed");
+                    }
+                });
+            },
+            false);
+    }
 
     // --- file metadata: the flat server.files.metadata result, read-only and fail-soft ---
     m_sswcp.register_command(

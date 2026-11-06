@@ -70,6 +70,14 @@ struct BridgeHarness
     // With hold_fetch set a fetch is not answered until the test calls release_fetches(); the real source is off-thread.
     bool                              hold_fetch = false;
     std::vector<std::function<void()>> held;
+    // Camera monitor source: every request is recorded; it answers at once with camera_ok/camera_result, or waits in
+    // camera_pending (the real source is off-thread).
+    struct CameraCall { bool start; json params; };
+    std::vector<CameraCall>           camera_calls;
+    bool                              camera_ok = true;
+    bool                              hold_camera = false;
+    json                              camera_result = {{"state", "success"}, {"url", "/files/camera/monitor.jpg"}, {"pw", "ab"}, {"salt", "cd"}, {"iterations", 1204}};
+    std::vector<std::function<void(bool, json)>> camera_pending;
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -92,6 +100,10 @@ struct BridgeHarness
                   };
                   if (hold_fetch) held.push_back(std::move(answer)); else answer();
               };
+              o.camera_monitor = [this](bool start, const json& params, std::function<void(bool, json)> done) {
+                      camera_calls.push_back({start, params});
+                      if (hold_camera) camera_pending.push_back(std::move(done)); else done(camera_ok, camera_ok ? camera_result : json::object());
+                  };
               return o;
           }())
     {}
@@ -496,7 +508,7 @@ TEST_CASE("the read-only guarantee: no control action is registered, each gets a
         "sw_ControlBedTemp", "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
         "sw_SendCommand", "sw_Query", "sw_AddDevice", "sw_SwitchModel", "sw_UpdateDeviceInfo", "sw_mqtt_set_engine",
         "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping", "sw_DownloadMachineFile", "sw_DownLoadFile",
-        "sw_CameraStartMonitor", "sw_CameraStopMonitor", "sw_PullCloudFile", "sw_ServerClientManagerSetUserinfo",
+        "sw_PullCloudFile", "sw_ServerClientManagerSetUserinfo",
         "sw_Connect", "sw_Disconnect", "sw_ConnectOtherMachine", "sw_GetPincode", "sw_OpenBrowser", "sw_Exit",
         // opens files, windows, consoles or logs outside the app log, or starts discovery (pinned in snapmaker_bridge_commands.txt)
         "sw_OpenProject", "sw_OpenRecentFile", "sw_NewProject", "sw_LaunchConsole", "sw_OpenOrcaWebview", "sw_GetFileStream", "sw_FileView",
@@ -527,10 +539,12 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_UnSubscribeMachineState", "sw_StopMachineStateSubscription", "sw_create_mqtt_client", "sw_mqtt_connect", "sw_mqtt_disconnect",
         "sw_mqtt_subscribe", "sw_mqtt_unsubscribe", "sw_mqtt_publish", "sw_UpdateMachineFilamentInfo", "sw_GetMachineSystemInfo",
         "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query", "sw_MachineFilesRoots", "sw_MachineFilesMetadata",
-        "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys", "sw_FilesThumbnailsBase64", "sw_MachineHeartbeat"};
+        "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys", "sw_FilesThumbnailsBase64", "sw_MachineHeartbeat",
+        // camera preview (start/stop only; the timelapse commands stay denied)
+        "sw_CameraStartMonitor", "sw_CameraStopMonitor"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 39);
+    CHECK(expected.size() == 41);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -913,9 +927,156 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 39);
+    CHECK(registered.size() == 41);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : registered) CHECK(denied.count(n) == 0);
+}
+
+// ---- camera preview (#76): sw_CameraStartMonitor / sw_CameraStopMonitor -> Moonraker camera.start_monitor / stop_monitor ----
+
+namespace {
+std::string camera_msg(const std::string& cmd, const json& params)
+{
+    return json{{"header", {{"id", 1}}}, {"payload", {{"cmd", cmd}, {"params", params}}}}.dump();
+}
+const json kCameraParams = {{"domain", "lan"}, {"interval", 0}, {"expect_pw", true}, {"clientid", "orca-3d-printer"}};
+} // namespace
+
+TEST_CASE("camera params whitelist: only domain lan, interval 0..10, bool expect_pw, a plain clientid", "[SSWCP][device_ui][camera]")
+{
+    CHECK(camera_monitor_params_valid(kCameraParams));
+    CHECK(camera_monitor_params_valid(json{{"domain", "lan"}, {"clientid", "orca-U1.x_2"}}));        // interval / expect_pw are optional
+    CHECK(camera_monitor_params_valid(json{{"domain", "lan"}, {"interval", 10}, {"clientid", "a"}}));
+    auto with = [](const char* key, json v) { json p = kCameraParams; p[key] = std::move(v); return p; };
+    auto without = [](const char* key) { json p = kCameraParams; p.erase(key); return p; };
+    CHECK_FALSE(camera_monitor_params_valid(json::array()));
+    CHECK_FALSE(camera_monitor_params_valid(json()));
+    CHECK_FALSE(camera_monitor_params_valid(with("domain", "wan")));
+    CHECK_FALSE(camera_monitor_params_valid(with("domain", 1)));
+    CHECK_FALSE(camera_monitor_params_valid(without("domain")));
+    CHECK_FALSE(camera_monitor_params_valid(without("clientid")));
+    CHECK_FALSE(camera_monitor_params_valid(with("interval", 11)));
+    CHECK_FALSE(camera_monitor_params_valid(with("interval", -1)));
+    CHECK_FALSE(camera_monitor_params_valid(with("interval", 1.5)));
+    CHECK_FALSE(camera_monitor_params_valid(with("interval", "0")));
+    CHECK_FALSE(camera_monitor_params_valid(with("expect_pw", 1)));
+    CHECK_FALSE(camera_monitor_params_valid(with("extra", "x")));                                   // unknown key: refused, not forwarded
+    for (const char* bad : {"", "a b", "a/b", "a\"b", "a;b", "a\nb", "é", "x:y"})
+        CHECK_FALSE(camera_monitor_params_valid(with("clientid", bad)));
+    CHECK_FALSE(camera_monitor_params_valid(with("clientid", std::string(65, 'a'))));
+    CHECK(camera_monitor_params_valid(with("clientid", std::string(64, 'a'))));
+    CHECK_FALSE(camera_monitor_params_valid(with("clientid", 5)));
+}
+
+TEST_CASE("camera bridge commands are registered, relay start/stop and unwrap the printer's result", "[SSWCP][device_ui][camera]")
+{
+    BridgeHarness h;
+    REQUIRE(h.bridge.sswcp().is_registered("sw_CameraStartMonitor"));
+    REQUIRE(h.bridge.sswcp().is_registered("sw_CameraStopMonitor"));
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+    REQUIRE(h.camera_calls.size() == 1);
+    CHECK(h.camera_calls[0].start);
+    CHECK(h.camera_calls[0].params == kCameraParams);
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] == 200);
+    CHECK(h.reply(0)["payload"]["data"] == h.camera_result);                                       // the printer's result, unwrapped
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStopMonitor", {{"domain", "lan"}, {"clientid", "orca-3d-printer"}}));
+    REQUIRE(h.camera_calls.size() == 2);
+    CHECK_FALSE(h.camera_calls[1].start);
+    REQUIRE(h.sent.size() == 2);
+    CHECK(h.reply(1)["payload"]["code"] == 200);
+}
+
+TEST_CASE("camera bridge commands refuse bad params without asking the machine, and fail when it fails", "[SSWCP][device_ui][camera]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", {{"domain", "wan"}, {"clientid", "x"}}));
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", {{"domain", "lan"}, {"clientid", "x y"}}));
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStopMonitor", json::array()));
+    CHECK(h.camera_calls.empty());
+    REQUIRE(h.sent.size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) CHECK(h.reply(i)["payload"]["code"] != 200);
+
+    h.camera_ok = false; // the machine says no / times out
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+    REQUIRE(h.sent.size() == 4);
+    CHECK(h.reply(3)["payload"]["code"] != 200);
+
+    std::vector<std::string> sent; // no machine source at all
+    SnapmakerDeviceBridge::Options o;
+    o.port = 5000; o.http_host = "http://127.0.0.1:5000";
+    o.run_script = [&sent](const std::string& js) { sent.push_back(js); };
+    SnapmakerDeviceBridge none(std::move(o));
+    none.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0].find("\"code\":-1") != std::string::npos);
+}
+
+TEST_CASE("a camera reply that arrives after shutdown is dropped; the timelapse commands stay denied", "[SSWCP][device_ui][camera]")
+{
+    BridgeHarness h;
+    h.hold_camera = true;
+    h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+    REQUIRE(h.camera_pending.size() == 1);
+    CHECK(h.sent.empty());
+    h.bridge.shutdown();
+    h.camera_pending[0](true, h.camera_result);
+    CHECK(h.sent.empty());
+    for (const char* cmd : {"sw_DeleteCameraTimelapse", "sw_GetCameraTimelapseInstance", "sw_UploadCameraTimelapse"})
+        CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
+}
+
+TEST_CASE("Moonraker camera RPC: only camera.start_monitor / camera.stop_monitor with whitelisted params are ever built", "[SSWCP][device_ui][camera]")
+{
+    const json start = json::parse(MoonrakerPrinterAgent::camera_monitor_request(true, kCameraParams, 7));
+    CHECK(start == json{{"jsonrpc", "2.0"}, {"method", "camera.start_monitor"}, {"params", kCameraParams}, {"id", 7}});
+    const json stop_params = {{"domain", "lan"}, {"clientid", "orca-3d-printer"}};
+    const json stop = json::parse(MoonrakerPrinterAgent::camera_monitor_request(false, stop_params, 8));
+    CHECK(stop == json{{"jsonrpc", "2.0"}, {"method", "camera.stop_monitor"}, {"params", stop_params}, {"id", 8}});
+    // Refused: nothing is built, so nothing can be sent.
+    CHECK(MoonrakerPrinterAgent::camera_monitor_request(true, json{{"domain", "wan"}, {"clientid", "x"}}, 1).empty());
+    CHECK(MoonrakerPrinterAgent::camera_monitor_request(true, json{{"domain", "lan"}, {"clientid", "x"}, {"method", "printer.emergency_stop"}}, 1).empty());
+    CHECK(MoonrakerPrinterAgent::camera_monitor_request(false, json::array(), 1).empty());
+
+    // A refused request completes at once with ok=false (no machine is needed to refuse).
+    int calls = 0; bool ok = true;
+    MoonrakerPrinterAgent("").camera_monitor_async(true, json{{"domain", "lan"}, {"clientid", "bad id"}}, [&](bool o, json) { ++calls; ok = o; });
+    CHECK(calls == 1);
+    CHECK_FALSE(ok);
+    calls = 0;
+    MoonrakerPrinterAgent("").camera_monitor_async(true, kCameraParams, [&](bool o, json) { ++calls; ok = o; }); // valid, but no machine connected
+    CHECK(calls == 1);
+    CHECK_FALSE(ok);
+}
+
+TEST_CASE("Moonraker camera RPC reply parsing: matches the id, unwraps result, ignores notifications, rejects errors", "[SSWCP][device_ui][camera]")
+{
+    using R = MoonrakerPrinterAgent::CameraReply;
+    json result;
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","result":{"iterations":1204,"pw":"ab","salt":"cd","state":"success","url":"/files/camera/monitor.jpg"},"id":7})", 7, result) == R::Ok);
+    CHECK(result["url"] == "/files/camera/monitor.jpg");
+    CHECK(result["iterations"] == 1204);
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","result":{"state":"success"},"id":8})", 8, result) == R::Ok);
+    CHECK(result == json{{"state", "success"}});
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","method":"notify_status_update","params":[{}]})", 7, result) == R::Ignore);
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","result":{"state":"success"},"id":3})", 7, result) == R::Ignore); // another request's reply
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply("not json", 7, result) == R::Ignore);
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","error":{"code":-32601,"message":"no"},"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","result":"ok","id":7})", 7, result) == R::Fail);            // result must be an object
+    CHECK(MoonrakerPrinterAgent::parse_camera_monitor_reply(R"({"jsonrpc":"2.0","result":{"state":"failed"},"id":7})", 7, result) == R::Fail); // state must be success
+}
+
+TEST_CASE("snapmaker_camera_origin: http://<bare host> of the machine, or empty", "[SSWCP][device_ui][camera]")
+{
+    CHECK(snapmaker_camera_origin("3d-printer") == "http://3d-printer");
+    CHECK(snapmaker_camera_origin("192.168.1.5:7125") == "http://192.168.1.5");                  // the port is dropped: the snapshot is served on 80
+    CHECK(snapmaker_camera_origin("https://u1.local/x") == "http://u1.local");
+    CHECK(snapmaker_camera_origin("http://user:pw@u1.local:7125/x") == "http://u1.local");       // no credentials
+    CHECK(snapmaker_camera_origin("[fe80::1]:7125") == "http://[fe80::1]");
+    for (const char* bad : {"", "a b", "a;b", "evil.com; script-src *", "h'", "*", "a\r\nb"}) {
+        CAPTURE(bad);
+        CHECK(snapmaker_camera_origin(bad).empty());
+    }
 }

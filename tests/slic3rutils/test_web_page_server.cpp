@@ -661,7 +661,12 @@ TEST_CASE("the shipped policy is strict", "[WebPageServer][CSP]")
     CHECK(p.find("'unsafe-inline'") == std::string::npos);
     CHECK(p.find("'unsafe-eval'") == std::string::npos);
     CHECK(p.find("data:") == std::string::npos);
-    CHECK(p.find("blob:") == std::string::npos);
+    {   // blob: images are allowed since #75 (the engine's own images), and only there
+        const auto img = p.find("img-src "), blob = p.find("blob:");
+        REQUIRE(img != std::string::npos);
+        CHECK((blob > img && blob < p.find(';', img)));
+        CHECK(p.find("blob:", blob + 1) == std::string::npos);
+    }
     CHECK(p.find(" * ") == std::string::npos);
     for (const char* d : {"default-src 'none'", "frame-src 'none'", "object-src 'none'", "base-uri 'self'", "form-action 'none'"}) {
         CAPTURE(d);
@@ -715,7 +720,7 @@ TEST_CASE("csp_with_extra_origin adds a printer origin to connect, img and media
     REQUIRE_FALSE(out.empty());
     CHECK(out.find("connect-src 'self'") != std::string::npos);
     CHECK(out.find("http://192.168.1.5") != std::string::npos);
-    CHECK(out.find("img-src 'self' https://public.resource.snapmaker.com http://192.168.1.5") != std::string::npos);
+    CHECK(out.find("img-src 'self' blob: https://public.resource.snapmaker.com http://192.168.1.5") != std::string::npos);
     CHECK(out.find("media-src 'self' http://192.168.1.5") != std::string::npos);
     CHECK(out.find("default-src 'none'") == 0);                                   // the rest is untouched
     CHECK(out.find("frame-src 'none'") != std::string::npos);
@@ -731,4 +736,73 @@ TEST_CASE("csp_with_extra_origin adds a printer origin to connect, img and media
                             "javascript:alert(1)", "data:", "http://h'", "ftp://h"})
         CHECK(csp_with_extra_origin(base, bad).empty());
     CHECK(csp_with_extra_origin("", "http://h").empty());
+}
+
+TEST_CASE("the page server serves one extra printer origin, only when valid, and only per page load (#76)", "[WebPageServer][CSP]")
+{
+    const std::string base = read_policy_file();
+    fs::path csp = fs::temp_directory_path() / fs::unique_path("wps-extra-%%%%-%%%%.csp");
+    { std::ofstream(csp.string(), std::ios::binary) << base; }
+
+    // No extra origin: the static policy, byte for byte, still names no printer.
+    {
+        WebPageServer s(bundle_root(), csp);
+        REQUIRE(s.start());
+        CHECK(s.content_security_policy() == Slic3r::GUI::web_page_server_detail::parse_csp_file(base));
+        CHECK(s.content_security_policy().find("192.168.1.5") == std::string::npos);
+    }
+    // A valid origin reaches img-src and connect-src, and every response header, nothing else is loosened.
+    {
+        WebPageServer s(bundle_root(), csp);
+        CHECK(s.set_extra_origin("http://192.168.1.5"));
+        REQUIRE(s.start());
+        const std::string& p = s.content_security_policy();
+        CHECK(p.find("img-src 'self' blob: https://public.resource.snapmaker.com http://192.168.1.5") != std::string::npos);
+        CHECK(p.find("connect-src 'self'") != std::string::npos);
+        CHECK(p.find("http://192.168.1.5") != std::string::npos);
+        CHECK(p.find("script-src 'self' 'wasm-unsafe-eval'") != std::string::npos);
+        CHECK(p.find("default-src 'none'") == 0);
+        CHECK(p.find("frame-src 'none'") != std::string::npos);
+        CHECK(send(s, Req(P + "index.html")).header("content-security-policy") == p);
+        // script-src, style-src, default-src never carry the origin.
+        for (const char* d : {"default-src", "script-src", "style-src", "frame-src", "object-src"}) {
+            const auto at = p.find(std::string(d) + " ");
+            if (at == std::string::npos) continue;
+            const auto end = p.find(';', at);
+            CHECK(p.substr(at, end == std::string::npos ? std::string::npos : end - at).find("192.168.1.5") == std::string::npos);
+        }
+    }
+    // set_extra_origin("") clears a previous origin (true); a rejected value also clears it, so a stale printer is never served.
+    {
+        WebPageServer s(bundle_root(), csp);
+        REQUIRE(s.set_extra_origin("http://192.168.1.5"));
+        CHECK(s.set_extra_origin(""));
+        REQUIRE(s.start());
+        CHECK(s.content_security_policy() == Slic3r::GUI::web_page_server_detail::parse_csp_file(base));
+        s.stop();
+        REQUIRE(s.set_extra_origin("http://192.168.1.5"));
+        CHECK_FALSE(s.set_extra_origin("http://evil;"));
+        REQUIRE(s.start());
+        CHECK(s.content_security_policy() == Slic3r::GUI::web_page_server_detail::parse_csp_file(base));
+    }
+    // Rejected values leave the policy exactly as the static file gives it.
+    for (const char* bad : {"https://192.168.1.5", "http://user:pw@192.168.1.5", "http://192.168.1.5/path", "http://192.168.1.5/",
+                            "http://192.168.1.5:7125", "http://a b", "http://a;b", "http://a; script-src *", "http://h\r\nX: y", "*", "http://*",
+                            "192.168.1.5", "http://", "ftp://h", "http://h'", " http://h"}) {
+        CAPTURE(bad);
+        WebPageServer s(bundle_root(), csp);
+        CHECK_FALSE(s.set_extra_origin(bad));
+        REQUIRE(s.start());
+        CHECK(s.content_security_policy() == Slic3r::GUI::web_page_server_detail::parse_csp_file(base));
+    }
+    // A bracketed IPv6 literal and a host name are plain origins too.
+    {
+        WebPageServer s(bundle_root(), csp);
+        CHECK(s.set_extra_origin("http://[fe80::1]"));
+        CHECK(s.set_extra_origin("http://3d-printer"));
+        REQUIRE(s.start());
+        CHECK(s.content_security_policy().find("http://3d-printer") != std::string::npos);   // the last valid one wins
+        CHECK(s.content_security_policy().find("fe80") == std::string::npos);                // ... and only one is ever served
+    }
+    fs::remove(csp);
 }

@@ -40,6 +40,16 @@ public:
     static bool is_readable_resource_path(const std::string& path_and_query);
     void        query_machine_objects_async(const std::vector<std::string>& object_names,
                                             std::function<void(bool ok, nlohmann::json result)> done) override;
+    // Camera preview: a one-request websocket RPC (camera.start_monitor / camera.stop_monitor) on its own short-lived thread, ~5 s
+    // in all. Plain ws:// only (a https:// machine fails). Params go through camera_monitor_params_valid() first.
+    void        camera_monitor_async(bool start, const nlohmann::json& params,
+                                     std::function<void(bool ok, nlohmann::json result)> done) override;
+    // The JSON-RPC request text for the two camera methods and nothing else; "" if `params` fail the whitelist (exposed for tests).
+    static std::string camera_monitor_request(bool start, const nlohmann::json& params, int id);
+    // Classifies one websocket message against request `id`: Ok (result object with state "success" copied to `result`), Fail
+    // (an error reply, or an unusable result), Ignore (a notification, another request's reply, not JSON).
+    enum class CameraReply { Ignore, Ok, Fail };
+    static CameraReply parse_camera_monitor_reply(const std::string& message, int id, nlohmann::json& result);
 
     // Cloud Agent Dependency
     void set_cloud_agent(std::shared_ptr<ICloudServiceAgent> cloud) override;
