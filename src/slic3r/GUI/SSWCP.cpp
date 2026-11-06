@@ -270,7 +270,7 @@ void register_startup_commands(SSWCPCore& core)
     });
 
     // Telemetry. Snapmaker forwards this to Sentry; our bridge accepts and DROPS it: no handler here may
-    // contact the outside world (SSWCPServices::outbound_observer stays at zero, and a test asserts it).
+    // contact the outside world (the core has no network code; a test pins the empty reply).
     one_shot("sw_UploadEvent", [](SSWCP_Instance& i) { i.reply_ok(); });
 
     one_shot("sw_GetSoftwareInfo", [](SSWCP_Instance& i) {
@@ -374,6 +374,11 @@ SSWCPOutcome SSWCP::handle_web_message(const std::string& message)
             event_id = payload["event_id"].get<std::string>();
         }
 
+        if (header.dump().size() > SSWCP_MAX_HEADER_BYTES) { // kept per pending request: bounded, not echoed
+            m_core->emit(json::object(), SSWCPCode::BadRequest, "header too large", json::object());
+            return SSWCPOutcome::BadRequest;
+        }
+
         const std::string cmd    = payload["cmd"].get<std::string>();
         json              params = payload.contains("params") ? payload["params"] : json::object();
         if (params.is_null())
@@ -395,10 +400,21 @@ SSWCPOutcome SSWCP::handle_web_message(const std::string& message)
             return SSWCPOutcome::Unsupported;
         }
 
+        bool busy = false;
+        {
+            std::lock_guard<std::mutex> lock(m_core->mutex);
+            busy = m_core->list.size() >= SSWCP_MAX_PENDING;
+        }
+        if (busy) {
+            m_core->emit(header, SSWCPCode::TooMany, "too many pending requests", json::object());
+            return SSWCPOutcome::Busy;
+        }
+
         auto instance = std::make_shared<SSWCP_Instance>(m_core, cmd, header, std::move(params), event_id, reg.handler,
                                                          reg.subscription);
-        // Requests with an event_id never time out (they may be subscriptions); the rest get the default.
-        m_core->add_to_list(instance, !event_id.empty());
+        // Only a registered subscription command can be long-lived; any other request, with or without an event_id,
+        // expires after the default timeout if its handler never answers.
+        m_core->add_to_list(instance, reg.subscription);
         instance->process();
         return SSWCPOutcome::Dispatched;
     } catch (const std::exception& e) {

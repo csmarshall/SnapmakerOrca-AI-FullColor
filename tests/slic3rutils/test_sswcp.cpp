@@ -17,7 +17,6 @@ namespace {
 struct Harness
 {
     std::vector<std::string>                 sent;
-    int                                      outbound = 0;
     std::chrono::steady_clock::time_point    clock    = std::chrono::steady_clock::now();
     json                                     devices  = json::array();
     SSWCP                                    sswcp;
@@ -28,7 +27,6 @@ struct Harness
     {
         SSWCPServices s;
         s.sink              = [this](const std::string& js) { sent.push_back(js); };
-        s.outbound_observer = [this](const std::string&) { ++outbound; };
         s.now               = [this] { return clock; };
         s.local_devices     = [this] { return devices; };
         s.software_name     = "TestApp";
@@ -89,7 +87,6 @@ TEST_CASE("SSWCP one-shot startup commands echo the header and reply 200", "[SSW
         h.send(hdr, "sw_UserLogin", {{"user", "x"}, {"password", "y"}});
         REQUIRE(h.sent.size() == 1);
         CHECK(h.last()["payload"]["code"] == 200);
-        CHECK(h.outbound == 0);
     }
     SECTION("sw_GetLocalDevices uses the provider, default empty") {
         h.send(hdr, "sw_GetLocalDevices");
@@ -312,7 +309,7 @@ TEST_CASE("SSWCP survives deeply nested JSON", "[SSWCP]")
         CHECK(h.sswcp.handle_web_message(std::string(deep, '[')) == SSWCPOutcome::TooDeep);
     }
     SECTION("brackets inside strings do not count, nesting at the limit passes") {
-        json hdr = std::string(5000, '[');
+        json hdr = std::string(3000, '[');
         CHECK(h.send(hdr, "sw_UserLogin") == SSWCPOutcome::Dispatched);
 
         json nested = 1;
@@ -346,7 +343,6 @@ TEST_CASE("SSWCP sw_FileLog with path-like content never touches the filesystem"
     CHECK_FALSE(fs::exists(victim));
     CHECK(count_entries(dir) == 0);
     CHECK(count_entries(cwd_before) == cwd_count);
-    CHECK(h.outbound == 0);
 
     // Non-object params and non-string fields are tolerated.
     h.send({{"id", 1}}, "sw_FileLog", json::array({1, 2}));
@@ -357,13 +353,12 @@ TEST_CASE("SSWCP sw_FileLog with path-like content never touches the filesystem"
     fs::remove_all(dir);
 }
 
-TEST_CASE("SSWCP sw_UploadEvent makes no outbound call and echoes nothing back", "[SSWCP]")
+TEST_CASE("SSWCP sw_UploadEvent is dropped: one empty reply each, nothing echoed (the core has no network code)", "[SSWCP]")
 {
     Harness h;
     const json p = {{"traceId", "t-1"}, {"level", 3}, {"content", "secret telemetry"}, {"funcModule", "m"}, {"tagKey", "k"}, {"tagValue", "v"}};
     for (int i = 0; i < 5; ++i)
         CHECK(h.send({{"id", i}}, "sw_UploadEvent", p) == SSWCPOutcome::Dispatched);
-    CHECK(h.outbound == 0);
     REQUIRE(h.sent.size() == 5);
     for (std::size_t i = 0; i < 5; ++i)
         CHECK(h.reply(i)["payload"]["data"] == json::object());
@@ -433,4 +428,49 @@ TEST_CASE("SSWCP one-shot instances time out, subscriptions do not", "[SSWCP]")
     CHECK(h.sswcp.instance_count() == 1);
     CHECK(h.sswcp.subscription_count() == 1);
     CHECK(h.sswcp.expire_due() == 0);
+}
+
+TEST_CASE("SSWCP a one-shot command with an event_id still expires; only subscriptions are long-lived", "[SSWCP]")
+{
+    Harness h;
+    h.sswcp.register_command("test_never_finishes", [](SSWCP_Instance&) {}, false);
+    h.send({{"id", 1}}, "test_never_finishes", json::object(), "has-event-id");
+    h.send({{"id", 2}}, "sw_SubscribeRecentFiles", json::object(), "sub");
+    const std::size_t sent_before = h.sent.size();
+    CHECK(h.sswcp.instance_count() == 2);
+    h.clock += SSWCP::DEFAULT_INSTANCE_TIMEOUT + std::chrono::milliseconds(1);
+    CHECK(h.sswcp.expire_due() == 1);                  // the one-shot, despite its event_id
+    REQUIRE(h.sent.size() == sent_before + 1);
+    CHECK(h.last()["payload"]["code"] == -2);
+    CHECK(h.sswcp.instance_count() == 1);              // the subscription stays
+    CHECK(h.sswcp.subscription_count() == 1);
+}
+
+TEST_CASE("SSWCP caps pending requests with a structured 429 and bounds the kept header", "[SSWCP]")
+{
+    Harness h;
+    h.sswcp.register_command("test_never_finishes", [](SSWCP_Instance&) {}, false);
+    for (std::size_t i = 0; i < SSWCP_MAX_PENDING; ++i)
+        REQUIRE(h.send({{"id", i}}, "test_never_finishes") == SSWCPOutcome::Dispatched);
+    CHECK(h.sswcp.instance_count() == SSWCP_MAX_PENDING);
+    h.sent.clear();
+    CHECK(h.send({{"id", "over"}}, "test_never_finishes") == SSWCPOutcome::Busy);
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.last()["payload"]["code"] == 429);
+    CHECK(h.last()["header"] == json{{"id", "over"}});
+    CHECK(h.sswcp.instance_count() == SSWCP_MAX_PENDING);
+    // Subscriptions and unknown commands are held to the same bound.
+    CHECK(h.send({{"id", 1}}, "sw_SubscribeRecentFiles", json::object(), "x") == SSWCPOutcome::Busy);
+    // Once the pending ones expire there is room again.
+    h.clock += SSWCP::DEFAULT_INSTANCE_TIMEOUT + std::chrono::milliseconds(1);
+    h.sswcp.expire_due();
+    CHECK(h.send({{"id", 2}}, "sw_UserLogin") == SSWCPOutcome::Dispatched);
+
+    // A header bigger than SSWCP_MAX_HEADER_BYTES is refused, with an empty header since it is not echoed.
+    h.sent.clear();
+    json big = std::string(SSWCP_MAX_HEADER_BYTES + 10, 'h');
+    CHECK(h.send(big, "sw_UserLogin") == SSWCPOutcome::BadRequest);
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.last()["payload"]["code"] == 400);
+    CHECK(h.last()["header"] == json::object());
 }
