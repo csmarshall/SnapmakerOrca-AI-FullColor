@@ -513,7 +513,7 @@ std::string csp_with_extra_origin(const std::string& policy, const std::string& 
 {
     static const std::regex ok(R"(^https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?$)");
     if (policy.empty() || !std::regex_match(origin, ok)) return {};
-    // Split into directives on ';', append to the three, create media-src if needed.
+    // Split into directives on ';' and append to img-src and connect-src only (the page fetches a JPEG; it never plays media).
     std::vector<std::string> dirs;
     std::size_t pos = 0;
     while (pos < policy.size()) {
@@ -524,15 +524,11 @@ std::string csp_with_extra_origin(const std::string& policy, const std::string& 
         if (f != std::string::npos) dirs.push_back(d.substr(f));
         pos = semi + 1;
     }
-    bool have_media = false;
     for (auto& d : dirs) {
-        for (const char* name : {"connect-src", "img-src", "media-src"})
-            if (d.compare(0, std::strlen(name), name) == 0 && (d.size() == std::strlen(name) || d[std::strlen(name)] == ' ')) {
+        for (const char* name : {"connect-src", "img-src"})
+            if (d.compare(0, std::strlen(name), name) == 0 && (d.size() == std::strlen(name) || d[std::strlen(name)] == ' '))
                 d += " " + origin;
-                if (std::string(name) == "media-src") have_media = true;
-            }
     }
-    if (!have_media) dirs.push_back("media-src 'self' " + origin);
     std::string out;
     for (const auto& d : dirs) out += (out.empty() ? "" : "; ") + d;
     return out;

@@ -712,7 +712,42 @@ TEST_CASE("WebPageServer refuses to start without a valid policy file", "[WebPag
     fs::remove_all(dir);
 }
 
-TEST_CASE("csp_with_extra_origin adds a printer origin to connect, img and media (unused until those routes exist)", "[WebPageServer][CSP]")
+namespace {
+// The directives of a policy as name -> value text.
+std::vector<std::pair<std::string, std::string>> csp_directives(const std::string& policy)
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    std::size_t pos = 0;
+    while (pos < policy.size()) {
+        std::size_t semi = policy.find(';', pos);
+        if (semi == std::string::npos) semi = policy.size();
+        std::string d = policy.substr(pos, semi - pos);
+        const auto f = d.find_first_not_of(' ');
+        if (f != std::string::npos) {
+            d = d.substr(f);
+            const auto sp = d.find(' ');
+            out.emplace_back(d.substr(0, sp), sp == std::string::npos ? std::string() : d.substr(sp + 1));
+        }
+        pos = semi + 1;
+    }
+    return out;
+}
+// The origin is in img-src and connect-src, exactly once each, and in NO other directive (media-src included, which must not even exist).
+void check_origin_only_in_img_and_connect(const std::string& policy, const std::string& origin)
+{
+    int n = 0;
+    for (const auto& [name, value] : csp_directives(policy)) {
+        CAPTURE(name);
+        const bool has = (" " + value + " ").find(" " + origin + " ") != std::string::npos;
+        if (name == "img-src" || name == "connect-src") { CHECK(has); n += has; }
+        else CHECK_FALSE(has);
+    }
+    CHECK(n == 2);
+    for (const auto& d : csp_directives(policy)) CHECK(d.first != "media-src");
+}
+} // namespace
+
+TEST_CASE("csp_with_extra_origin adds a printer origin to img-src and connect-src only", "[WebPageServer][CSP]")
 {
     using Slic3r::GUI::web_page_server_detail::csp_with_extra_origin;
     const std::string base = read_policy_file();
@@ -721,14 +756,15 @@ TEST_CASE("csp_with_extra_origin adds a printer origin to connect, img and media
     CHECK(out.find("connect-src 'self'") != std::string::npos);
     CHECK(out.find("http://192.168.1.5") != std::string::npos);
     CHECK(out.find("img-src 'self' blob: https://public.resource.snapmaker.com http://192.168.1.5") != std::string::npos);
-    CHECK(out.find("media-src 'self' http://192.168.1.5") != std::string::npos);
+    check_origin_only_in_img_and_connect(out, "http://192.168.1.5");
+    CHECK(csp_with_extra_origin(base, "https://u1.local:8443").find("media-src") == std::string::npos);
     CHECK(out.find("default-src 'none'") == 0);                                   // the rest is untouched
     CHECK(out.find("frame-src 'none'") != std::string::npos);
     CHECK(out.find("'unsafe-inline'") == std::string::npos);
-    // Count: the origin appears exactly three times.
+    // Count: the origin appears exactly twice.
     std::size_t n = 0;
     for (auto p = out.find("http://192.168.1.5"); p != std::string::npos; p = out.find("http://192.168.1.5", p + 1)) ++n;
-    CHECK(n == 3);
+    CHECK(n == 2);
     CHECK(csp_with_extra_origin(base, "https://u1.local:8443").find("https://u1.local:8443") != std::string::npos);
     CHECK(csp_with_extra_origin(base, "http://[fe80::1]:7125").find("http://[fe80::1]:7125") != std::string::npos);
     // Anything that is not a plain origin is refused: no header injection, no wildcard, no path.
@@ -764,13 +800,8 @@ TEST_CASE("the page server serves one extra printer origin, only when valid, and
         CHECK(p.find("default-src 'none'") == 0);
         CHECK(p.find("frame-src 'none'") != std::string::npos);
         CHECK(send(s, Req(P + "index.html")).header("content-security-policy") == p);
-        // script-src, style-src, default-src never carry the origin.
-        for (const char* d : {"default-src", "script-src", "style-src", "frame-src", "object-src"}) {
-            const auto at = p.find(std::string(d) + " ");
-            if (at == std::string::npos) continue;
-            const auto end = p.find(';', at);
-            CHECK(p.substr(at, end == std::string::npos ? std::string::npos : end - at).find("192.168.1.5") == std::string::npos);
-        }
+        // No other directive carries the origin (default-src, script-src, style-src-*, font-src, manifest-src, base-uri, form-action, ...).
+        check_origin_only_in_img_and_connect(p, "http://192.168.1.5");
     }
     // set_extra_origin("") clears a previous origin (true); a rejected value also clears it, so a stale printer is never served.
     {

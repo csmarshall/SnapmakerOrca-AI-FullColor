@@ -49,6 +49,22 @@ public:
     // Classifies one websocket message against request `id`: Ok (result object with state "success" copied to `result`), Fail
     // (an error reply, or an unusable result), Ignore (a notification, another request's reply, not JSON).
     enum class CameraReply { Ignore, Ok, Fail };
+    // At most one camera RPC per agent is in flight: a call made while one is pending is refused at once (done(false)), with no
+    // thread and no socket. The accounting is this small gate so it can be tested without a network.
+    class InFlightGate
+    {
+    public:
+        bool try_acquire() { bool idle = false; return busy.compare_exchange_strong(idle, true); }
+        void release() { busy.store(false); }
+        bool busy_now() const { return busy.load(); }
+    private:
+        std::atomic<bool> busy{false};
+    };
+    // The whole RPC against `base_url` (what camera_monitor_async runs with the connected machine's url). `total` bounds
+    // resolve + connect + handshake + reply. Exposed for the loopback tests.
+    static void camera_monitor_run(const std::string& base_url, const std::string& api_key, bool start, const nlohmann::json& params,
+                                   std::chrono::milliseconds total, std::shared_ptr<InFlightGate> gate,
+                                   std::function<void(bool ok, nlohmann::json result)> done);
     static CameraReply parse_camera_monitor_reply(const std::string& message, int id, nlohmann::json& result);
 
     // Cloud Agent Dependency
@@ -268,6 +284,7 @@ private:
     // Connection thread management
     std::atomic<uint64_t>  connect_generation{0};
     std::thread            connect_thread;
+    std::shared_ptr<InFlightGate> m_camera_gate = std::make_shared<InFlightGate>();
     std::recursive_mutex   connect_mutex;
     mutable std::mutex     connect_error_mutex;
     std::string            connect_error; // see last_connect_error()

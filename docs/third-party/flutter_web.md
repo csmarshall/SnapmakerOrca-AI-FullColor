@@ -46,9 +46,20 @@ The policy is "policy F" of experiment 7g (`docs/snapmaker-page-contract.md` in 
 
 ### Not covered / printer origins
 
-The timelapse, print and send pages were never driven and stay denied at the bridge. The **camera preview** (#76) is wired: `SnapmakerDevicePage::start()` takes the selected machine (`get_dev_ip()`, else the dev id), turns it into `http://<bare host>` with `snapmaker_camera_origin()` and hands it to `WebPageServer::set_extra_origin()` before `start()`. `start()` then serves `web_page_server_detail::csp_with_extra_origin(policy, origin)`, which appends the origin to `img-src` and `connect-src`, and also to `media-src` (the helper creates that directive when the static policy has none, so this one origin is also allowed as media; `default-src 'none'` and `script-src` are untouched). `set_extra_origin` accepts only `http://` plus a DNS name, IPv4 address or bracketed IPv6 literal (no credentials, port, path, spaces or semicolons); anything else is refused and the static `flutter_web.csp` stays in force. That file is unchanged and still fails closed.
+The timelapse, print and send pages were never driven and stay denied at the bridge. The **camera preview** (#76) is wired:
+- `SnapmakerDevicePage` takes the selected machine (`get_dev_ip()`, else the dev id), turns it into `http://<bare host>` with `snapmaker_camera_origin_for()` and hands it to `WebPageServer::set_extra_origin()` before `start()`. A warning is logged when there is no usable origin (no machine selected, or an address that is not a plain host, e.g. an unbracketed IPv6 dev id); the camera tile is then blocked by the CSP.
+- `start()` serves `web_page_server_detail::csp_with_extra_origin(policy, origin)`, which appends the origin to `img-src` and `connect-src` and to **nothing else** (no `media-src` is added or created: the page loads a JPEG through img/fetch). `set_extra_origin` accepts only `http://` plus a DNS name, IPv4 address or bracketed IPv6 literal (no credentials, port, path, spaces or semicolons); anything else is refused and the static `flutter_web.csp` stays in force. That file is unchanged and still fails closed.
+- When the Device page is shown again and the selected machine's origin differs from the one the page was started with (including one appearing after the page started with none), `Show(true)` calls `reset()` and `start()`, so the page and its CSP match. Decision: `snapmaker_camera_origin_needs_reload()`.
+- The camera RPC (`MoonrakerPrinterAgent::camera_monitor_async`) goes to the agent's own `device_info.base_url`, while the CSP origin comes from DeviceManager's selected machine. Both name the connected machine in practice but are two sources; if they ever differ the tile is blocked rather than leaking anywhere. They were not unified.
+- At most one camera RPC is in flight per agent; a further call is refused at once (`done(false)`, no thread, no socket), not queued. The whole RPC (resolve, connect, handshake, reply) is bounded by 5 s, the connect time shared across the resolved addresses.
 
-**Limitation:** the extra origin is fixed when the page server starts, i.e. when the Device page is first shown (and again after `reset()`). If the user connects a different machine afterwards, the page keeps the old machine in its policy and the camera tile of the new one is blocked by the browser until the page is reloaded (switch the agent away and back, or restart Orca). Not solved on purpose. WKWebView and Edge WebView2 CSP behaviour, including hash matching of inline content, has only been checked against Chromium so far.
+Known limitations (not solved on purpose):
+- The origin is fixed per page load; it is refreshed only when the page is shown again (above), not while it stays visible.
+- IPv6 machines: `parse_ws_endpoint` does not handle bracketed hosts, so the camera RPC cannot reach an IPv6 machine, and the origin is only served for a bracketed literal (unverified in WKWebView).
+- The page's `sw_CameraStopMonitor` is the only stop: nothing stops the monitor when the page or Orca is torn down.
+- Only plain `ws://` machines work; an `https://` machine fails the camera RPC.
+
+WKWebView and Edge WebView2 CSP behaviour, including hash matching of inline content, has only been checked against Chromium so far.
 
 ## CSP: WebKit (macOS wxWebView) differs from Chrome (2026-11-06)
 

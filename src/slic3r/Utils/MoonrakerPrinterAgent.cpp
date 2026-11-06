@@ -274,7 +274,8 @@ MoonrakerPrinterAgent::CameraReply MoonrakerPrinterAgent::parse_camera_monitor_r
 }
 
 namespace {
-// One request/reply on a fresh plain websocket, everything bounded by `total`. Returns whether the printer answered "success".
+// One request/reply on a fresh plain websocket, everything (resolve included) bounded by `total`. Returns whether the printer
+// answered "success".
 bool camera_monitor_rpc(const WsEndpoint& endpoint, const std::string& api_key, const std::string& payload, int id,
                         std::chrono::milliseconds total, nlohmann::json& result)
 {
@@ -287,12 +288,38 @@ bool camera_monitor_rpc(const WsEndpoint& endpoint, const std::string& api_key, 
     tcp::resolver                         resolver{ioc};
     websocket::stream<beast::tcp_stream>  ws{ioc};
     beast::tcp_stream&                    stream = beast::get_lowest_layer(ws);
-    beast::error_code                     ec;
-    const auto endpoints = resolver.resolve(endpoint.host, endpoint.port, ec);
-    if (ec || clock::now() >= deadline)
-        return false;
-    if (connect_until_done(ioc, stream, endpoints, remaining()))
-        return false;
+
+    // Resolve asynchronously so the deadline can cancel it.
+    tcp::resolver::results_type endpoints;
+    {
+        net::steady_timer resolve_deadline{ioc};
+        resolve_deadline.expires_after(remaining());
+        resolve_deadline.async_wait([&](beast::error_code ec) { if (!ec) resolver.cancel(); });
+        const auto ec = run_until_done(ioc, [&](auto&& h) {
+            resolver.async_resolve(endpoint.host, endpoint.port, [&endpoints, h = std::move(h)](beast::error_code e, tcp::resolver::results_type r) mutable {
+                endpoints = std::move(r);
+                h(e);
+            });
+        });
+        resolve_deadline.cancel();
+        if (ec || endpoints.empty() || clock::now() >= deadline)
+            return false;
+    }
+    // The remaining time is shared out among the addresses, so a dead first one cannot use it all up.
+    {
+        bool connected = false;
+        std::size_t left = endpoints.size();
+        for (const auto& entry : endpoints) {
+            beast::error_code ignored;
+            stream.socket().close(ignored);
+            stream.expires_after(remaining() / left);
+            --left;
+            if (!run_until_done(ioc, [&](auto&& h) { stream.async_connect(entry.endpoint(), h); })) { connected = true; break; }
+            if (clock::now() >= deadline) break;
+        }
+        if (!connected)
+            return false;
+    }
     ws.set_option(websocket::stream_base::decorator([&](websocket::request_type& req) {
         req.set(http::field::user_agent, "OrcaSlicer");
         if (!api_key.empty())
@@ -326,42 +353,56 @@ bool camera_monitor_rpc(const WsEndpoint& endpoint, const std::string& api_key, 
 }
 } // namespace
 
-void MoonrakerPrinterAgent::camera_monitor_async(bool start, const nlohmann::json& params,
-                                                 std::function<void(bool ok, nlohmann::json result)> done)
+void MoonrakerPrinterAgent::camera_monitor_run(const std::string& base_url, const std::string& api_key, bool start,
+                                               const nlohmann::json& params, std::chrono::milliseconds total,
+                                               std::shared_ptr<InFlightGate> gate,
+                                               std::function<void(bool ok, nlohmann::json result)> done)
 {
     // `done` runs exactly once, whichever way this ends
     auto fired  = std::make_shared<std::atomic<bool>>(false);
-    auto finish = [fired, done](bool ok, nlohmann::json result) {
+    auto finish = [fired, done, gate](bool ok, nlohmann::json result, bool holds_gate) {
+        if (holds_gate && gate) gate->release();
         if (!fired->exchange(true) && done)
             done(ok, ok ? std::move(result) : nlohmann::json::object());
     };
     constexpr int kRequestId = 1;
     const std::string payload = camera_monitor_request(start, params, kRequestId);
+    WsEndpoint endpoint;
+    if (payload.empty() || base_url.empty() || !parse_ws_endpoint(base_url, endpoint) || endpoint.secure) {
+        finish(false, nlohmann::json::object(), false);
+        return;
+    }
+    if (gate && !gate->try_acquire()) { // one RPC at a time: the extra call is refused, not queued
+        BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: camera request refused, one is already in flight";
+        finish(false, nlohmann::json::object(), false);
+        return;
+    }
+    try {
+        std::thread([finish, endpoint, api_key, payload, total]() {
+            nlohmann::json result = nlohmann::json::object();
+            bool           ok     = false;
+            try {
+                ok = camera_monitor_rpc(endpoint, api_key, payload, kRequestId, total, result);
+            } catch (const std::exception& e) {
+                BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: camera monitor RPC failed: " << e.what();
+            }
+            finish(ok, std::move(result), true);
+        }).detach();
+    } catch (const std::exception&) {
+        finish(false, nlohmann::json::object(), true);
+    }
+}
+
+void MoonrakerPrinterAgent::camera_monitor_async(bool start, const nlohmann::json& params,
+                                                 std::function<void(bool ok, nlohmann::json result)> done)
+{
     std::string base_url, api_key;
     {
         std::lock_guard<std::recursive_mutex> lock(connect_mutex);
         base_url = device_info.base_url;
         api_key  = device_info.api_key;
     }
-    WsEndpoint endpoint;
-    if (payload.empty() || base_url.empty() || !parse_ws_endpoint(base_url, endpoint) || endpoint.secure) {
-        finish(false, nlohmann::json::object());
-        return;
-    }
-    try {
-        std::thread([finish, endpoint, api_key, payload]() {
-            nlohmann::json result = nlohmann::json::object();
-            bool           ok     = false;
-            try {
-                ok = camera_monitor_rpc(endpoint, api_key, payload, kRequestId, std::chrono::milliseconds(5000), result);
-            } catch (const std::exception& e) {
-                BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: camera monitor RPC failed: " << e.what();
-            }
-            finish(ok, std::move(result));
-        }).detach();
-    } catch (const std::exception&) {
-        finish(false, nlohmann::json::object());
-    }
+    camera_monitor_run(base_url, api_key, start, params, std::chrono::milliseconds(5000), m_camera_gate, std::move(done));
 }
 
 void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::string>& object_names,
