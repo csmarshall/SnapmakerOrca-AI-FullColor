@@ -1678,6 +1678,8 @@ void MainFrame::show_device(bool should_use_native) {
         } else {
             if ((idx = m_tabpanel->FindPage(m_snapmaker_device_page)) != wxNOT_FOUND) {
                 m_snapmaker_device_page->Show(false);
+                if (SnapmakerDevicePage* page = m_snapmaker_device_page->get())
+                    page->reset(); // leaving the tab ends its polling and subscriptions
                 m_tabpanel->RemovePage(idx);
             }
             if (!m_monitor_page->in_book()) {
@@ -1732,6 +1734,8 @@ void MainFrame::show_device(bool should_use_native) {
     if (should_use_native) {
         if ((idx = m_tabpanel->FindPage(m_snapmaker_device_page)) != wxNOT_FOUND) {
             m_snapmaker_device_page->Show(false);
+            if (SnapmakerDevicePage* page = m_snapmaker_device_page->get())
+                page->reset(); // leaving the tab ends its polling and subscriptions
             m_tabpanel->RemovePage(idx);
         }
         if (m_monitor_page->in_book()) {
@@ -1784,6 +1788,8 @@ void MainFrame::show_device(bool should_use_native) {
         }
         if ((idx = m_tabpanel->FindPage(m_snapmaker_device_page)) != wxNOT_FOUND) {
             m_snapmaker_device_page->Show(false);
+            if (SnapmakerDevicePage* page = m_snapmaker_device_page->get())
+                page->reset(); // leaving the tab ends its polling and subscriptions
             m_tabpanel->RemovePage(idx);
         }
         m_printer_view_page->Show(false);

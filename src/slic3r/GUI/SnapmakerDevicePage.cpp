@@ -31,12 +31,32 @@ SnapmakerDevicePage::~SnapmakerDevicePage()
     teardown();
 }
 
+// Hidden (another tab selected) or removed from the book: nothing may keep polling the machine. The loopback server stays
+// up while the page lives (it is idle, loopback-only and avoids a reload on every tab switch); reset() ends it.
 bool SnapmakerDevicePage::Show(bool show)
 {
     const bool changed = wxPanel::Show(show);
-    if (show && !m_started)
+    if (show && !m_started) {
         start();
+    } else if (m_bridge) {
+        m_bridge->set_active(show);
+        if (show) m_timer.Start(1000); else m_timer.Stop();
+    }
     return changed;
+}
+
+// The page leaves the Device tab (the active agent changed, or agents were switched off): drop everything, including the
+// webview and its subscriptions, so showing it again starts from a clean page rather than one holding a dead bridge.
+void SnapmakerDevicePage::reset()
+{
+    teardown();
+    if (m_browser_window) {
+        GetSizer()->Detach(m_browser_window);
+        m_browser_window->Destroy();
+        m_browser_window = nullptr;
+    }
+    GetSizer()->Clear(true);
+    m_started = false;
 }
 
 bool SnapmakerDevicePage::start()
@@ -107,6 +127,7 @@ bool SnapmakerDevicePage::start()
     m_bridge    = std::make_unique<SnapmakerDeviceBridge>(std::move(opt));
 
     m_browser = WebView::CreateWebView(this, "");
+    m_browser_window = m_browser;
     if (!m_browser) {
         BOOST_LOG_TRIVIAL(error) << "SnapmakerDevicePage: could not create the webview";
         teardown();
@@ -144,7 +165,12 @@ void SnapmakerDevicePage::on_script_message(wxWebViewEvent& evt)
 {
     if (!m_bridge || !m_browser)
         return;
-    // The frame that sent the message when wx reports it, else the page currently loaded.
+    // Top-level document origin only. wx reports the main frame's URL (WKWebView's and Edge's GetCurrentURL), not the URL of
+    // the frame that posted the message, so a message from a sub-frame is judged by the page that contains it. That is
+    // acceptable only because the page cannot navigate away (on_navigating vetoes foreign origins) and the bundle is
+    // vendored with a checked hash; sub-frames inside it are not otherwise restricted.
+    // TODO(#75): once the CSP being tested in docs/snapmaker-page-contract.md 7g ships, add `frame-src 'none'` to it so the
+    // page cannot host a frame at all; until then do NOT rely on the origin check to separate frames.
     wxString url = evt.GetURL();
     if (url.empty())
         url = m_browser->GetCurrentURL();

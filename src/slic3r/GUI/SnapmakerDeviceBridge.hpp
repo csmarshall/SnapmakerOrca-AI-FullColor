@@ -70,6 +70,11 @@ nlohmann::json snapmaker_empty_machine_state();
 
 // The Klipper objects asked for when the page names none (the set the 2.3.40 Device page reads, contract doc 7.3).
 const std::vector<std::string>& snapmaker_default_state_objects();
+// Which Klipper objects the page may have queried: the 2.3.40 Device page's set (contract doc 7.3) plus the extruder,
+// fan, LED, heater and sensor families. configfile, bed_mesh, gcode macros and the rest are refused.
+bool snapmaker_state_object_allowed(const std::string& name);
+// The sw_GetMachineState reply: the result unchanged (or the empty state), plus an empty entry per refused object name.
+nlohmann::json snapmaker_state_reply(bool ok, nlohmann::json result, const std::vector<std::string>& rejected);
 
 // ---- pure helpers for the read-only machine resources (unit-tested) ----
 
@@ -133,6 +138,10 @@ public:
     // Drops all subscriptions and ignores everything afterwards.
     void shutdown();
 
+    // The page is shown (true) or hidden (false). While hidden, tick() polls nothing and pushes nothing; showing it again
+    // refreshes the device list and queues a state push for the subscribers.
+    void set_active(bool active);
+
     // Latest sw_UpdateMachineFilamentInfo value per sn (the page's JSON string, untouched). Stored only; nothing consumes it yet.
     const std::map<std::string, std::string>& filament_info() const { return m_filament_info; }
 
@@ -147,9 +156,14 @@ private:
     // Throttled machine-state pushes: every kStatePushEveryTicks ticks (tick() is about 1 s) while someone subscribes.
     static constexpr int kStatePushEveryTicks = 3;
     void register_commands();
+    // The objects a request names, split by the allow-list. `requested` is false when it named none.
+    struct Selection { std::vector<std::string> allowed, rejected; bool requested = false; };
+    Selection select_objects(const nlohmann::json& params) const;
     void run_query(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done);
+    void request_state(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> cb);
+    void abandon_state_query();
     void push_state(bool force);
-    std::vector<std::string> objects_from(const nlohmann::json& params) const;
+    std::string connected_dev_id() const;
 
     // dev_id -> machine.system_info result / serial, filled by read-only fetches; a record's sn is the serial once known.
     void fetch_system_info(const std::string& dev_id, std::function<void()> then);
@@ -163,6 +177,14 @@ private:
     std::vector<std::string>            m_state_objects; // the subscription's / SetSubscribeFilter's object names
     nlohmann::json                      m_last_state_status; // last pushed `status`
     bool                                m_state_in_flight = false;
+    std::vector<std::function<void(bool, nlohmann::json)>> m_state_waiters; // everyone waiting on the query in flight
+    std::uint64_t                       m_state_gen = 0;           // a callback of an older generation is a late one: ignored
+    int                                 m_state_started_tick = 0;
+    static constexpr int                kStateWatchdogTicks  = 15; // a lost callback cannot wedge polling for longer
+    bool                                m_push_waiting = false;    // a push is queued on the query in flight
+    bool                                m_force_push   = false;    // push the next result even if unchanged (new subscriber)
+    std::string                         m_state_machine;           // the machine the cached state belongs to
+    bool                                m_active = true;           // false while the page is hidden: no polling, no pushes
     int                                 m_ticks           = 0;
     std::map<std::string, std::string>  m_filament_info;
 };

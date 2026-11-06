@@ -2,22 +2,28 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 #include <boost/log/trivial.hpp>
+
+#include "slic3r/Utils/IPrinterAgent.hpp" // strip_url_userinfo, ascii_alnum
 
 namespace Slic3r { namespace GUI {
 
 std::string snapmaker_bare_host(const std::string& address)
 {
-    std::string h = address;
+    std::string h = strip_url_userinfo(address); // never show or send credentials to the page
     if (auto p = h.find("://"); p != std::string::npos)
         h.erase(0, p + 3);
     if (auto p = h.find_first_of("/?#"); p != std::string::npos)
         h.erase(p);
-    if (!h.empty() && h.front() != '[') { // not a bracketed IPv6 literal
-        if (auto p = h.rfind(':'); p != std::string::npos)
-            h.erase(p);
+    if (!h.empty() && h.front() == '[') { // bracketed IPv6, with or without :port
+        if (auto close = h.find(']'); close != std::string::npos)
+            h.erase(close + 1);
+    } else if (std::count(h.begin(), h.end(), ':') == 1) { // host:port
+        h.erase(h.find(':'));
     }
+    // zero colons: a plain host; two or more without brackets: a bare IPv6 literal, left whole
     return h;
 }
 
@@ -150,7 +156,7 @@ std::string snapmaker_percent_encode(const std::string& s, bool keep_slash)
     static const char* hex = "0123456789ABCDEF";
     std::string        out;
     for (unsigned char c : s) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || (keep_slash && c == '/'))
+        if (ascii_alnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || (keep_slash && c == '/'))
             out += static_cast<char>(c);
         else {
             out += '%';
@@ -284,27 +290,42 @@ const std::vector<std::string>& snapmaker_default_state_objects()
     return objs;
 }
 
-std::vector<std::string> SnapmakerDeviceBridge::objects_from(const nlohmann::json& params) const
+bool snapmaker_state_object_allowed(const std::string& name)
 {
-    std::vector<std::string> out;
-    auto take = [&out](const nlohmann::json& objects) {
-        if (!objects.is_object())
-            return;
-        for (auto it = objects.begin(); it != objects.end() && out.size() < 64; ++it) {
-            const std::string& k = it.key();
-            const bool ok = !k.empty() && k.size() <= 64 &&
-                            std::all_of(k.begin(), k.end(), [](unsigned char c) { return std::isalnum(c) || c == '_' || c == ' '; });
-            if (ok)
-                out.push_back(k);
+    if (name.empty() || name.size() > 64)
+        return false;
+    for (unsigned char c : name)
+        if (!ascii_alnum(c) && c != '_' && c != ' ')
+            return false;
+    static const char* exact[] = {"print_stats", "display_status", "virtual_sdcard", "gcode_move", "webhooks", "toolhead", "print_task_config",
+                                  "machine_state_manager", "idle_timeout", "filament_detect", "motion_report", "defect_detection", "purifier",
+                                  "exception_manager", "heater_bed", "fan"};
+    for (const char* e : exact)
+        if (name == e)
+            return true;
+    // Families: extruder, extruder1..N; "<kind> <name>" objects for fans, LEDs, heaters and sensors.
+    if (name.compare(0, 8, "extruder") == 0)
+        return std::all_of(name.begin() + 8, name.end(), [](unsigned char c) { return c >= '0' && c <= '9'; });
+    for (const char* prefix : {"fan_generic ", "led ", "heater_generic ", "temperature_sensor ", "temperature_fan ", "filament_feed "})
+        if (name.compare(0, std::strlen(prefix), prefix) == 0 && name.size() > std::strlen(prefix))
+            return true;
+    return false; // configfile, bed_mesh, gcode_macro..., anything else Klipper exposes
+}
+
+SnapmakerDeviceBridge::Selection SnapmakerDeviceBridge::select_objects(const nlohmann::json& params) const
+{
+    Selection sel;
+    std::size_t seen = 0;
+    if (params.is_object() && params.contains("objects") && params["objects"].is_object()) {
+        for (auto it = params["objects"].begin(); it != params["objects"].end() && seen < 64; ++it, ++seen) {
+            sel.requested = true;
+            (snapmaker_state_object_allowed(it.key()) ? sel.allowed : sel.rejected).push_back(it.key());
         }
-    };
-    if (params.is_object() && params.contains("objects"))
-        take(params["objects"]);
-    if (out.empty())
-        out = m_state_objects;
-    if (out.empty())
-        out = snapmaker_default_state_objects();
-    return out;
+    }
+    if (!sel.requested) {
+        sel.allowed = m_state_objects.empty() ? snapmaker_default_state_objects() : m_state_objects;
+    }
+    return sel;
 }
 
 void SnapmakerDeviceBridge::run_query(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done)
@@ -316,23 +337,78 @@ void SnapmakerDeviceBridge::run_query(const std::vector<std::string>& objects, s
     m_options.query_state(objects, std::move(done));
 }
 
+std::string SnapmakerDeviceBridge::connected_dev_id() const
+{
+    for (const auto& d : current_devices())
+        if (d.connected)
+            return d.dev_id;
+    return {};
+}
+
+// One Moonraker query at a time, shared: every caller that arrives while it is out waits for the same result (they get the
+// first caller's object set). A lost callback is cut off by the watchdog in tick().
+void SnapmakerDeviceBridge::request_state(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> cb)
+{
+    m_state_waiters.push_back(std::move(cb));
+    if (m_state_in_flight)
+        return;
+    m_state_in_flight   = true;
+    m_state_started_tick = m_ticks;
+    const std::uint64_t gen   = ++m_state_gen;
+    auto                alive = m_alive;
+    run_query(objects, [this, alive, gen](bool ok, nlohmann::json result) {
+        if (!*alive || gen != m_state_gen)
+            return; // bridge gone, or this query was abandoned (watchdog, machine change)
+        m_state_in_flight = false;
+        auto waiters      = std::move(m_state_waiters);
+        m_state_waiters.clear();
+        const bool good = ok && result.is_object() && result.contains("status");
+        for (auto& w : waiters)
+            w(good, good ? result : nlohmann::json::object());
+    });
+}
+
+// Gives up on the query in flight: its waiters get the failure now and its late callback is ignored.
+void SnapmakerDeviceBridge::abandon_state_query()
+{
+    ++m_state_gen;
+    m_state_in_flight = false;
+    auto waiters      = std::move(m_state_waiters);
+    m_state_waiters.clear();
+    for (auto& w : waiters)
+        w(false, nlohmann::json::object());
+}
+
 void SnapmakerDeviceBridge::push_state(bool force)
 {
-    if (m_closed || m_state_in_flight || m_sswcp.subscriber_count("sw_SubscribeMachineState") == 0)
+    if (m_closed || !m_active || m_sswcp.subscriber_count("sw_SubscribeMachineState") == 0)
         return;
-    m_state_in_flight = true;
-    auto alive        = m_alive;
-    run_query(objects_from(nlohmann::json::object()), [this, alive, force](bool ok, nlohmann::json result) {
-        if (!*alive)
-            return; // bridge gone
-        m_state_in_flight = false;
-        if (!ok || !result.is_object() || !result.contains("status"))
+    if (force)
+        m_force_push = true; // a new subscriber: the next completed query pushes even if nothing changed
+    if (m_push_waiting)
+        return; // a push is already queued on the query in flight (or the next one); it serves this too
+    if (!force && m_state_in_flight)
+        return; // a periodic tick while a poll is out: nothing to add
+    m_push_waiting = true;
+    request_state(select_objects(nlohmann::json::object()).allowed, [this](bool ok, nlohmann::json result) {
+        m_push_waiting = false;
+        if (!ok)
             return; // fail soft: keep the last state on the page, say nothing
-        if (!force && result["status"] == m_last_state_status)
+        const bool force_now = m_force_push;
+        m_force_push         = false;
+        if (!force_now && result["status"] == m_last_state_status)
             return;
         m_last_state_status = result["status"];
         m_sswcp.push("sw_SubscribeMachineState", result);
     });
+}
+
+nlohmann::json snapmaker_state_reply(bool ok, nlohmann::json result, const std::vector<std::string>& rejected)
+{
+    nlohmann::json out = ok && result.is_object() && result.contains("status") && result["status"].is_object() ? std::move(result) : snapmaker_empty_machine_state();
+    for (const auto& name : rejected)
+        out["status"][name] = nlohmann::json::object(); // asked for but not allowed: present and empty, never queried
+    return out;
 }
 
 void SnapmakerDeviceBridge::register_commands()
@@ -373,35 +449,33 @@ void SnapmakerDeviceBridge::register_commands()
         false);
 
     // --- machine state: the Moonraker printer.objects.query result, UNWRAPPED ({eventtime, status}) ---
-    m_sswcp.register_command(
-        "sw_GetMachineState",
-        [this](SSWCP_Instance& i) {
-            auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
-            auto alive = m_alive;
-            // The reply may come later (the query runs off-thread); the dispatcher keeps the instance until it is sent.
-            run_query(objects_from(i.params()), [weak, alive](bool ok, nlohmann::json result) {
-                if (!*alive)
-                    return;
-                if (auto inst = weak.lock())
-                    inst->reply_ok(ok && result.is_object() && result.contains("status") ? std::move(result) : snapmaker_empty_machine_state());
-            });
-        },
-        false);
+    // GetMachineState and an event_id-less SubscribeMachineState share ONE Moonraker query at a time (request_state);
+    // objects outside the allow-list are never queried and come back as empty entries.
+    auto one_state = [this](SSWCP_Instance& i) {
+        const Selection sel = select_objects(i.params());
+        if (sel.allowed.empty()) { // everything asked for was refused (or nothing usable): no query at all
+            i.reply_ok(snapmaker_state_reply(false, nlohmann::json::object(), sel.rejected));
+            return;
+        }
+        auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+        auto alive = m_alive;
+        // The reply may come later (the query runs off-thread); the dispatcher keeps the instance until it is sent.
+        request_state(sel.allowed, [weak, alive, rejected = sel.rejected](bool ok, nlohmann::json result) {
+            if (!*alive)
+                return;
+            if (auto inst = weak.lock())
+                inst->reply_ok(snapmaker_state_reply(ok, std::move(result), rejected));
+        });
+    };
+    m_sswcp.register_command("sw_GetMachineState", one_state, false);
     m_sswcp.register_command(
         "sw_SubscribeMachineState",
-        [this](SSWCP_Instance& i) {
+        [this, one_state](SSWCP_Instance& i) {
             if (i.event_id().empty()) { // nothing to push to: behave like one GetMachineState
-                auto weak = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
-                auto alive = m_alive;
-                run_query(objects_from(i.params()), [weak, alive](bool ok, nlohmann::json result) {
-                    if (!*alive)
-                        return;
-                    if (auto inst = weak.lock())
-                        inst->reply_ok(ok && result.is_object() && result.contains("status") ? std::move(result) : snapmaker_empty_machine_state());
-                });
+                one_state(i);
                 return;
             }
-            m_state_objects = objects_from(i.params());
+            m_state_objects = select_objects(i.params()).allowed;
             i.reply_ok(); // the ack went out in process(); this registers the subscription
             push_state(true);
         },
@@ -409,7 +483,9 @@ void SnapmakerDeviceBridge::register_commands()
     m_sswcp.register_command(
         "sw_SetSubscribeFilter",
         [this](SSWCP_Instance& i) {
-            m_state_objects = objects_from(i.params());
+            const Selection sel = select_objects(i.params());
+            if (sel.requested)
+                m_state_objects = sel.allowed;
             i.reply_ok();
         },
         false);
@@ -550,13 +626,37 @@ void SnapmakerDeviceBridge::refresh_devices()
     m_sswcp.push("sw_SubscribeLocalDevices", current);
 }
 
+void SnapmakerDeviceBridge::set_active(bool active)
+{
+    if (m_closed || m_active == active)
+        return;
+    m_active = active;
+    if (active) {
+        refresh_devices();
+        push_state(true);
+    }
+}
+
 void SnapmakerDeviceBridge::tick()
 {
     if (m_closed)
         return;
-    m_sswcp.expire_due();
-    refresh_devices();
     ++m_ticks;
+    m_sswcp.expire_due();
+    // A lost query callback must not wedge state for good.
+    if (m_state_in_flight && m_ticks - m_state_started_tick >= kStateWatchdogTicks)
+        abandon_state_query();
+    if (!m_active)
+        return;
+    // A different machine selected: what was cached (and any reply still in flight) belongs to the old one.
+    const std::string machine = connected_dev_id();
+    if (machine != m_state_machine) {
+        m_state_machine = machine;
+        m_last_state_status = nlohmann::json();
+        abandon_state_query();
+        push_state(true);
+    }
+    refresh_devices();
     // The record's sn must be the serial the machine reports (the page re-keys by it); read it once per connected machine.
     if (m_ticks >= m_serial_retry_at)
         for (const auto& d : current_devices())

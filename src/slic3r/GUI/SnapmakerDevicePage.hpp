@@ -27,6 +27,8 @@ public:
     ~SnapmakerDevicePage() override;
 
     bool Show(bool show = true) override;
+    // Tears the page down completely (see the .cpp); the next Show() builds it again.
+    void reset();
 
 private:
     bool start();
@@ -39,7 +41,8 @@ private:
 
     std::unique_ptr<WebPageServer>        m_server;
     std::unique_ptr<SnapmakerDeviceBridge> m_bridge;
-    wxWebView*                            m_browser{nullptr};
+    wxWebView*                            m_browser{nullptr};        // null once torn down
+    wxWebView*                            m_browser_window{nullptr}; // the window itself, until reset() destroys it
     wxTimer                               m_timer;
     bool                                  m_started{false};
 };
