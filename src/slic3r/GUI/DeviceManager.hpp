@@ -208,7 +208,18 @@ public:
 
     // Generate consistent dev_id from host address and optional port
     // Returns "host:port" or "host" if port is empty
+    // The id of a host-based machine, from the address as typed or stored. The rule (one machine per host and port):
+    //   scheme, path/query/fragment and any user:password@ are dropped; the host is lower-cased and loses a trailing '.';
+    //   a bracketed IPv6 literal ("[::1]:7125") keeps its brackets and an unbracketed one is left whole;
+    //   a port given separately (printhost_port) wins over one inside the address; no port at all gives just the host.
+    // So "http://U1.local:7125/x", "u1.local:7125" and ("u1.local", "7125") are the same id. Machines saved earlier under a
+    // serial-style id (typed in the old Bambu dialog) keep that id; they are not migrated.
     static std::string dev_id_from_address(const std::string& host, const std::string& port = "");
+    // The id insert_local_device() gives a machine added with address `dev_ip`: dev_id_from_address(dev_ip), except that when
+    // the active preset names the same host, the preset's own id (with its printhost_port) is used, because that is the id
+    // GUI_App::select_machine() derives. This is what makes a preset host '192.168.1.5' + port '7125' and a typed
+    // '192.168.1.5:7125' one machine, and a typed '192.168.1.5' with a stale preset port '7125' match it too.
+    static std::string dev_id_for_insert(const std::string& dev_ip, const std::string& preset_host, const std::string& preset_port);
 
     bool        local_use_ssl { true };
     bool        local_use_ssl_for_ftp { true };

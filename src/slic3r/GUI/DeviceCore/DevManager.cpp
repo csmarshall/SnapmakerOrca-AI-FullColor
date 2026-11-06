@@ -1,5 +1,7 @@
 #include "DevManager.h"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
 #include <boost/log/trivial.hpp>
 #include <mutex>
 #include <chrono>
@@ -476,9 +478,15 @@ namespace Slic3r
         // the caller passed (a typed serial number, a URL), the same id GUI_App::select_machine() derives from
         // print_host/printhost_port. Others keep the id they were given.
         const std::string agent_id = get_current_printer_agent_id();
+        std::string preset_host, preset_port; // the active preset's host, so the id matches what select_machine() derives
+        if (wxTheApp && GUI::wxGetApp().preset_bundle) {
+            const auto& cfg = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+            preset_host     = cfg.opt_string("print_host");
+            preset_port     = cfg.opt_string("printhost_port");
+        }
         const std::string dev_id =
             (Slic3r::NetworkAgentFactory::printer_agent_needs_print_host(agent_id) && !machine.dev_ip.empty())
-                ? MachineObject::dev_id_from_address(machine.dev_ip)
+                ? MachineObject::dev_id_for_insert(machine.dev_ip, preset_host, preset_port)
                 : machine.dev_id;
         MachineObject* obj;
         auto           it = localMachineList.find(dev_id);
