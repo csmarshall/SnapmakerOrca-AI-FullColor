@@ -67,6 +67,9 @@ struct BridgeHarness
     // Read-only resource source: path -> body (absent = failure). Every request is recorded.
     std::map<std::string, std::string> resources;
     std::vector<std::string>          fetched;
+    // With hold_fetch set a fetch is not answered until the test calls release_fetches(); the real source is off-thread.
+    bool                              hold_fetch = false;
+    std::vector<std::function<void()>> held;
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -83,12 +86,21 @@ struct BridgeHarness
               o.switch_tab = [this](SnapmakerTab t) { tabs.push_back(t); return tab_ok; };
               o.fetch_resource = [this](const std::string& path, std::size_t, std::function<void(bool, std::string)> done) {
                   fetched.push_back(path);
-                  auto it = resources.find(path);
-                  if (it == resources.end()) done(false, std::string()); else done(true, it->second);
+                  auto answer = [this, path, done = std::move(done)] {
+                      auto it = resources.find(path);
+                      if (it == resources.end()) done(false, std::string()); else done(true, it->second);
+                  };
+                  if (hold_fetch) held.push_back(std::move(answer)); else answer();
               };
               return o;
           }())
     {}
+    void release_fetches()
+    {
+        auto pending = std::move(held);
+        held.clear();
+        for (auto& f : pending) f();
+    }
     json reply(std::size_t n) const
     {
         const std::string prefix = "window.postMessage(JSON.stringify(", suffix = "), '*');";
@@ -630,6 +642,48 @@ TEST_CASE("the record's sn becomes the machine's serial and subscribers are told
 
     for (int i = 0; i < 5; ++i) h.bridge.tick();
     CHECK(h.fetched.size() == 1);
+}
+
+// #77: the page keys a machine by the sn of the first record it gets and connects it under that key; a later record under
+// another sn looks like a new, never-connected device ("Unconnected"). So nothing may name the connected machine by its
+// dev_id while the serial read is still out.
+TEST_CASE("the first device replies and pushes wait for the serial, so the sn never changes under the page", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices    = {connected_u1()};
+    h.hold_fetch = true;
+    h.resources["/machine/system_info"] = kSysInfoBody;
+
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeLocalDevices", "ls"));
+    h.sent.clear();
+    h.bridge.tick();                                   // starts the serial read, which stays in flight
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetConnectedMachine"));
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetLocalDevices"));
+    REQUIRE(h.fetched.size() == 1);                    // one read, shared by both callers
+    CHECK(h.sent.empty());                             // no reply, and no push, under the dev_id
+
+    h.release_fetches();
+    REQUIRE_FALSE(h.sent.empty());
+    for (std::size_t n = 0; n < h.sent.size(); ++n) {  // everything the page is told names the machine by its serial
+        json data = h.reply(n)["payload"]["data"];
+        json rec  = data.is_array() ? data[0] : data;
+        CHECK(rec["sn"] == "U1REAL123");
+    }
+    CHECK(h.fetched.size() == 1);
+}
+
+TEST_CASE("a failed serial read still answers the page, under the dev_id", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices    = {connected_u1()};
+    h.hold_fetch = true;                               // no resource registered: the read fails
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetConnectedMachine"));
+    h.bridge.tick();
+    CHECK(h.sent.empty());
+    h.release_fetches();
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["data"]["sn"] == "3d-printer");
+    CHECK(h.reply(0)["payload"]["data"]["connected"] == true);
 }
 
 TEST_CASE("a late serial is pushed to local-device subscribers", "[SSWCP][device_ui]")
