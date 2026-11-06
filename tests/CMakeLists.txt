@@ -42,6 +42,19 @@ add_test(NAME snapmaker_bridge_commands_gate_fails_on_unclassified
         -P ${CMAKE_SOURCE_DIR}/scripts/verify_bridge_commands.cmake)
 set_tests_properties(snapmaker_bridge_commands_gate_fails_on_unclassified PROPERTIES WILL_FAIL TRUE)
 
+# The page server's Content-Security-Policy must cover the bundle's static inline <script>/<style> blocks (scripts/verify_csp_hashes.cmake).
+add_test(NAME snapmaker_csp_covers_inline_blocks
+    COMMAND ${CMAKE_COMMAND}
+        -DINDEX_HTML=${CMAKE_SOURCE_DIR}/resources/web/flutter_web/index.html
+        -DCSP_FILE=${CMAKE_SOURCE_DIR}/resources/web/flutter_web.csp
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_csp_hashes.cmake)
+add_test(NAME snapmaker_csp_gate_fails_on_missing_hash
+    COMMAND ${CMAKE_COMMAND}
+        -DINDEX_HTML=${CMAKE_SOURCE_DIR}/resources/web/flutter_web/index.html
+        -DCSP_FILE=${CMAKE_CURRENT_SOURCE_DIR}/data/csp_missing_script_hash.csp
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_csp_hashes.cmake)
+set_tests_properties(snapmaker_csp_gate_fails_on_missing_hash PROPERTIES WILL_FAIL TRUE)
+
 # The verifier must also fail (not report "OK: 0 files") on an empty manifest and on an empty bundle.
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty.sha256 "")
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty_dir)
