@@ -1,4 +1,8 @@
 #include "WebPageServer.hpp"
+#include <cstring>
+#include <regex>
+#include <sstream>
+#include <fstream>
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -204,6 +208,8 @@ int resolve_within(const fs::path& canonical_root, const fs::path& rel, fs::path
 struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
 {
     fs::path                root;           // as given
+    fs::path                csp_file;
+    std::string             csp;            // the policy sent on every response; set by start()
     fs::path                canonical_root; // set by start()
     std::string             token = make_token();
     std::string             expected_host;
@@ -335,6 +341,7 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             res.set(http::field::cache_control, "no-store");
             res.set("Referrer-Policy", "no-referrer");
             res.set("X-Content-Type-Options", "nosniff");
+            res.set("Content-Security-Policy", impl->csp); // every response shape, not only HTML
             res.keep_alive(false);
             // No Access-Control-* header is ever added.
         }
@@ -472,10 +479,68 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
     }
 };
 
-WebPageServer::WebPageServer(fs::path root) : m_impl(std::make_shared<Impl>())
+namespace web_page_server_detail {
+
+std::string parse_csp_file(const std::string& text)
 {
-    m_impl->root = std::move(root);
+    std::string out;
+    std::size_t pos = 0;
+    while (pos <= text.size()) {
+        std::size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        std::string line = text.substr(pos, nl - pos);
+        pos = nl + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        const auto first = line.find_first_not_of(" \t");
+        if (first == std::string::npos || line[first] == '#') continue;
+        out += (out.empty() ? "" : " ") + line.substr(first);
+    }
+    if (out.empty() || out.size() > 8192) return {};
+    for (unsigned char c : out)
+        if (c < 0x20 || c == 0x7f) return {};
+    // 'unsafe-hashes' and 'wasm-unsafe-eval' are allowed (hashed handlers; WebAssembly only); 'unsafe-inline' and 'unsafe-eval' are not.
+    if (out.find("'unsafe-inline'") != std::string::npos || out.find("'unsafe-eval'") != std::string::npos) return {};
+    return out;
 }
+
+std::string csp_with_extra_origin(const std::string& policy, const std::string& origin)
+{
+    static const std::regex ok(R"(^https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?$)");
+    if (policy.empty() || !std::regex_match(origin, ok)) return {};
+    // Split into directives on ';', append to the three, create media-src if needed.
+    std::vector<std::string> dirs;
+    std::size_t pos = 0;
+    while (pos < policy.size()) {
+        std::size_t semi = policy.find(';', pos);
+        if (semi == std::string::npos) semi = policy.size();
+        std::string d = policy.substr(pos, semi - pos);
+        const auto f = d.find_first_not_of(' ');
+        if (f != std::string::npos) dirs.push_back(d.substr(f));
+        pos = semi + 1;
+    }
+    bool have_media = false;
+    for (auto& d : dirs) {
+        for (const char* name : {"connect-src", "img-src", "media-src"})
+            if (d.compare(0, std::strlen(name), name) == 0 && (d.size() == std::strlen(name) || d[std::strlen(name)] == ' ')) {
+                d += " " + origin;
+                if (std::string(name) == "media-src") have_media = true;
+            }
+    }
+    if (!have_media) dirs.push_back("media-src 'self' " + origin);
+    std::string out;
+    for (const auto& d : dirs) out += (out.empty() ? "" : "; ") + d;
+    return out;
+}
+
+} // namespace web_page_server_detail
+
+WebPageServer::WebPageServer(fs::path root, fs::path csp_file) : m_impl(std::make_shared<Impl>())
+{
+    m_impl->csp_file = csp_file.empty() ? root.parent_path() / "flutter_web.csp" : std::move(csp_file);
+    m_impl->root     = std::move(root);
+}
+
+const std::string& WebPageServer::content_security_policy() const { return m_impl->csp; }
 
 WebPageServer::~WebPageServer() { stop(); }
 
@@ -487,6 +552,17 @@ bool WebPageServer::start()
     if (ec || !fs::is_directory(m_impl->canonical_root)) {
         BOOST_LOG_TRIVIAL(error) << "WebPageServer: root is not a directory: " << m_impl->root.string();
         return false;
+    }
+    // Fail closed: no policy, no server.
+    {
+        std::ifstream in(m_impl->csp_file.string(), std::ios::binary);
+        std::ostringstream ss;
+        if (in) ss << in.rdbuf();
+        m_impl->csp = web_page_server_detail::parse_csp_file(ss.str());
+        if (m_impl->csp.empty()) {
+            BOOST_LOG_TRIVIAL(error) << "WebPageServer: refusing to start without a valid Content-Security-Policy file: " << m_impl->csp_file.string();
+            return false;
+        }
     }
     try {
         m_impl->io.restart(); // a stopped server can be started again

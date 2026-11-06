@@ -7,6 +7,7 @@
 #include <boost/filesystem.hpp>
 
 #include <fstream>
+#include <sstream>
 #include <thread>
 #include <chrono>
 #ifndef _WIN32
@@ -23,6 +24,7 @@ namespace fs   = boost::filesystem;
 
 namespace {
 
+fs::path real_csp() { return fs::path(PROFILES_DIR).parent_path() / "web" / "flutter_web.csp"; }
 fs::path bundle_root() { return fs::path(PROFILES_DIR).parent_path() / "web" / "flutter_web"; }
 
 struct Reply
@@ -336,7 +338,7 @@ TEST_CASE("WebPageServer rejects path traversal end to end", "[WebPageServer]")
     TempDir tmp;
     write_file(tmp.path / "root" / "index.html", "<html>ok</html>");
     write_file(tmp.path / "secret.txt", "TOP-SECRET");
-    WebPageServer s(tmp.path / "root");
+    WebPageServer s(tmp.path / "root", real_csp());
     REQUIRE(s.start());
     const std::string target = GENERATE(as<std::string>{},
         "/web/flutter_web/../secret.txt", "/web/flutter_web/%2e%2e/secret.txt", "/web/flutter_web/%2E%2E/secret.txt",
@@ -365,7 +367,7 @@ TEST_CASE("WebPageServer does not follow a symlink out of the root", "[WebPageSe
     fs::create_symlink(tmp.path / "outside" / "secret.txt", tmp.path / "root" / "link.txt");
     fs::create_directory_symlink(tmp.path / "outside", tmp.path / "root" / "dirlink");
     fs::create_symlink(tmp.path / "root" / "inside.txt", tmp.path / "root" / "okay-link.txt");
-    WebPageServer s(tmp.path / "root");
+    WebPageServer s(tmp.path / "root", real_csp());
     REQUIRE(s.start());
     for (const char* p : {"link.txt", "dirlink/secret.txt"}) {
         CAPTURE(p);
@@ -382,7 +384,7 @@ TEST_CASE("WebPageServer lists no directories", "[WebPageServer]")
     TempDir tmp;
     write_file(tmp.path / "root" / "index.html", "<html>ok</html>");
     write_file(tmp.path / "root" / "sub" / "a.txt", "a");
-    WebPageServer s(tmp.path / "root");
+    WebPageServer s(tmp.path / "root", real_csp());
     REQUIRE(s.start());
     for (const char* p : {"sub", "sub/"}) {
         CAPTURE(p);
@@ -470,7 +472,7 @@ TEST_CASE("WebPageServer maps css, ttf, otf and unknown extensions", "[WebPageSe
     write_file(tmp.path / "r" / "a.ttf", "t");
     write_file(tmp.path / "r" / "a.OTF", "o");
     write_file(tmp.path / "r" / "NOTICES", "n");
-    WebPageServer s(tmp.path / "r");
+    WebPageServer s(tmp.path / "r", real_csp());
     REQUIRE(s.start());
     CHECK(send(s, Req(P + "a.css")).header("content-type").find("text/css") == 0);
     CHECK(send(s, Req(P + "a.ttf")).header("content-type") == "font/ttf");
@@ -612,3 +614,121 @@ TEST_CASE("WebPageServer keeps accepting after a transient accept error (EMFILE)
     CHECK(send(s, Req(P + "version.json")).status == 200);
 }
 #endif
+
+// ---- Content-Security-Policy ----
+
+namespace {
+std::string read_policy_file()
+{
+    std::ifstream in((fs::path(PROFILES_DIR).parent_path() / "web" / "flutter_web.csp").string());
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return Slic3r::GUI::web_page_server_detail::parse_csp_file(ss.str());
+}
+bool has_directive(const std::string& policy, const std::string& directive)
+{
+    return policy.find("; " + directive) != std::string::npos || policy.compare(0, directive.size(), directive) == 0;
+}
+} // namespace
+
+TEST_CASE("WebPageServer sends the CSP on every response shape", "[WebPageServer][CSP]")
+{
+    WebPageServer s(bundle_root());
+    REQUIRE(s.start());
+    const std::string policy = s.content_security_policy();
+    REQUIRE_FALSE(policy.empty());
+
+    const Reply ok = send(s, Req(P + "index.html"));                                    // 200 (cookie)
+    const Reply js = send(s, Req(P + "flutter.js"));                                    // 200, not HTML
+    const Reply redirect = send(s, Req(P + "index.html").query_token());                // 302
+    const Reply denied = send(s, Req(P + "index.html").anon());                         // 403
+    const Reply missing = send(s, Req(P + "no-such-file.js"));                          // 404
+    const Reply post = send(s, Req(P + "index.html").method("POST"));                   // 405
+    const Reply head = send(s, Req(P + "index.html").method("HEAD"));                   // HEAD
+    const Reply bad_host = send(s, Req(P + "index.html").host("evil.example"));         // refused before routing
+    CHECK(ok.status == 200); CHECK(js.status == 200); CHECK(redirect.status == 302); CHECK(denied.status == 403);
+    CHECK(missing.status == 404); CHECK(post.status == 405);
+    for (const Reply* r : {&ok, &js, &redirect, &denied, &missing, &post, &head, &bad_host}) {
+        CAPTURE(r->status);
+        CHECK(r->header("content-security-policy") == policy);
+    }
+}
+
+TEST_CASE("the shipped policy is strict", "[WebPageServer][CSP]")
+{
+    const std::string p = read_policy_file();
+    REQUIRE_FALSE(p.empty());
+    CHECK(p.find("'unsafe-inline'") == std::string::npos);
+    CHECK(p.find("'unsafe-eval'") == std::string::npos);
+    CHECK(p.find("data:") == std::string::npos);
+    CHECK(p.find("blob:") == std::string::npos);
+    CHECK(p.find(" * ") == std::string::npos);
+    for (const char* d : {"default-src 'none'", "frame-src 'none'", "object-src 'none'", "base-uri 'self'", "form-action 'none'"}) {
+        CAPTURE(d);
+        CHECK(has_directive(p, d));
+    }
+    CHECK(p.find("'wasm-unsafe-eval'") != std::string::npos); // CanvasKit needs it; plain eval stays out
+    CHECK(p.find("https://us.i.posthog.com") != std::string::npos); // disclose-only decision (ADR 0005 point 6)
+}
+
+TEST_CASE("WebPageServer refuses to start without a valid policy file", "[WebPageServer][CSP]")
+{
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("wps-csp-%%%%-%%%%");
+    fs::create_directories(dir);
+    auto write = [&](const char* name, const std::string& text) { std::ofstream(( dir / name ).string()) << text; return dir / name; };
+
+    {
+        WebPageServer s(bundle_root(), dir / "does-not-exist.csp");
+        CHECK_FALSE(s.start());
+        CHECK_FALSE(s.is_running());
+    }
+    {
+        WebPageServer s(bundle_root(), write("empty.csp", ""));
+        CHECK_FALSE(s.start());
+    }
+    {
+        WebPageServer s(bundle_root(), write("comments.csp", "# only a comment\n\n   \n"));
+        CHECK_FALSE(s.start());
+    }
+    {
+        WebPageServer s(bundle_root(), write("unsafe.csp", "default-src 'none'; script-src 'self' 'unsafe-inline'\n"));
+        CHECK_FALSE(s.start());
+    }
+    {
+        WebPageServer s(bundle_root(), write("eval.csp", "default-src 'none'; script-src 'unsafe-eval'\n"));
+        CHECK_FALSE(s.start());
+    }
+    {
+        WebPageServer s(bundle_root(), write("ok.csp", "# c\ndefault-src 'none'; script-src 'self' 'wasm-unsafe-eval'\n"));
+        REQUIRE(s.start());
+        CHECK(s.content_security_policy() == "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'");
+        CHECK(send(s, Req(P + "index.html")).header("content-security-policy") == "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'");
+    }
+    fs::remove_all(dir);
+}
+
+TEST_CASE("csp_with_extra_origin adds a printer origin to connect, img and media (unused until those routes exist)", "[WebPageServer][CSP]")
+{
+    using Slic3r::GUI::web_page_server_detail::csp_with_extra_origin;
+    const std::string base = read_policy_file();
+    const std::string out  = csp_with_extra_origin(base, "http://192.168.1.5");
+    REQUIRE_FALSE(out.empty());
+    CHECK(out.find("connect-src 'self'") != std::string::npos);
+    CHECK(out.find("http://192.168.1.5") != std::string::npos);
+    CHECK(out.find("img-src 'self' https://public.resource.snapmaker.com http://192.168.1.5") != std::string::npos);
+    CHECK(out.find("media-src 'self' http://192.168.1.5") != std::string::npos);
+    CHECK(out.find("default-src 'none'") == 0);                                   // the rest is untouched
+    CHECK(out.find("frame-src 'none'") != std::string::npos);
+    CHECK(out.find("'unsafe-inline'") == std::string::npos);
+    // Count: the origin appears exactly three times.
+    std::size_t n = 0;
+    for (auto p = out.find("http://192.168.1.5"); p != std::string::npos; p = out.find("http://192.168.1.5", p + 1)) ++n;
+    CHECK(n == 3);
+    CHECK(csp_with_extra_origin(base, "https://u1.local:8443").find("https://u1.local:8443") != std::string::npos);
+    CHECK(csp_with_extra_origin(base, "http://[fe80::1]:7125").find("http://[fe80::1]:7125") != std::string::npos);
+    // Anything that is not a plain origin is refused: no header injection, no wildcard, no path.
+    for (const char* bad : {"", "*", "http://*", "192.168.1.5", "http://a b", "http://a;b", "http://a/", "http://a/path", "http://h\r\nX: y",
+                            "javascript:alert(1)", "data:", "http://h'", "ftp://h"})
+        CHECK(csp_with_extra_origin(base, bad).empty());
+    CHECK(csp_with_extra_origin("", "http://h").empty());
+}
