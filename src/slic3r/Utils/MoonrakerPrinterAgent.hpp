@@ -34,6 +34,10 @@ public:
     // Moonraker family (Qidi, Creality, Snapmaker inherit): the user types the host, the API key is optional.
     bool        needs_print_host() const override { return true; }
     std::string last_connect_error() const override;
+    void        read_machine_resource_async(const std::string& path_and_query, size_t max_bytes,
+                                            std::function<void(bool ok, std::string body)> done) override;
+    // True for the read-only paths read_machine_resource_async() will fetch (exposed for tests).
+    static bool is_readable_resource_path(const std::string& path_and_query);
     void        query_machine_objects_async(const std::vector<std::string>& object_names,
                                             std::function<void(bool ok, nlohmann::json result)> done) override;
 

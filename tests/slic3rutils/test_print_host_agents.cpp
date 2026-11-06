@@ -144,3 +144,19 @@ TEST_CASE("Other agents keep the id they were given and still need an access cod
     o->set_access_code("12345678", false);
     CHECK(o->has_access_right());
 }
+
+TEST_CASE("Moonraker read-only resource allow-list", "[printhost][device_ui]")
+{
+    CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/machine/system_info"));
+    CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/metadata?filename=a%20b.gcode"));
+    CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/thumbnails?filename=a.gcode"));
+    CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/gcodes/.thumbs/a-300x300.png"));
+    for (const char* bad : {"", "machine/system_info", "/printer/gcode/script", "/printer/print/start", "/server/files/delete",
+                            "/server/files/gcodes/", "/server/files/gcodes/../../etc/passwd", "/server/files/gcodes//x", "/server/files/metadata",
+                            "/machine/system_info?x=1 HTTP/1.1", "/server/files/gcodes/a b.png", "/server/files/gcodes/a\\b",
+                            "/machine/reboot", "/server/database/item", "http://evil/machine/system_info", "/server/files/gcodes/x#y"})
+    {
+        CAPTURE(bad);
+        CHECK_FALSE(MoonrakerPrinterAgent::is_readable_resource_path(bad));
+    }
+}

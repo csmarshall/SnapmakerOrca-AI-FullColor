@@ -488,6 +488,19 @@ public:
      * ok=false and an empty object when there is no connected machine, the request fails or times out. Agents that have
      * no such notion keep the default (reports failure at once).
      */
+    /**
+     * Read-only: GET one allow-listed resource of the selected machine ("/machine/system_info", "/server/files/metadata?...",
+     * "/server/files/thumbnails?...", "/server/files/gcodes/<relative path>") and hand back the raw body, at most `max_bytes`.
+     * `done` is called exactly once, from ANY thread; ok=false (empty body) for a refused path, no machine, an HTTP error, a
+     * timeout or an oversized body. Agents without the notion keep the default (fails at once).
+     */
+    virtual void read_machine_resource_async(const std::string& path_and_query, size_t max_bytes,
+                                             std::function<void(bool ok, std::string body)> done)
+    {
+        (void) path_and_query; (void) max_bytes;
+        if (done) done(false, std::string());
+    }
+
     virtual void query_machine_objects_async(const std::vector<std::string>& object_names,
                                              std::function<void(bool ok, nlohmann::json result)> done)
     {
