@@ -414,17 +414,39 @@ nlohmann::json snapmaker_state_reply(bool ok, nlohmann::json result, const std::
 void SnapmakerDeviceBridge::register_commands()
 {
     // --- the connected machine ---
+    // The page keys a machine by the sn of the record it first receives and connects it under that key. If the sn changes
+    // afterwards (dev_id replaced by the machine's serial) it sees a new, never-connected device and shows "Unconnected" (#77).
+    // So the first device replies wait for the serial (read once per machine); when the read fails they answer as before.
+    auto when_serial_known = [this](SSWCP_Instance& i, std::function<void(SSWCP_Instance&)> reply) {
+        std::string pending;
+        for (const auto& d : current_devices())
+            if (d.connected && !m_serials.count(d.dev_id) && !m_system_info.count(d.dev_id)) { pending = d.dev_id; break; }
+        if (pending.empty() || !m_options.fetch_resource) { reply(i); return; }
+        auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+        auto alive = m_alive;
+        fetch_system_info(pending, [alive, weak, reply] {
+            if (!*alive) return;
+            if (auto inst = weak.lock()) reply(*inst);
+        });
+    };
     m_sswcp.register_command(
         "sw_GetConnectedMachine",
-        [this](SSWCP_Instance& i) {
-            nlohmann::json record = nlohmann::json::object(); // nothing connected: {} (the page treats it as no machine)
-            const std::vector<SnapmakerDeviceInfo> devices = current_devices();
-            for (const auto& d : devices)
-                if (d.connected) {
-                    record = snapmaker_device_to_json(d);
-                    break;
-                }
-            i.reply_ok(std::move(record));
+        [this, when_serial_known](SSWCP_Instance& i) {
+            when_serial_known(i, [this](SSWCP_Instance& inst) {
+                nlohmann::json record = nlohmann::json::object(); // nothing connected: {} (the page treats it as no machine)
+                for (const auto& d : current_devices())
+                    if (d.connected) {
+                        record = snapmaker_device_to_json(d);
+                        break;
+                    }
+                inst.reply_ok(std::move(record));
+            });
+        },
+        false);
+    m_sswcp.register_command(
+        "sw_GetLocalDevices",
+        [this, when_serial_known](SSWCP_Instance& i) {
+            when_serial_known(i, [this](SSWCP_Instance& inst) { inst.reply_ok(snapmaker_devices_to_json(current_devices())); });
         },
         false);
 
@@ -619,6 +641,11 @@ void SnapmakerDeviceBridge::refresh_devices()
 {
     if (m_closed)
         return;
+    // Do not publish a connected machine under its dev_id while its serial is still being read (see when_serial_known, #77):
+    // the later push under the serial would look like a new device. A failed read (m_serial_retry_at set) publishes as before.
+    for (const auto& d : current_devices())
+        if (d.connected && !m_serials.count(d.dev_id) && !m_system_info.count(d.dev_id) && (m_sysinfo_waiters.count(d.dev_id) || m_serial_retry_at == 0))
+            return;
     nlohmann::json current = snapmaker_devices_to_json(current_devices());
     if (current == m_last_devices)
         return;
