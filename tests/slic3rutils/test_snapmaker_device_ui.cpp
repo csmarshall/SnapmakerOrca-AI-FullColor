@@ -106,7 +106,7 @@ TEST_CASE("bridge serves the local devices and pushes changes to subscribers", "
     h.bridge.tick();
     CHECK(h.sent.size() == 2);   // unchanged list: no push
 
-    h.devices.push_back({"192.168.1.5:7125", "U1", "192.168.1.5", "Snapmaker U1", true});
+    h.devices.push_back({"192.168.1.5:7125", "", "U1", "192.168.1.5", "Snapmaker U1", true});
     h.bridge.tick();
     REQUIRE(h.sent.size() == 3);
     json push = h.reply(2);
@@ -123,4 +123,92 @@ TEST_CASE("bridge serves the local devices and pushes changes to subscribers", "
 
     h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetLocalDevices"));
     CHECK(h.reply(4)["payload"]["data"][0]["dev_id"] == "192.168.1.5:7125");
+}
+
+TEST_CASE("device record carries the keys the page needs, sn above all", "[SSWCP][device_ui]")
+{
+    SnapmakerDeviceInfo d;
+    d.dev_id    = "3d-printer";
+    d.name      = "U1";
+    d.ip        = "http://3d-printer:7125/";
+    d.model     = "Snapmaker U1";
+    d.online    = true;
+    d.connected = true;
+
+    json r = snapmaker_device_to_json(d);
+    // The page builds a card only from a non-empty `sn`; without a real serial it is the dev_id.
+    REQUIRE(r.contains("sn"));
+    CHECK(r["sn"].is_string());
+    CHECK(r["sn"] == "3d-printer");
+    CHECK(r["id"] == "3d-printer");
+    CHECK(r["name"] == "U1");
+    CHECK(r["device_name"] == "U1");
+    CHECK(r["ip"] == "3d-printer"); // bare host: no scheme, port or path
+    CHECK(r["port"] == 1884);
+    CHECK(r["clientId"] == "orca-3d-printer");
+    CHECK(r["link_mode"] == "lan");
+    CHECK(r["machine_type"] == "Snapmaker U1");
+    CHECK(r["connected"] == true);
+    CHECK(r["online"] == true);
+
+    d.sn = "SM2U1XYZ";
+    CHECK(snapmaker_device_to_json(d)["sn"] == "SM2U1XYZ"); // a real serial wins
+    CHECK(snapmaker_device_to_json(d)["id"] == "3d-printer");
+
+    // Never an empty sn, even for a blank record with only an id.
+    SnapmakerDeviceInfo bare;
+    bare.dev_id = "x:1";
+    CHECK(snapmaker_device_to_json(bare)["sn"] == "x:1");
+    CHECK(snapmaker_device_to_json(bare)["name"] == "x:1");
+
+    CHECK(snapmaker_bare_host("u1.local:7125") == "u1.local");
+    CHECK(snapmaker_bare_host("https://u1.local/x") == "u1.local");
+    CHECK(snapmaker_bare_host("192.168.1.5") == "192.168.1.5");
+    CHECK(snapmaker_bare_host("[::1]:7125") == "[::1]:7125"); // IPv6 literal left alone
+}
+
+TEST_CASE("sw_GetConnectedMachine returns the connected machine's record, {} when none", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetConnectedMachine"));
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] == 200);
+    CHECK(h.reply(0)["payload"]["data"] == json::object());
+
+    SnapmakerDeviceInfo a, b;
+    a.dev_id = "a:1"; a.name = "A"; a.ip = "a"; // not connected
+    b.dev_id = "3d-printer"; b.name = "U1"; b.ip = "3d-printer"; b.model = "Snapmaker U1"; b.online = true; b.connected = true;
+    h.devices = {a, b};
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetConnectedMachine"));
+    json rec = h.reply(1)["payload"]["data"];
+    CHECK(rec["sn"] == "3d-printer");
+    CHECK(rec["connected"] == true);
+    // Same record as the list entry (the page was verified with both carrying the same object).
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetLocalDevices"));
+    json list = h.reply(2)["payload"]["data"];
+    REQUIRE(list.size() == 2);
+    CHECK(list[1] == rec);
+    for (const auto& e : list)
+        CHECK_FALSE(e["sn"].get<std::string>().empty());
+
+    // Foreign origin still refused.
+    CHECK_FALSE(h.bridge.on_script_message("https://evil.example/", BridgeHarness::msg("sw_GetConnectedMachine")));
+    // A command that is not on the allow-list is still a 501.
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    CHECK(h.reply(h.sent.size() - 1)["payload"]["code"] == 501);
+}
+
+TEST_CASE("local-device pushes use the same record shape", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeLocalDevices", "sub"));
+    SnapmakerDeviceInfo d;
+    d.dev_id = "3d-printer"; d.name = "U1"; d.ip = "3d-printer"; d.online = true; d.connected = true;
+    h.devices = {d};
+    h.bridge.tick();
+    REQUIRE(h.sent.size() == 2);
+    json push = h.reply(1)["payload"]["data"];
+    REQUIRE(push.size() == 1);
+    CHECK(push[0] == snapmaker_device_to_json(d));
+    CHECK(push[0]["sn"] == "3d-printer");
 }

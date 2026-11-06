@@ -14,6 +14,7 @@
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "slic3r/Utils/IPrinterAgent.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r_version.h"
 
 namespace Slic3r { namespace GUI {
@@ -142,6 +143,9 @@ std::vector<SnapmakerDeviceInfo> SnapmakerDevicePage::current_devices() const
     // next to the machine the failure belongs to.
     const MachineObject* selected = dev->get_selected_machine();
     std::string          connect_error;
+    std::string          preset_model;
+    if (wxGetApp().preset_bundle)
+        preset_model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
     if (auto* net = wxGetApp().getAgent())
         if (auto pa = net->get_printer_agent())
             connect_error = pa->last_connect_error();
@@ -149,8 +153,19 @@ std::vector<SnapmakerDeviceInfo> SnapmakerDevicePage::current_devices() const
         const MachineObject* m = kv.second;
         if (!m)
             continue;
-        out.push_back({m->get_dev_id(), m->get_dev_name(), m->get_dev_ip(), m->printer_type, const_cast<MachineObject*>(m)->is_online(),
-                       m == selected ? connect_error : std::string()});
+        const bool is_selected = m == selected;
+        // The model comes from the printer preset (printer_model, e.g. "Snapmaker U1"), not from a printer check: the
+        // preset is what chose this agent. Other machines of the agent have no preset of their own, so they carry
+        // the machine's own type string.
+        SnapmakerDeviceInfo d;
+        d.dev_id    = m->get_dev_id();
+        d.name      = m->get_dev_name();
+        d.ip        = m->get_dev_ip();
+        d.model     = (is_selected && !preset_model.empty()) ? preset_model : m->printer_type;
+        d.online    = const_cast<MachineObject*>(m)->is_online();
+        d.connected = is_selected;
+        d.error     = is_selected ? connect_error : std::string();
+        out.push_back(std::move(d));
     }
     return out;
 }
