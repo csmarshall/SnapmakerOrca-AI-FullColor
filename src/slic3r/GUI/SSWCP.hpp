@@ -52,6 +52,11 @@ constexpr int         SSWCP_MAX_JSON_DEPTH    = 32;
 constexpr std::size_t SSWCP_MAX_EVENT_ID_LEN  = 256;
 constexpr std::size_t SSWCP_MAX_SUBSCRIPTIONS = 256;
 constexpr std::size_t SSWCP_MAX_LOG_CHARS     = 4096;
+// Requests the dispatcher holds at once (one-shots waiting for a delayed reply plus live subscriptions). Beyond it a
+// request is answered 429 and not queued, so a page cannot grow the list without bound.
+constexpr std::size_t SSWCP_MAX_PENDING       = 512;
+// The echoed header is kept for every pending request, so it is bounded too.
+constexpr std::size_t SSWCP_MAX_HEADER_BYTES  = 4096;
 
 // What the dispatcher did with one incoming message (the page never sees this; tests and logs do).
 enum class SSWCPOutcome {
@@ -60,6 +65,7 @@ enum class SSWCPOutcome {
     BadRequest,    // header present but the payload/cmd/event_id/params were invalid: 400 sent
     Dropped,       // no usable header to echo (not JSON, no header, no payload...): nothing sent
     TooLarge,      // over SSWCP_MAX_MESSAGE_BYTES: nothing sent
+    Busy,          // SSWCP_MAX_PENDING reached: 429 sent
     TooDeep,       // JSON nested deeper than SSWCP_MAX_JSON_DEPTH: nothing sent
 };
 
@@ -72,10 +78,8 @@ struct SSWCPServices
     // Returns the JSON array for sw_GetLocalDevices and for pushes to sw_SubscribeLocalDevices. Step 1d
     // binds the DeviceManager here. Default (null): empty array.
     std::function<nlohmann::json()> local_devices;
-    // Tripwire for "no outbound traffic": a handler that would ever contact the outside world must call
-    // it first. No handler in this core does (sw_UploadEvent is accepted and dropped), so tests assert
-    // it stays at zero.
-    std::function<void(const std::string& what)> outbound_observer;
+    // No egress: this core has no network code at all. sw_UploadEvent (Snapmaker's telemetry) is accepted, answered
+    // with an empty 200 and dropped; a test pins that it neither echoes the payload nor does anything but reply.
     // Optional extras for sw_GetSoftwareInfo. Empty name/version fall back to the build's values.
     std::string software_name;
     std::string software_version;
