@@ -27,6 +27,21 @@ add_test(NAME flutter_web_bundle_manifest
         -DMANIFEST=${CMAKE_SOURCE_DIR}/resources/web/flutter_web.sha256
         -P ${CMAKE_SOURCE_DIR}/scripts/verify_flutter_web.cmake)
 
+# Every sw_* name in the bundle must be classified REGISTERED or DENIED in resources/web/snapmaker_bridge_commands.txt, and
+# nothing stale may be listed (the live registry is compared to the REGISTERED lines by the [SSWCP] Catch2 tests).
+add_test(NAME snapmaker_bridge_commands_classified
+    COMMAND ${CMAKE_COMMAND}
+        -DBUNDLE_DIR=${CMAKE_SOURCE_DIR}/resources/web/flutter_web
+        -DCOMMANDS=${CMAKE_SOURCE_DIR}/resources/web/snapmaker_bridge_commands.txt
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_bridge_commands.cmake)
+# ... and the gate must fail on an incomplete list (a new, unclassified bundle command).
+add_test(NAME snapmaker_bridge_commands_gate_fails_on_unclassified
+    COMMAND ${CMAKE_COMMAND}
+        -DBUNDLE_DIR=${CMAKE_SOURCE_DIR}/resources/web/flutter_web
+        -DCOMMANDS=${CMAKE_CURRENT_SOURCE_DIR}/data/bridge_commands_incomplete.txt
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_bridge_commands.cmake)
+set_tests_properties(snapmaker_bridge_commands_gate_fails_on_unclassified PROPERTIES WILL_FAIL TRUE)
+
 # The verifier must also fail (not report "OK: 0 files") on an empty manifest and on an empty bundle.
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty.sha256 "")
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/flutter_web_empty_dir)
