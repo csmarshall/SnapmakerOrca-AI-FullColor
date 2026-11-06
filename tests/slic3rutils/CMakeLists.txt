@@ -56,6 +56,7 @@ add_executable(${_TEST_NAME}_tests
     test_web_page_server.cpp
     test_sswcp.cpp
     test_snapmaker_device_ui.cpp
+    test_print_host_agents.cpp
     test_imgui_wrapper.cpp
     test_user_manager.cpp
     test_sequential_clearance.cpp

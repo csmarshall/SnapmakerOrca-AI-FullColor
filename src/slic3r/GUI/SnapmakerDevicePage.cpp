@@ -11,6 +11,8 @@
 #include "DeviceManager.hpp"
 #include "DeviceCore/DevManager.h"
 #include "Widgets/WebView.hpp"
+#include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/IPrinterAgent.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r_version.h"
 
@@ -136,11 +138,19 @@ std::vector<SnapmakerDeviceInfo> SnapmakerDevicePage::current_devices() const
     if (!dev)
         return out;
     // Scoped to the live agent, so a Bambu or Moonraker machine from an earlier session does not show up here.
+    // A failed connect keeps the machine selected (the agent reports it separately), so the page can show the reason
+    // next to the machine the failure belongs to.
+    const MachineObject* selected = dev->get_selected_machine();
+    std::string          connect_error;
+    if (auto* net = wxGetApp().getAgent())
+        if (auto pa = net->get_printer_agent())
+            connect_error = pa->last_connect_error();
     for (const auto& kv : dev->get_my_machine_list(dev->get_current_printer_agent_id())) {
         const MachineObject* m = kv.second;
         if (!m)
             continue;
-        out.push_back({m->get_dev_id(), m->get_dev_name(), m->get_dev_ip(), m->printer_type, const_cast<MachineObject*>(m)->is_online()});
+        out.push_back({m->get_dev_id(), m->get_dev_name(), m->get_dev_ip(), m->printer_type, const_cast<MachineObject*>(m)->is_online(),
+                       m == selected ? connect_error : std::string()});
     }
     return out;
 }

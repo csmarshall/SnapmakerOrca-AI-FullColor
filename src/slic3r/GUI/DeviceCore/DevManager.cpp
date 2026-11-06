@@ -472,17 +472,25 @@ namespace Slic3r
         std::string connection_type, std::string bind_state,
         std::string version, std::string access_code)
     {
+        // A host-based agent has exactly one machine per host: its id is derived from the address whatever
+        // the caller passed (a typed serial number, a URL), the same id GUI_App::select_machine() derives from
+        // print_host/printhost_port. Others keep the id they were given.
+        const std::string agent_id = get_current_printer_agent_id();
+        const std::string dev_id =
+            (Slic3r::NetworkAgentFactory::printer_agent_needs_print_host(agent_id) && !machine.dev_ip.empty())
+                ? MachineObject::dev_id_from_address(machine.dev_ip)
+                : machine.dev_id;
         MachineObject* obj;
-        auto           it = localMachineList.find(machine.dev_id);
+        auto           it = localMachineList.find(dev_id);
         if (it != localMachineList.end()) {
             obj = it->second;
             // insert_local_device is called by the active agent, so a reused entry must follow
             // that agent as well; otherwise the agent-scoped printer list hides it.
             obj->printer_agent_id = get_current_printer_agent_id();
         } else {
-            obj = new MachineObject(this, m_agent, machine.dev_name, machine.dev_id, machine.dev_ip);
+            obj = new MachineObject(this, m_agent, machine.dev_name, dev_id, machine.dev_ip);
             obj->printer_agent_id = get_current_printer_agent_id();
-            localMachineList.insert(std::make_pair(machine.dev_id, obj));
+            localMachineList.insert(std::make_pair(dev_id, obj));
         }
         if (machine.printer_type.empty())
             obj->printer_type = _parse_printer_type("C11");

@@ -69,6 +69,7 @@ std::string plugin_printer_agent_full_ref(const PluginDescriptor& descriptor, co
 template<typename T> void register_agent()
 {
     auto info = T::get_agent_info_static();
+    const bool needs_print_host = T("").needs_print_host(); // a probe object: the capability is a virtual
     NetworkAgentFactory::register_printer_agent(info.id, info.name,
                                                 [](std::shared_ptr<ICloudServiceAgent> cloud_agent,
                                                    const std::string& log_dir) -> std::shared_ptr<IPrinterAgent> {
@@ -76,16 +77,28 @@ template<typename T> void register_agent()
                                                     if (cloud_agent)
                                                         agent->set_cloud_agent(cloud_agent);
                                                     return agent;
-                                                });
+                                                },
+                                                needs_print_host);
 }
 
 } // anonymous namespace
 
-bool NetworkAgentFactory::register_printer_agent(const std::string& id, const std::string& display_name, PrinterAgentFactory factory)
+bool NetworkAgentFactory::register_printer_agent(const std::string& id, const std::string& display_name, PrinterAgentFactory factory,
+                                                 bool needs_print_host)
 {
     std::lock_guard<std::mutex> lock(s_registry_mutex);
     auto& agents = get_printer_agents();
-    return agents.emplace(id, PrinterAgentInfo(id, display_name, std::move(factory))).second;
+    PrinterAgentInfo info(id, display_name, std::move(factory));
+    info.needs_print_host = needs_print_host;
+    return agents.emplace(id, std::move(info)).second;
+}
+
+bool NetworkAgentFactory::printer_agent_needs_print_host(const std::string& id)
+{
+    if (id == MOONRAKER_PRINTER_AGENT_ID)
+        return true;
+    const PrinterAgentInfo* info = get_printer_agent_info(id);
+    return info && info->needs_print_host;
 }
 
 bool NetworkAgentFactory::is_printer_agent_registered(const std::string& id)

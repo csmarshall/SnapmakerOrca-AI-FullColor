@@ -4393,7 +4393,7 @@ void GUI_App::switch_printer_agent()
             if (!print_host.empty()) {
                 const std::string dev_id = MachineObject::dev_id_from_address(print_host, config.opt_string("printhost_port"));
                 MachineObject* sel = m_device_manager->get_selected_machine();
-                const bool access_code_changed = effective_agent_id == MOONRAKER_PRINTER_AGENT_ID && sel &&
+                const bool access_code_changed = NetworkAgentFactory::printer_agent_needs_print_host(effective_agent_id) && sel &&
                                                  sel->get_access_code() != config.opt_string("printhost_apikey");
                 if (!sel || sel->get_dev_id() != dev_id || access_code_changed)
                     select_machine(effective_agent_id);
@@ -4472,8 +4472,9 @@ void GUI_App::select_machine(const std::string& agent_id)
     }
     std::string port = host_cfg->opt_string("printhost_port");
     std::string access_code = host_cfg->opt_string("printhost_apikey");
-    if (access_code.empty() && agent_id != MOONRAKER_PRINTER_AGENT_ID)
-        access_code = "88888888";
+    // Host-based agents get exactly what the user entered (blank = no API key); the Bambu placeholder is for Bambu-style agents only.
+    const bool host_based = NetworkAgentFactory::printer_agent_needs_print_host(agent_id);
+    access_code = effective_access_code(access_code, host_based);
 
     // Generate dev_id from host and port
     std::string dev_id = MachineObject::dev_id_from_address(print_host, port);
@@ -4509,7 +4510,7 @@ void GUI_App::select_machine(const std::string& agent_id)
             return;
         }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": created new machine dev_id=" << dev_id;
-    } else if (agent_id == MOONRAKER_PRINTER_AGENT_ID && existing->printer_agent_id == agent_id &&
+    } else if (host_based && existing->printer_agent_id == agent_id &&
                (!existing->has_access_right() || existing->get_access_code() != access_code)) {
         existing->set_access_code(access_code);
     }
