@@ -391,6 +391,11 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             for (auto it = range.first; it != range.second; ++it) cookie += std::string(it->value()) + "; ";
 
             const Outcome o = impl->route(req.method(), target, host, origin, has_origin, cookie, has_fetch_site, fetch_site);
+            // Diagnostics for "the page does not load": what the webview asked for and what we answered. The query (token) is never logged.
+            BOOST_LOG_TRIVIAL(trace) << "WebPageServer: " << std::string(req.method_string()) << " " << target.substr(0, target.find('?'))
+                                    << " host=" << host << " origin=" << (has_origin ? origin : std::string("-"))
+                                    << " fetch-site=" << (has_fetch_site ? fetch_site : std::string("-"))
+                                    << " cookie=" << (cookie.empty() ? "no" : "yes") << " -> " << static_cast<int>(o.status);
             if (o.status == http::status::found) {
                 send_status(o.status, o.location, o.set_cookie ? set_cookie_header() : std::string());
                 return;
