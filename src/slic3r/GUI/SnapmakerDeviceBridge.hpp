@@ -17,20 +17,37 @@
 
 namespace Slic3r { namespace GUI {
 
-// The minimal shape served for sw_GetLocalDevices / pushed to sw_SubscribeLocalDevices. Snapmaker's page
-// expects a richer record (its own machine objects); this is the smallest useful subset and is unverified
-// against the page until the GUI is run.
+// One machine as the bridge knows it. snapmaker_devices_to_json() turns it into the record the Flutter page
+// builds a device card from (docs/snapmaker-page-contract.md section 3; the page rejects a record without `sn`).
 struct SnapmakerDeviceInfo
 {
-    std::string dev_id;
+    std::string dev_id;        // the DeviceManager id (host[:port] for a host-based agent)
+    std::string sn;            // the printer's real serial if known; empty falls back to dev_id (see below)
     std::string name;
-    std::string ip;
-    std::string model;
-    bool        online = false;
+    std::string ip;            // as stored: may carry a scheme or port; the record gets the bare host
+    std::string model;         // the printer preset's printer_model, e.g. "Snapmaker U1"
+    bool        online    = false;
+    bool        connected = false; // the machine the host currently has selected/connected
+
     std::string error;   // why the last connect attempt failed (IPrinterAgent::last_connect_error()); empty when fine
 };
 
+// The page's per-device record. Keys (all read by the page's DeviceModel; `sn` is the one it requires):
+//   sn            non-empty. The machine's serial when SnapmakerDeviceInfo::sn has one, else dev_id: nothing in
+//                 the agent or DeviceManager exposes the printer's real serial yet, and the page only needs a
+//                 stable non-empty key. Replace by filling SnapmakerDeviceInfo::sn when the agent learns it.
+//   id, dev_id    dev_id
+//   name, device_name   the machine name (dev_id when blank)
+//   ip            bare host (scheme, path and port removed)
+//   port          1884, the value of the record that rendered a card in the harness; nothing here listens there
+//   clientId      "orca-<sn>"
+//   link_mode     "lan"
+//   machine_type  model, "" when the preset names none
+//   connected, online, error
 nlohmann::json snapmaker_devices_to_json(const std::vector<SnapmakerDeviceInfo>& devices);
+nlohmann::json snapmaker_device_to_json(const SnapmakerDeviceInfo& device);
+// The host part of an address as typed or stored: "http://u1.local:7125/x" -> "u1.local".
+std::string snapmaker_bare_host(const std::string& address);
 
 // True only for http://127.0.0.1:<port>/... (the WebPageServer's own origin). Anything else - another host,
 // another port, https, userinfo tricks like http://127.0.0.1:1@evil/, localhost, empty - is false.

@@ -78,12 +78,12 @@ TEST_CASE("SSWCP one-shot startup commands echo the header and reply 200", "[SSW
         CHECK(r["payload"]["data"]["name"] == "TestApp");
         CHECK(r["payload"]["data"]["version"] == "9.9.9");
     }
-    SECTION("sw_GetUserLoginState says not logged in") {
+    SECTION("sw_GetUserLoginState replies an empty object (no user)") {
         h.send(hdr, "sw_GetUserLoginState");
         json r = h.last();
         CHECK(r["header"] == hdr);
         CHECK(r["payload"]["code"] == 200);
-        CHECK(r["payload"]["data"]["is_login"] == false);
+        CHECK(r["payload"]["data"] == json::object());
     }
     SECTION("sw_UserLogin replies 200 and nothing else") {
         h.send(hdr, "sw_UserLogin", {{"user", "x"}, {"password", "y"}});

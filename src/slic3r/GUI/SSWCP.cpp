@@ -281,7 +281,9 @@ void register_startup_commands(SSWCPCore& core)
         i.reply_ok(std::move(d));
     });
 
-    one_shot("sw_GetUserLoginState", [](SSWCP_Instance& i) { i.reply_ok(json{{"is_login", false}}); });
+    // The 2.3.40 bundle reads no key from this reply (its `is_login` is only a key the page sends), so an empty
+    // object is the whole answer: "not logged in" is the absence of a user. See docs/snapmaker-page-contract.md.
+    one_shot("sw_GetUserLoginState", [](SSWCP_Instance& i) { i.reply_ok(); });
     // Login is a Snapmaker cloud concept; this bridge never talks to it. Reply success, do nothing.
     one_shot("sw_UserLogin", [](SSWCP_Instance& i) { i.reply_ok(); });
 
