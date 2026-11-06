@@ -47,3 +47,9 @@ The policy is "policy F" of experiment 7g (`docs/snapmaker-page-contract.md` in 
 ### Not covered / printer origins
 
 The routes that talk to the printer directly (camera, timelapse, print and send pages) were never driven. When they are enabled, the connected printer's origin has to be appended to `connect-src`, `img-src` and `media-src` per page load. `web_page_server_detail::csp_with_extra_origin(policy, "http://<printer-host>")` does that (tested, validates a plain http(s) origin, returns an empty string for anything else) and is not wired in yet. WKWebView and Edge WebView2 CSP behaviour, including hash matching of inline content, has only been checked against Chromium so far.
+
+## CSP: WebKit (macOS wxWebView) differs from Chrome (2026-11-06)
+
+Policy F was verified in headless Chrome only, and the real macOS WebView (WKWebView) showed the bundle's own "Load failed" overlay with it. Cause, read from `securitypolicyviolation` events inside the real WebView: the Flutter engine builds its `<style>` from text pieces that differ per browser engine, so the WebKit variant (1063 chars, `sha256-CCNlQB4n2yV+kpblVxCg1CPdS/azQfc966N89UgaYs4=`) was never hashed; WebKit raises an `error` event on the blocked `<style>`, and `flutter_bootstrap` treats any such event before the first frame as fatal. `img-src` also needed `blob:` (images the page decodes itself). Both are now in `resources/web/flutter_web.csp`.
+
+On every bundle bump, or on a new platform's WebView (Windows WebView2 is expected to match Chrome but is unverified), re-check by loading the page in that WebView and watching for `securitypolicyviolation` / "Load failed". The static-hash ctest gate cannot catch engine-generated styles. One violation is still reported on macOS (an inline style, empty sample) that does not stop the page from rendering; not yet explained.

@@ -138,6 +138,13 @@ bool SnapmakerDevicePage::start()
     m_browser->SetUserAgent(wxString::FromUTF8(snapmaker_user_agent(SLIC3R_VERSION, wxGetApp().dark_mode())));
     m_browser->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &SnapmakerDevicePage::on_script_message, this);
     m_browser->Bind(wxEVT_WEBVIEW_NAVIGATING, &SnapmakerDevicePage::on_navigating, this);
+    m_browser->Bind(wxEVT_WEBVIEW_ERROR, [](wxWebViewEvent& e) {
+        BOOST_LOG_TRIVIAL(warning) << "SnapmakerDevicePage: webview error " << e.GetInt() << ": " << e.GetString().ToStdString(wxMBConvUTF8())
+                                   << " url=" << e.GetURL().ToStdString(wxMBConvUTF8()).substr(0, 200);
+    });
+    m_browser->Bind(wxEVT_WEBVIEW_LOADED, [](wxWebViewEvent& e) {
+        BOOST_LOG_TRIVIAL(debug) << "SnapmakerDevicePage: loaded " << e.GetURL().ToStdString(wxMBConvUTF8()).substr(0, 120);
+    });
     m_browser->Bind(wxEVT_WEBVIEW_NEWWINDOW, &SnapmakerDevicePage::on_new_window, this);
     GetSizer()->Add(m_browser, 1, wxEXPAND);
     Layout();
@@ -165,6 +172,7 @@ void SnapmakerDevicePage::on_script_message(wxWebViewEvent& evt)
 {
     if (!m_bridge || !m_browser)
         return;
+    BOOST_LOG_TRIVIAL(trace) << "SnapmakerDevicePage: script message " << evt.GetString().ToStdString(wxMBConvUTF8()).substr(0, 900);
     // Top-level document origin only. wx reports the main frame's URL (WKWebView's and Edge's GetCurrentURL), not the URL of
     // the frame that posted the message, so a message from a sub-frame is judged by the page that contains it. That is
     // acceptable only because the page cannot navigate away (on_navigating vetoes foreign origins) and the bundle is
@@ -181,6 +189,7 @@ void SnapmakerDevicePage::on_navigating(wxWebViewEvent& evt)
 {
     // The page may only ever show its own origin; an external link cannot become a window that talks SSWCP.
     const std::string url = evt.GetURL().ToStdString(wxMBConvUTF8());
+    BOOST_LOG_TRIVIAL(debug) << "SnapmakerDevicePage: navigating to " << url.substr(0, url.find('?'));
     if (url.empty() || url == "about:blank")
         return;
     if (!m_server || !snapmaker_is_page_origin(url, m_server->port())) {
