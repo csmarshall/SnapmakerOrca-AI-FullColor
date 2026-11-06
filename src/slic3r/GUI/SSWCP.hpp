@@ -159,6 +159,10 @@ public:
     std::size_t push(const std::string& cmd, const nlohmann::json& data, int code = SSWCPCode::Ok,
                      const std::string& message = "OK");
 
+    // How many live subscriptions `cmd` has, and dropping just those (for an explicit unsubscribe command).
+    std::size_t subscriber_count(const std::string& cmd) const;
+    std::size_t drop_subscriptions(const std::string& cmd);
+
     // Drops every subscription (the adapter calls this when the webview goes away).
     void drop_all_subscriptions();
 

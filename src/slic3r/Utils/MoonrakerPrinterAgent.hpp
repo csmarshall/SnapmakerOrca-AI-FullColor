@@ -34,6 +34,8 @@ public:
     // Moonraker family (Qidi, Creality, Snapmaker inherit): the user types the host, the API key is optional.
     bool        needs_print_host() const override { return true; }
     std::string last_connect_error() const override;
+    void        query_machine_objects_async(const std::vector<std::string>& object_names,
+                                            std::function<void(bool ok, nlohmann::json result)> done) override;
 
     // Cloud Agent Dependency
     void set_cloud_agent(std::shared_ptr<ICloudServiceAgent> cloud) override;

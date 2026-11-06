@@ -531,9 +531,10 @@ uint16_t WebPageServer::port() const { return m_impl->port; }
 std::string WebPageServer::cookie_name() const { return m_impl->cookie_name; }
 const std::string& WebPageServer::token() const { return m_impl->token; }
 
-std::string WebPageServer::start_url() const
+std::string WebPageServer::start_url(const std::string& extra_query) const
 {
-    return "http://127.0.0.1:" + std::to_string(m_impl->port) + url_prefix + "index.html?" + token_param + "=" + m_impl->token;
+    return "http://127.0.0.1:" + std::to_string(m_impl->port) + url_prefix + "index.html?" + token_param + "=" + m_impl->token +
+           (extra_query.empty() ? "" : "&" + extra_query);
 }
 
 }} // namespace Slic3r::GUI

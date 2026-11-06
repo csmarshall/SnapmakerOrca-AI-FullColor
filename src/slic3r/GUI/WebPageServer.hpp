@@ -50,7 +50,9 @@ public:
     std::string        cookie_name() const; // orca_wps_<port>
     const std::string& token() const;
     // http://127.0.0.1:<port>/web/flutter_web/index.html?wps_token=<token>
-    std::string start_url() const;
+    // `extra_query` (e.g. "path=2", the bundle's Device route) is appended after the token and survives the 302 that
+    // takes the token out of the URL.
+    std::string start_url(const std::string& extra_query = std::string()) const;
 
 private:
     struct Impl;
