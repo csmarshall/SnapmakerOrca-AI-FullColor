@@ -798,6 +798,34 @@ TEST_CASE("GetMachineState callers share ONE Moonraker query", "[SSWCP][device_u
     CHECK(h.queries.size() == 2);
 }
 
+// Real bug seen in the app (2026-11-06): the page asks for several object sets within a few hundred ms. A caller that
+// arrived while a query was out was answered with the FIRST caller's objects, so the page got no print_stats /
+// machine_state_manager / heater_bed, showed "idle" and a 0/0 bed during a print, and later pushes carried only deltas.
+TEST_CASE("GetMachineState callers with different object sets each get THEIR objects", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    auto ask = [&](std::vector<std::string> names) {
+        json objs = json::object();
+        for (const auto& n : names) objs[n] = nullptr;
+        h.bridge.on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_GetMachineState"}, {"params", {{"objects", objs}}}}}}.dump());
+    };
+    ask({"extruder"});                                 // A: starts the query
+    ask({"print_stats"});                              // B: not covered by A's objects
+    ask({"extruder"});                                 // C: covered by A's, rides on it
+    REQUIRE(h.queries.size() == 1);
+    CHECK(h.queries[0].objects == std::vector<std::string>{"extruder"});
+    h.queries[0].done(true, json{{"status", {{"extruder", {{"temperature", 1}}}}}});
+    REQUIRE(h.sent.size() == 2);                       // A and C answered; B still waits for its own objects
+    REQUIRE(h.queries.size() == 2);                    // B's objects were queried next, not dropped
+    CHECK(h.queries[1].objects == std::vector<std::string>{"print_stats"});
+    h.queries[1].done(true, json{{"status", {{"print_stats", {{"state", "printing"}}}}}});
+    REQUIRE(h.sent.size() == 3);
+    json b = h.reply(2)["payload"]["data"];
+    CHECK(b["status"].contains("print_stats"));        // B got print_stats, not A's extruder
+    CHECK(b["status"]["print_stats"]["state"] == "printing");
+    CHECK(h.bridge.sswcp().instance_count() == 0);
+}
+
 TEST_CASE("a flood of GetMachineState hits the pending cap with a 429 and still one query", "[SSWCP][device_ui]")
 {
     BridgeHarness h;

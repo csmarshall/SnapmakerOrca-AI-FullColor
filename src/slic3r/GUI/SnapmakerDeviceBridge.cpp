@@ -353,14 +353,31 @@ std::string SnapmakerDeviceBridge::connected_dev_id() const
     return {};
 }
 
-// One Moonraker query at a time, shared: every caller that arrives while it is out waits for the same result (they get the
-// first caller's object set). A lost callback is cut off by the watchdog in tick().
+// One Moonraker query at a time, shared: a caller that arrives while it is out rides on it only when that query covers ALL
+// of the objects it asked for; otherwise it waits and the objects of everyone left over go out in the next query (answering
+// it with another caller's objects left the page without print_stats and showed "idle" during a print). A lost callback is
+// cut off by the watchdog in tick().
 void SnapmakerDeviceBridge::request_state(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> cb)
 {
-    m_state_waiters.push_back(std::move(cb));
-    if (m_state_in_flight)
+    m_state_waiters.push_back({objects, std::move(cb)});
+    if (m_state_in_flight) {
+        // Covered by the query in flight: nothing to do (it answers this caller too). Not covered: it is answered by the
+        // follow-up query started when the one in flight completes.
         return;
-    m_state_in_flight   = true;
+    }
+    start_state_query();
+}
+
+// Starts a query for the objects of everyone waiting (order-preserving union).
+void SnapmakerDeviceBridge::start_state_query()
+{
+    std::vector<std::string> objects;
+    for (const auto& w : m_state_waiters)
+        for (const auto& o : w.objects)
+            if (std::find(objects.begin(), objects.end(), o) == objects.end())
+                objects.push_back(o);
+    m_state_queried      = objects;
+    m_state_in_flight    = true;
     m_state_started_tick = m_ticks;
     const std::uint64_t gen   = ++m_state_gen;
     auto                alive = m_alive;
@@ -371,8 +388,18 @@ void SnapmakerDeviceBridge::request_state(const std::vector<std::string>& object
         auto waiters      = std::move(m_state_waiters);
         m_state_waiters.clear();
         const bool good = ok && result.is_object() && result.contains("status");
-        for (auto& w : waiters)
-            w(good, good ? result : nlohmann::json::object());
+        std::vector<StateWaiter> answered, later;
+        for (auto& w : waiters) {
+            const bool covered = !good || std::all_of(w.objects.begin(), w.objects.end(), [&](const std::string& o) {
+                                     return std::find(m_state_queried.begin(), m_state_queried.end(), o) != m_state_queried.end();
+                                 });
+            (covered ? answered : later).push_back(std::move(w));
+        }
+        m_state_waiters = std::move(later);
+        if (!m_state_waiters.empty())
+            start_state_query(); // before answering: a callback that asks again joins this query
+        for (auto& w : answered)
+            w.cb(good, good ? result : nlohmann::json::object());
     });
 }
 
@@ -384,7 +411,7 @@ void SnapmakerDeviceBridge::abandon_state_query()
     auto waiters      = std::move(m_state_waiters);
     m_state_waiters.clear();
     for (auto& w : waiters)
-        w(false, nlohmann::json::object());
+        w.cb(false, nlohmann::json::object());
 }
 
 void SnapmakerDeviceBridge::push_state(bool force)

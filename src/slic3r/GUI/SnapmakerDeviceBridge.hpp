@@ -191,7 +191,12 @@ private:
     std::vector<std::string>            m_state_objects; // the subscription's / SetSubscribeFilter's object names
     nlohmann::json                      m_last_state_status; // last pushed `status`
     bool                                m_state_in_flight = false;
-    std::vector<std::function<void(bool, nlohmann::json)>> m_state_waiters; // everyone waiting on the query in flight
+    // Everyone waiting on a state query, each with the objects it asked for: a caller is answered only by a query that
+    // covered its objects; the rest get a follow-up query (never another caller's objects).
+    struct StateWaiter { std::vector<std::string> objects; std::function<void(bool, nlohmann::json)> cb; };
+    std::vector<StateWaiter>            m_state_waiters;
+    std::vector<std::string>            m_state_queried;   // the objects of the query in flight (sorted, unique)
+    void                                start_state_query();
     std::uint64_t                       m_state_gen = 0;           // a callback of an older generation is a late one: ignored
     int                                 m_state_started_tick = 0;
     static constexpr int                kStateWatchdogTicks  = 15; // a lost callback cannot wedge polling for longer
