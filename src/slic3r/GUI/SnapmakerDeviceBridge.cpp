@@ -74,22 +74,186 @@ std::string snapmaker_user_agent(const std::string& version, bool dark)
 }
 
 namespace {
-SSWCPServices make_services(SnapmakerDeviceBridge::Options& o)
+SSWCPServices make_services(SnapmakerDeviceBridge::Options& o, std::function<nlohmann::json()> devices_json)
 {
     SSWCPServices s;
     s.sink = [&o](const std::string& js) {
         if (o.run_script)
             o.run_script(js);
     };
-    s.local_devices = [&o]() { return snapmaker_devices_to_json(o.devices ? o.devices() : std::vector<SnapmakerDeviceInfo>{}); };
+    s.local_devices = std::move(devices_json);
     s.http_host     = o.http_host;
     return s;
 }
 } // namespace
 
-SnapmakerDeviceBridge::SnapmakerDeviceBridge(Options options) : m_options(std::move(options)), m_sswcp(make_services(m_options))
+SnapmakerDeviceBridge::SnapmakerDeviceBridge(Options options) : m_options(std::move(options)), m_sswcp(make_services(m_options, [this] { return snapmaker_devices_to_json(current_devices()); }))
 {
     register_commands();
+}
+
+// The host's machines with sn filled from the serial read off the machine, once known (dev_id until then).
+std::vector<SnapmakerDeviceInfo> SnapmakerDeviceBridge::current_devices() const
+{
+    std::vector<SnapmakerDeviceInfo> devices = m_options.devices ? m_options.devices() : std::vector<SnapmakerDeviceInfo>{};
+    for (auto& d : devices)
+        if (d.sn.empty())
+            if (auto it = m_serials.find(d.dev_id); it != m_serials.end())
+                d.sn = it->second;
+    return devices;
+}
+
+// ---- pure helpers ----
+
+nlohmann::json snapmaker_system_info_result(const nlohmann::json& body)
+{
+    const nlohmann::json* r = &body;
+    if (body.is_object() && body.contains("result") && body["result"].is_object())
+        r = &body["result"];
+    if (r->is_object() && r->contains("system_info") && (*r)["system_info"].is_object())
+        return *r;
+    return nlohmann::json::object();
+}
+
+std::string snapmaker_serial_from_system_info(const nlohmann::json& body)
+{
+    const nlohmann::json r = snapmaker_system_info_result(body);
+    if (r.contains("system_info") && r["system_info"].contains("product_info") && r["system_info"]["product_info"].is_object()) {
+        const auto& pi = r["system_info"]["product_info"];
+        if (pi.contains("serial_number") && pi["serial_number"].is_string())
+            return pi["serial_number"].get<std::string>();
+    }
+    return {};
+}
+
+bool snapmaker_valid_gcode_name(const std::string& name)
+{
+    if (name.empty() || name.size() > 512 || name.front() == '/')
+        return false;
+    for (unsigned char c : name)
+        if (c < 0x20 || c == 0x7f || c == '\\')
+            return false;
+    std::size_t pos = 0;
+    while (pos <= name.size()) {
+        std::size_t slash = name.find('/', pos);
+        if (slash == std::string::npos) slash = name.size();
+        const std::string seg = name.substr(pos, slash - pos);
+        if (seg == ".." || seg == "." || (seg.empty() && slash != name.size()))
+            return false;
+        pos = slash + 1;
+    }
+    return true;
+}
+
+std::string snapmaker_percent_encode(const std::string& s, bool keep_slash)
+{
+    static const char* hex = "0123456789ABCDEF";
+    std::string        out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~' || (keep_slash && c == '/'))
+            out += static_cast<char>(c);
+        else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+bool snapmaker_valid_thumbnail_path(const std::string& path)
+{
+    if (!snapmaker_valid_gcode_name(path))
+        return false;
+    return path.find_first_of("?#:") == std::string::npos;
+}
+
+std::string snapmaker_base64(const std::string& in)
+{
+    static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string        out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    std::size_t i = 0;
+    for (; i + 2 < in.size(); i += 3) {
+        const unsigned v = (static_cast<unsigned char>(in[i]) << 16) | (static_cast<unsigned char>(in[i + 1]) << 8) | static_cast<unsigned char>(in[i + 2]);
+        out += tbl[v >> 18]; out += tbl[(v >> 12) & 63]; out += tbl[(v >> 6) & 63]; out += tbl[v & 63];
+    }
+    if (i + 1 == in.size()) {
+        const unsigned v = static_cast<unsigned char>(in[i]) << 16;
+        out += tbl[v >> 18]; out += tbl[(v >> 12) & 63]; out += "==";
+    } else if (i + 2 == in.size()) {
+        const unsigned v = (static_cast<unsigned char>(in[i]) << 16) | (static_cast<unsigned char>(in[i + 1]) << 8);
+        out += tbl[v >> 18]; out += tbl[(v >> 12) & 63]; out += tbl[(v >> 6) & 63]; out += '=';
+    }
+    return out;
+}
+
+nlohmann::json snapmaker_thumbnail_error(const std::string& path)
+{
+    return {{"width", 0}, {"height", 0}, {"size", 0}, {"data", ""}, {"state", "error"}, {"path", path}};
+}
+
+nlohmann::json snapmaker_thumbnail_reply(const std::string& path, int width, int height, const std::string& image)
+{
+    if (image.empty() || image.size() > SNAPMAKER_THUMBNAIL_MAX_BYTES)
+        return snapmaker_thumbnail_error(path);
+    return {{"width", width}, {"height", height}, {"size", static_cast<long long>(image.size())},
+            {"data", snapmaker_base64(image)}, {"state", "success"}, {"path", path}};
+}
+
+nlohmann::json snapmaker_pick_thumbnail(const nlohmann::json& list)
+{
+    nlohmann::json best = nlohmann::json::object();
+    long long      best_px = -1;
+    if (!list.is_array())
+        return best;
+    for (const auto& e : list) {
+        if (!e.is_object() || !e.contains("thumbnail_path") || !e["thumbnail_path"].is_string() ||
+            !e.contains("width") || !e["width"].is_number_integer() || !e.contains("height") || !e["height"].is_number_integer())
+            continue;
+        if (!snapmaker_valid_thumbnail_path(e["thumbnail_path"].get<std::string>()))
+            continue;
+        if (e.contains("size") && e["size"].is_number() && e["size"].get<double>() > static_cast<double>(SNAPMAKER_THUMBNAIL_MAX_BYTES))
+            continue;
+        const long long px = static_cast<long long>(e["width"].get<int>()) * e["height"].get<int>();
+        if (px > best_px) { best_px = px; best = e; }
+    }
+    return best;
+}
+
+// Fetches machine.system_info once per machine (callers queue on the fetch in flight) and records its serial.
+void SnapmakerDeviceBridge::fetch_system_info(const std::string& dev_id, std::function<void()> then)
+{
+    if (m_system_info.count(dev_id)) { then(); return; }
+    auto& waiters = m_sysinfo_waiters[dev_id];
+    waiters.push_back(std::move(then));
+    if (waiters.size() > 1)
+        return; // a fetch for this machine is already in flight
+    auto alive = m_alive;
+    auto finish = [this, alive, dev_id](bool ok, nlohmann::json result) {
+        if (!*alive)
+            return;
+        if (ok) {
+            const std::string serial = snapmaker_serial_from_system_info(result);
+            m_system_info[dev_id] = snapmaker_system_info_result(result);
+            if (!serial.empty())
+                m_serials[dev_id] = serial;
+        } else {
+            m_serial_retry_at = m_ticks + 10; // fail soft; try again in about 10 s
+        }
+        auto cbs = std::move(m_sysinfo_waiters[dev_id]);
+        m_sysinfo_waiters.erase(dev_id);
+        for (auto& cb : cbs) cb();
+        refresh_devices(); // the record's sn may just have changed: tell subscribers
+    };
+    if (!m_options.fetch_resource) {
+        finish(false, nlohmann::json::object());
+        return;
+    }
+    m_options.fetch_resource("/machine/system_info", 256 * 1024, [finish](bool ok, std::string body) {
+        nlohmann::json j = ok ? nlohmann::json::parse(body, nullptr, false) : nlohmann::json();
+        finish(ok && !j.is_discarded(), j.is_discarded() ? nlohmann::json::object() : j);
+    });
 }
 
 std::optional<SnapmakerTab> snapmaker_tab_for_target(const std::string& target)
@@ -178,7 +342,7 @@ void SnapmakerDeviceBridge::register_commands()
         "sw_GetConnectedMachine",
         [this](SSWCP_Instance& i) {
             nlohmann::json record = nlohmann::json::object(); // nothing connected: {} (the page treats it as no machine)
-            const std::vector<SnapmakerDeviceInfo> devices = m_options.devices ? m_options.devices() : std::vector<SnapmakerDeviceInfo>{};
+            const std::vector<SnapmakerDeviceInfo> devices = current_devices();
             for (const auto& d : devices)
                 if (d.connected) {
                     record = snapmaker_device_to_json(d);
@@ -284,10 +448,81 @@ void SnapmakerDeviceBridge::register_commands()
         },
         false);
 
+    // --- machine.system_info: the page reads product_info.serial_number from it and must find the sn of our records ---
+    m_sswcp.register_command(
+        "sw_GetMachineSystemInfo",
+        [this](SSWCP_Instance& i) {
+            std::string dev_id;
+            for (const auto& d : current_devices())
+                if (d.connected) { dev_id = d.dev_id; break; }
+            if (dev_id.empty()) { i.reply_ok(); return; }
+            auto weak = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            fetch_system_info(dev_id, [this, weak, alive, dev_id] {
+                if (!*alive) return;
+                if (auto inst = weak.lock()) {
+                    auto it = m_system_info.find(dev_id);
+                    inst->reply_ok(it != m_system_info.end() ? it->second : nlohmann::json::object());
+                }
+            });
+        },
+        false);
+
+    // --- file metadata: the flat server.files.metadata result, read-only and fail-soft ---
+    m_sswcp.register_command(
+        "sw_MachineFilesMetadata",
+        [this](SSWCP_Instance& i) {
+            const nlohmann::json& p = i.params();
+            const std::string name = p.is_object() && p.contains("filename") && p["filename"].is_string() ? p["filename"].get<std::string>() : std::string();
+            if (!snapmaker_valid_gcode_name(name) || !m_options.fetch_resource) { i.reply_ok(); return; }
+            auto weak = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            m_options.fetch_resource("/server/files/metadata?filename=" + snapmaker_percent_encode(name, false), 256 * 1024,
+                                     [weak, alive](bool ok, std::string body) {
+                if (!*alive) return;
+                auto inst = weak.lock();
+                if (!inst) return;
+                nlohmann::json j = ok ? nlohmann::json::parse(body, nullptr, false) : nlohmann::json();
+                inst->reply_ok(!j.is_discarded() && j.is_object() && j.contains("result") && j["result"].is_object() ? j["result"] : nlohmann::json::object());
+            });
+        },
+        false);
+
+    // --- thumbnail: sw_FilesThumbnailsBase64 {path:<filename>} -> thumbnails_base64-shaped {width,height,size,data,state,path}.
+    // Two read-only GETs: the thumbnail list, then the chosen image by its relative gcode-thumbnail path. ---
+    m_sswcp.register_command(
+        "sw_FilesThumbnailsBase64",
+        [this](SSWCP_Instance& i) {
+            const nlohmann::json& p = i.params();
+            const std::string name = p.is_object() && p.contains("path") && p["path"].is_string() ? p["path"].get<std::string>() : std::string();
+            if (!snapmaker_valid_gcode_name(name) || !m_options.fetch_resource) { i.reply_ok(snapmaker_thumbnail_error(name)); return; }
+            auto weak = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            auto fetch = m_options.fetch_resource; // copy: used again from the first callback
+            fetch("/server/files/thumbnails?filename=" + snapmaker_percent_encode(name, false), 256 * 1024,
+                  [weak, alive, fetch, name](bool ok, std::string body) {
+                if (!*alive) return;
+                auto inst = weak.lock();
+                if (!inst) return;
+                nlohmann::json j = ok ? nlohmann::json::parse(body, nullptr, false) : nlohmann::json();
+                nlohmann::json pick = !j.is_discarded() && j.is_object() && j.contains("result") ? snapmaker_pick_thumbnail(j["result"]) : nlohmann::json::object();
+                if (pick.empty()) { inst->reply_ok(snapmaker_thumbnail_error(name)); return; }
+                const int w = pick["width"].get<int>(), h = pick["height"].get<int>();
+                const std::string rel = pick["thumbnail_path"].get<std::string>();
+                fetch("/server/files/gcodes/" + snapmaker_percent_encode(rel, true), SNAPMAKER_THUMBNAIL_MAX_BYTES,
+                      [weak, alive, name, w, h](bool ok2, std::string image) {
+                    if (!*alive) return;
+                    if (auto inst2 = weak.lock())
+                        inst2->reply_ok(ok2 ? snapmaker_thumbnail_reply(name, w, h, image) : snapmaker_thumbnail_error(name));
+                });
+            });
+        },
+        false);
+
     // --- read-only commands the harness showed the page accepts `{}` for (contract doc 7.4). The cache family is not
     // backed by a store: the page re-derives what it writes. ---
-    for (const char* cmd : {"sw_GetMachineSystemInfo", "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query",
-                            "sw_MachineFilesRoots", "sw_MachineFilesMetadata", "sw_GetCache", "sw_SetCache", "sw_RemoveCache",
+    for (const char* cmd : {"sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query",
+                            "sw_MachineFilesRoots", "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache",
                             "sw_UnsubscribeCacheKeys"})
         m_sswcp.register_command(cmd, [](SSWCP_Instance& i) { i.reply_ok(); }, false);
 }
@@ -308,7 +543,7 @@ void SnapmakerDeviceBridge::refresh_devices()
 {
     if (m_closed)
         return;
-    nlohmann::json current = snapmaker_devices_to_json(m_options.devices ? m_options.devices() : std::vector<SnapmakerDeviceInfo>{});
+    nlohmann::json current = snapmaker_devices_to_json(current_devices());
     if (current == m_last_devices)
         return;
     m_last_devices = current;
@@ -321,7 +556,15 @@ void SnapmakerDeviceBridge::tick()
         return;
     m_sswcp.expire_due();
     refresh_devices();
-    if (++m_ticks % kStatePushEveryTicks == 0)
+    ++m_ticks;
+    // The record's sn must be the serial the machine reports (the page re-keys by it); read it once per connected machine.
+    if (m_ticks >= m_serial_retry_at)
+        for (const auto& d : current_devices())
+            if (d.connected && !m_serials.count(d.dev_id) && !m_sysinfo_waiters.count(d.dev_id)) {
+                fetch_system_info(d.dev_id, [] {});
+                break;
+            }
+    if (m_ticks % kStatePushEveryTicks == 0)
         push_state(false);
 }
 
