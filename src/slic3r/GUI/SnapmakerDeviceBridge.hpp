@@ -196,6 +196,7 @@ private:
     struct StateWaiter { std::vector<std::string> objects; std::function<void(bool, nlohmann::json)> cb; };
     std::vector<StateWaiter>            m_state_waiters;
     std::vector<std::string>            m_state_queried;   // the objects of the query in flight (sorted, unique)
+    nlohmann::json                      m_last_good_state; // the last complete query result of the connected machine (null until one arrived)
     void                                start_state_query();
     std::uint64_t                       m_state_gen = 0;           // a callback of an older generation is a late one: ignored
     int                                 m_state_started_tick = 0;

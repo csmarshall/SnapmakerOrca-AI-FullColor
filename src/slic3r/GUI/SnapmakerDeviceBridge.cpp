@@ -388,6 +388,8 @@ void SnapmakerDeviceBridge::start_state_query()
         auto waiters      = std::move(m_state_waiters);
         m_state_waiters.clear();
         const bool good = ok && result.is_object() && result.contains("status");
+        if (good)
+            m_last_good_state = result;
         std::vector<StateWaiter> answered, later;
         for (auto& w : waiters) {
             const bool covered = !good || std::all_of(w.objects.begin(), w.objects.end(), [&](const std::string& o) {
@@ -517,9 +519,15 @@ void SnapmakerDeviceBridge::register_commands()
         auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
         auto alive = m_alive;
         // The reply may come later (the query runs off-thread); the dispatcher keeps the instance until it is sent.
-        request_state(sel.allowed, [weak, alive, rejected = sel.rejected](bool ok, nlohmann::json result) {
+        request_state(sel.allowed, [this, weak, alive, rejected = sel.rejected](bool ok, nlohmann::json result) {
             if (!*alive)
                 return;
+            // A failed query is answered with the last good state of this machine, not an empty one: the page applies a
+            // reply as the whole state, and an empty one showed "idle" and bed 0/0 during a print. The next push corrects it.
+            if (!ok && m_last_good_state.is_object() && m_last_good_state.contains("status")) {
+                ok     = true;
+                result = m_last_good_state;
+            }
             if (auto inst = weak.lock())
                 inst->reply_ok(snapmaker_state_reply(ok, std::move(result), rejected));
         });
@@ -734,9 +742,14 @@ void SnapmakerDeviceBridge::tick()
     // A different machine selected: what was cached (and any reply still in flight) belongs to the old one.
     const std::string machine = connected_dev_id();
     if (machine != m_state_machine) {
+        // The very first sight of a machine is not a switch: the queries already out (the page's first GetMachineState calls)
+        // are for this machine, and abandoning them answered the page with an empty state that it applied as the whole state.
+        const bool first_sight = m_state_machine.empty();
         m_state_machine = machine;
         m_last_state_status = nlohmann::json();
-        abandon_state_query();
+        m_last_good_state   = nlohmann::json();
+        if (!first_sight)
+            abandon_state_query();
         push_state(true);
     }
     refresh_devices();
