@@ -151,6 +151,17 @@ TEST_CASE("Moonraker read-only resource allow-list", "[printhost][device_ui]")
     CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/metadata?filename=a%20b.gcode"));
     CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/thumbnails?filename=a.gcode"));
     CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/gcodes/.thumbs/a-300x300.png"));
+    CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/list?root=gcodes"));
+    CHECK(MoonrakerPrinterAgent::is_readable_resource_path("/server/files/roots"));
+    // Exactly those two: no other root, no extra query, no encoded or doubled separators, no trailing junk.
+    for (const char* bad : {"/server/files/list", "/server/files/list?root=config", "/server/files/list?root=logs", "/server/files/list?root=gcodes&extended=true",
+                            "/server/files/list?root=gcodes%2F..%2Fconfig", "/server/files/list?root=gcodes/", "/server/files/list?root=gcodes&root=config",
+                            "/server/files/list?root=Gcodes", "/server/files/list?root=gcodes#x", "/server/files/list?root=gcodes ", "/server/files/list?root=",
+                            "/server/files/roots?x=1", "/server/files/roots/", "/server/files/roots%2F", "/server/files//roots", "/server/files/directory?path=gcodes",
+                            "/server/files/list?root=gcodes\r\nX: y"}) {
+        CAPTURE(bad);
+        CHECK_FALSE(MoonrakerPrinterAgent::is_readable_resource_path(bad));
+    }
     for (const char* bad : {"", "machine/system_info", "/printer/gcode/script", "/printer/print/start", "/server/files/delete",
                             "/server/files/gcodes/", "/server/files/gcodes/../../etc/passwd", "/server/files/gcodes//x", "/server/files/metadata",
                             "/machine/system_info?x=1 HTTP/1.1", "/server/files/gcodes/a b.png", "/server/files/gcodes/a\\b",

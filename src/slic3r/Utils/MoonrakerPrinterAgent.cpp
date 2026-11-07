@@ -216,7 +216,8 @@ bool MoonrakerPrinterAgent::is_readable_resource_path(const std::string& p)
     if (p.find("..") != std::string::npos || p.find("//") != std::string::npos || p.find('#') != std::string::npos)
         return false;
     auto starts = [&p](const char* prefix) { return p.compare(0, std::strlen(prefix), prefix) == 0; };
-    return p == "/machine/system_info" || starts("/server/files/metadata?filename=") ||
+    // Exactly these two listings (the gcodes root only, no further query); everything else about files is the per-file reads below.
+    return p == "/machine/system_info" || p == "/server/files/list?root=gcodes" || p == "/server/files/roots" || starts("/server/files/metadata?filename=") ||
            starts("/server/files/thumbnails?filename=") || (starts("/server/files/gcodes/") && p.size() > std::strlen("/server/files/gcodes/"));
 }
 

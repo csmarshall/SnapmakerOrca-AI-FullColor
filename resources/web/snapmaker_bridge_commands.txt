@@ -12,6 +12,7 @@ REGISTERED sw_FileLog
 REGISTERED sw_FilesThumbnailsBase64
 REGISTERED sw_GetCache
 REGISTERED sw_GetConnectedMachine
+REGISTERED sw_GetFileListPage  # read-only: GET /server/files/list?root=gcodes, sorted and paged host-side
 REGISTERED sw_GetLocalDevices
 REGISTERED sw_GetMachineState
 REGISTERED sw_GetMachineSystemInfo
@@ -74,7 +75,6 @@ DENIED sw_GetActiveFile
 DENIED sw_GetCameraTimelapseInstance
 DENIED sw_GetDeviceDataStorageSpace
 DENIED sw_GetFileFilamentMapping
-DENIED sw_GetFileListPage
 DENIED sw_GetFileStream  # RISKY
 DENIED sw_GetFilesFromDir  # RISKY
 DENIED sw_GetMachineFilamentMapping

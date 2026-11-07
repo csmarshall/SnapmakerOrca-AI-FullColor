@@ -28,6 +28,61 @@ std::string snapmaker_bare_host(const std::string& address)
     return h;
 }
 
+bool snapmaker_file_list_params_valid(const nlohmann::json& p)
+{
+    if (!p.is_object() || p.size() != 3) return false;
+    auto in_range = [&p](const char* key, long long lo, long long hi) {
+        auto it = p.find(key);
+        if (it == p.end() || !it->is_number_integer()) return false;
+        const long long v = it->get<long long>();
+        return v >= lo && v <= hi;
+    };
+    auto root = p.find("root");
+    return root != p.end() && root->is_string() && root->get<std::string>() == "gcodes" && in_range("page_number", 0, 10000) &&
+           in_range("files_per_page", 1, 500);
+}
+
+bool snapmaker_file_list_page(const std::string& body, int page_number, int files_per_page, nlohmann::json& out)
+{
+    const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("result") || !j["result"].is_array() || page_number < 0 || files_per_page < 1)
+        return false;
+    std::vector<nlohmann::json> files;
+    for (const auto& f : j["result"]) {
+        if (!f.is_object() || !f.contains("path") || !f["path"].is_string()) continue;
+        files.push_back({{"path", f["path"]},
+                         {"modified", f.contains("modified") && f["modified"].is_number() ? f["modified"] : nlohmann::json(0)},
+                         {"size", f.contains("size") && f["size"].is_number() ? f["size"] : nlohmann::json(0)},
+                         {"permissions", f.contains("permissions") && f["permissions"].is_string() ? f["permissions"] : nlohmann::json("rw")}});
+    }
+    std::stable_sort(files.begin(), files.end(), [](const nlohmann::json& a, const nlohmann::json& b) {
+        const double ma = a["modified"].get<double>(), mb = b["modified"].get<double>();
+        if (ma != mb) return ma > mb;
+        return a["path"].get<std::string>() < b["path"].get<std::string>();
+    });
+    const std::size_t total = files.size();
+    const std::size_t first = static_cast<std::size_t>(page_number) * static_cast<std::size_t>(files_per_page);
+    nlohmann::json    page  = nlohmann::json::array();
+    for (std::size_t i = first; i < total && i < first + static_cast<std::size_t>(files_per_page); ++i)
+        page.push_back(std::move(files[i]));
+    out = {{"state", "success"}, {"root", "gcodes"}, {"storage", "all"}, {"total", total},
+           {"page_number", page_number}, {"files_per_page", files_per_page}, {"files", std::move(page)}};
+    return true;
+}
+
+bool snapmaker_file_roots(const std::string& body, nlohmann::json& out)
+{
+    const nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("result") || !j["result"].is_array()) return false;
+    out = nlohmann::json::array();
+    for (const auto& r : j["result"])
+        if (r.is_object() && r.contains("name") && r["name"].is_string())
+            out.push_back({{"name", r["name"]},
+                           {"path", r.contains("path") && r["path"].is_string() ? r["path"] : nlohmann::json("")},
+                           {"permissions", r.contains("permissions") && r["permissions"].is_string() ? r["permissions"] : nlohmann::json("r")}});
+    return true;
+}
+
 std::string snapmaker_camera_origin(const std::string& address)
 {
     static const std::regex ok(R"(^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])$)");
@@ -630,6 +685,45 @@ void SnapmakerDeviceBridge::register_commands()
             false);
     }
 
+    // --- file tab (#75): the gcodes listing and the roots, read-only (GET /server/files/list?root=gcodes and /server/files/roots, since the
+    // printer's own list_page is websocket-only). A failed or unusable fetch is a failure reply, never an empty success. ---
+    static constexpr std::size_t kFileListMaxBytes = 2 * 1024 * 1024;
+    m_sswcp.register_command(
+        "sw_GetFileListPage",
+        [this](SSWCP_Instance& i) {
+            const nlohmann::json& p = i.params();
+            if (!snapmaker_file_list_params_valid(p)) { i.handle_general_fail(SSWCPCode::BadRequest, "invalid file list parameters"); return; }
+            if (!m_options.fetch_resource) { i.handle_general_fail(SSWCPCode::Failure, "no machine connected"); return; }
+            const int page = p["page_number"].get<int>(), per_page = p["files_per_page"].get<int>();
+            auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            m_options.fetch_resource("/server/files/list?root=gcodes", kFileListMaxBytes, [weak, alive, page, per_page](bool ok, std::string body) {
+                if (!*alive) return;
+                auto inst = weak.lock();
+                if (!inst) return;
+                nlohmann::json out;
+                if (ok && body.size() <= kFileListMaxBytes && snapmaker_file_list_page(body, page, per_page, out)) inst->reply_ok(std::move(out));
+                else inst->handle_general_fail(SSWCPCode::Failure, "cannot list the machine's files");
+            });
+        },
+        false);
+    m_sswcp.register_command(
+        "sw_MachineFilesRoots",
+        [this](SSWCP_Instance& i) {
+            if (!m_options.fetch_resource) { i.handle_general_fail(SSWCPCode::Failure, "no machine connected"); return; }
+            auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            m_options.fetch_resource("/server/files/roots", 64 * 1024, [weak, alive](bool ok, std::string body) {
+                if (!*alive) return;
+                auto inst = weak.lock();
+                if (!inst) return;
+                nlohmann::json out;
+                if (ok && snapmaker_file_roots(body, out)) inst->reply_ok(std::move(out));
+                else inst->handle_general_fail(SSWCPCode::Failure, "cannot read the machine's file roots");
+            });
+        },
+        false);
+
     // --- file metadata: the flat server.files.metadata result, read-only and fail-soft ---
     m_sswcp.register_command(
         "sw_MachineFilesMetadata",
@@ -684,7 +778,7 @@ void SnapmakerDeviceBridge::register_commands()
     // --- read-only commands the harness showed the page accepts `{}` for (contract doc 7.4). The cache family is not
     // backed by a store: the page re-derives what it writes. ---
     for (const char* cmd : {"sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query",
-                            "sw_MachineFilesRoots", "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache",
+                            "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache",
                             "sw_UnsubscribeCacheKeys"})
         m_sswcp.register_command(cmd, [](SSWCP_Instance& i) { i.reply_ok(); }, false);
 }
