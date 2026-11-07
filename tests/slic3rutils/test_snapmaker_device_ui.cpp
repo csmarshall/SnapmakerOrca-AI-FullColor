@@ -1530,6 +1530,28 @@ TEST_CASE("sw_GetFileListPage drops a reply that arrives after shutdown", "[SSWC
     CHECK(h.sent.empty());
 }
 
+TEST_CASE("sw_GetFileListPage: requests arriving while a listing is in flight share one fetch, each answered with its own page (#78)", "[SSWCP][device_ui][files]")
+{
+    BridgeHarness h;
+    h.resources[kListPath] = http_list({file("a.gcode", 3), file("b.gcode", 2), file("c.gcode", 1)});
+    h.hold_fetch = true;
+    h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 1}}));
+    h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", 1}, {"files_per_page", 1}}));
+    h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 10}}));
+    CHECK(h.fetched.size() == 1);                              // the machine is asked once, not three times
+    CHECK(h.sent.empty());
+    h.release_fetches();
+    REQUIRE(h.sent.size() == 3);
+    CHECK(h.reply(0)["payload"]["data"]["files"].size() == 1);
+    CHECK(h.reply(0)["payload"]["data"]["files"][0]["path"] == "a.gcode");
+    CHECK(h.reply(1)["payload"]["data"]["files"][0]["path"] == "b.gcode");
+    CHECK(h.reply(2)["payload"]["data"]["files"].size() == 3);
+    h.hold_fetch = false;                                      // once answered, the next request fetches afresh
+    h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 1}}));
+    CHECK(h.fetched.size() == 2);
+    CHECK(h.sent.size() == 4);
+}
+
 TEST_CASE("sw_MachineFilesRoots replies the roots list from GET /server/files/roots, fail-soft", "[SSWCP][device_ui][files]")
 {
     const json fx = listpage_fixture();

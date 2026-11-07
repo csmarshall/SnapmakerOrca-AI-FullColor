@@ -699,13 +699,22 @@ void SnapmakerDeviceBridge::register_commands()
             const int page = p["page_number"].get<int>(), per_page = p["files_per_page"].get<int>();
             auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
             auto alive = m_alive;
-            m_options.fetch_resource("/server/files/list?root=gcodes", kFileListMaxBytes, [weak, alive, page, per_page](bool ok, std::string body) {
-                if (!*alive) return;
+            // One listing fetch at a time: requests that arrive while it is in flight (the page asks per tab and per page) share its
+            // body instead of each loading the machine, and each is answered with its own page of it.
+            m_file_list_waiters.push_back([weak, page, per_page](bool ok, const std::string& body) {
                 auto inst = weak.lock();
                 if (!inst) return;
                 nlohmann::json out;
                 if (ok && body.size() <= kFileListMaxBytes && snapmaker_file_list_page(body, page, per_page, out)) inst->reply_ok(std::move(out));
                 else inst->handle_general_fail(SSWCPCode::Failure, "cannot list the machine's files");
+            });
+            if (m_file_list_waiters.size() > 1)
+                return;
+            m_options.fetch_resource("/server/files/list?root=gcodes", kFileListMaxBytes, [this, alive](bool ok, std::string body) {
+                if (!*alive) return;
+                auto waiters = std::move(m_file_list_waiters);
+                m_file_list_waiters.clear();
+                for (auto& w : waiters) w(ok, body);
             });
         },
         false);
