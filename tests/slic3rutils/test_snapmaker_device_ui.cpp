@@ -271,7 +271,7 @@ TEST_CASE("sw_GetConnectedMachine returns the connected machine's record, {} whe
     // Foreign origin still refused.
     CHECK_FALSE(h.bridge.on_script_message("https://evil.example/", BridgeHarness::msg("sw_GetConnectedMachine")));
     // A command that is not on the allow-list is still a 501.
-    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SendGCodes"));
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SendCommand"));
     CHECK(h.reply(h.sent.size() - 1)["payload"]["code"] == 501);
 }
 
@@ -524,7 +524,7 @@ TEST_CASE("the read-only guarantee: no control action is registered, each gets a
 {
     BridgeHarness h;
     const std::vector<std::string> controls = {
-        "sw_SendGCodes", "sw_MachinePrintStart",
+        "sw_MachinePrintStart",
         "sw_UploadFiletoMachine", "sw_UploadFile", "sw_UploadFileResult", "sw_DeleteCameraTimelapse", "sw_DeleteRecentFiles", "sw_DeleteDevices", "sw_RenameDevice",
         "sw_SetDeviceName", "sw_ControlPurifier",
         "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
@@ -569,10 +569,10 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         // machine control (#75, #79): LED, speed, fans, bed temperature, pause/resume/cancel; nozzle temperature, purifier, device name
         // and the bed-mesh abort stay denied
         "sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp", "sw_MachinePrintPause",
-        "sw_MachinePrintResume", "sw_MachinePrintCancel"};
+        "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 50);
+    CHECK(expected.size() == 51);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -1765,7 +1765,8 @@ TEST_CASE("the forklifted control table is complete, uses allowlisted methods an
         {"sw_ControlGenericFan", "printer.control.generic_fan"}, {"sw_ControlBedTemp", "printer.control.bed_temp"},
         {"sw_ControlExtruderTemp", "printer.control.extruder_temp"}, {"sw_SetDeviceName", "machine.set_device_name"},
         {"sw_BedMesh_AbortProbeMesh", "printer.bed_mesh.abort_probe_mesh"}, {"sw_MachinePrintPause", "printer.print.pause"},
-        {"sw_MachinePrintResume", "printer.print.resume"}, {"sw_MachinePrintCancel", "printer.print.cancel"}};
+        {"sw_MachinePrintResume", "printer.print.resume"}, {"sw_MachinePrintCancel", "printer.print.cancel"},
+        {"sw_SendGCodes", "printer.gcode.script"}};
     std::map<std::string, std::string> actual;
     for (const auto& c : snapmaker_control_table()) {
         actual[c.sw_name] = c.rpc_method;
@@ -1774,7 +1775,7 @@ TEST_CASE("the forklifted control table is complete, uses allowlisted methods an
     CHECK(actual == expected);
     CHECK(snapmaker_registered_control_commands() ==
           std::vector<std::string>{"sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp",
-                                   "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel"});
+                                   "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"});
     // The unreachable entries still answer "unsupported command" (501) and never reach the machine, even with valid params.
     const std::map<std::string, json> valid = {
         {"sw_ControlPurifier", {{"fan_speed", 50}}},
@@ -1892,6 +1893,95 @@ TEST_CASE("control ranges: min-1, min, max, max+1 and non-integers for every ran
     }
     CHECK_FALSE(snapmaker_control_prepare("sw_ControlGenericFan", {{"name", "cavity_fan "}, {"speed", 1}}, method, out, err));
     CHECK_FALSE(snapmaker_control_prepare("sw_ControlGenericFan", {{"name", "Cavity_Fan"}, {"speed", 1}}, method, out, err));
+}
+
+// ---- nozzle temperature through the gcode route the page uses (#79): sw_SendGCodes, nozzle-temperature scripts only ----
+
+TEST_CASE("sw_SendGCodes forwards a nozzle-temperature script as the exact printer.gcode.script RPC", "[SSWCP][device_ui][control][gcode]")
+{
+    BridgeHarness h;
+    REQUIRE(h.bridge.sswcp().is_registered("sw_SendGCodes"));
+    const auto send = [&](const json& script) { h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", {{"script", script}})); };
+    std::size_t n = 0;
+    for (const char* heater : {"extruder", "extruder1", "extruder2", "extruder3"})
+        for (int t : {0, 215, 300}) {
+            const std::string s = std::string("SET_HEATER_TEMPERATURE HEATER=") + heater + " TARGET=" + std::to_string(t);
+            CAPTURE(s);
+            send(s);
+            REQUIRE(h.control_calls.size() == ++n);
+            CHECK(h.control_calls.back().method == "printer.gcode.script");
+            CHECK(h.control_calls.back().params == json{{"script", s}});
+            CHECK(h.reply(h.sent.size() - 1)["payload"]["code"] == 200);
+        }
+    // an array is joined with a newline; a trailing newline is trimmed
+    send(json::array({"SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200\n", "SET_HEATER_TEMPERATURE HEATER=extruder1 TARGET=210"}));
+    REQUIRE(h.control_calls.size() == ++n);
+    CHECK(h.control_calls.back().params ==
+          json{{"script", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200\nSET_HEATER_TEMPERATURE HEATER=extruder1 TARGET=210"}});
+    // keys the page adds are not forwarded
+    h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", {{"script", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=1"}, {"x", 1}}));
+    CHECK(h.control_calls.back().params == json{{"script", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=1"}});
+    CHECK(h.queries.empty());
+}
+
+TEST_CASE("sw_SendGCodes refuses everything but nozzle-temperature scripts, with no RPC", "[SSWCP][device_ui][control][gcode]")
+{
+    BridgeHarness h;
+    REQUIRE(h.bridge.sswcp().is_registered("sw_SendGCodes")); // a 501 from an unregistered command is not a refusal
+    const std::string ok = "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200";
+    const std::vector<json> bad = {
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=301", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=-1",
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=1.5", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=",
+        "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0200", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=+5",
+        "SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=200", "SET_HEATER_TEMPERATURE HEATER=extruder0 TARGET=200",
+        "G28", "M112", "", "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200 X=1",
+        ok + " ; M112", ok + "\nG28", ok + "\n" + ok, ok + "\n" + ok + "\n", ok + "\r\nG28", " " + ok, "SET_HEATER_TEMPERATURE  HEATER=extruder TARGET=200",
+        "set_heater_temperature HEATER=extruder TARGET=200", "SET_HEATER_TEMPERATURE heater=extruder TARGET=200",
+        "SET_HEATER_TEMPERATURE HEATER=Extruder TARGET=200", "SET_HEATER_TEMPERATURE HEATER=extruder target=200",
+        json::array(), json::array({ok, ok, ok, ok, ok}), json::array({ok, "G28"}), json::array({ok, 5}), json::array({ok, nullptr}),
+        json::array({ok + "\n" + ok}), json::array({json::array({ok})}), 5, nullptr, true, json::object({{"a", ok}})};
+    for (const json& s : bad) {
+        CAPTURE(s.dump());
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", {{"script", s}}));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] != 200);
+    }
+    // four scripts are fine, five are not (covered above); a missing script or a non-object params is a failure too
+    h.sent.clear();
+    h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", json::object()));
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] != 200);
+    h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", json::array({ok})));
+    CHECK(h.reply(h.sent.size() - 1)["payload"]["code"] != 200);
+    CHECK(h.control_calls.empty());
+    h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", {{"script", json::array({ok, ok, ok, ok})}}));
+    CHECK(h.control_calls.size() == 1);
+    // the nozzle-temperature RPC the page does not use stays denied
+    CHECK_FALSE(h.bridge.sswcp().is_registered("sw_ControlExtruderTemp"));
+}
+
+TEST_CASE("the agent itself refuses a printer.gcode.script that is not a nozzle-temperature script (bridge bypassed)", "[SSWCP][device_ui][control][gcode]")
+{
+    const std::string ok = "SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=300";
+    const auto req = [](const json& p) { return MoonrakerPrinterAgent::control_request("printer.gcode.script", p, 1); };
+    CHECK(control_method_allowed("printer.gcode.script"));
+    CHECK_FALSE(control_method_is_print("printer.gcode.script"));
+    const json r = json::parse(req({{"script", ok}}));
+    CHECK(r["method"] == "printer.gcode.script");
+    CHECK(r["params"] == json{{"script", ok}});
+    CHECK_FALSE(req({{"script", ok + "\n" + ok}}).empty()); // the bridge's joined form
+    for (const json& p : std::vector<json>{
+             {{"script", "G28"}}, {{"script", "M112"}}, {{"script", ""}}, {{"script", ok + "\nG28"}}, {{"script", ok + " ; M112"}},
+             {{"script", "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60"}}, {{"script", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=301"}},
+             {{"script", "set_heater_temperature HEATER=extruder TARGET=200"}}, {{"script", ok + "\n" + ok + "\n" + ok + "\n" + ok + "\n" + ok}},
+             {{"script", json::array({ok})}}, {{"script", 5}}, json::object(), {{"script", ok}, {"extra", 1}}, {{"gcode", ok}}, json::array({ok})})
+        CHECK(req(p).empty());
+    // control_async refuses without any RPC: done(false) exactly once even with a machine-less agent
+    int calls = 0; bool good = true;
+    MoonrakerPrinterAgent("").control_async("printer.gcode.script", {{"script", "G28"}}, [&](bool o, json) { ++calls; good = o; });
+    CHECK(calls == 1);
+    CHECK_FALSE(good);
 }
 
 TEST_CASE("control_async request builder: allowlisted methods only, and the reply parser", "[SSWCP][device_ui][control]")
