@@ -188,6 +188,7 @@ private:
     // the bridge remembers the {domain, clientid} of the last start and sends one stop for it when the page is hidden or shut down.
     void           stop_camera_if_running();
     nlohmann::json m_camera_running; // null when no start is outstanding
+    std::vector<std::function<void(bool, const std::string&)>> m_file_list_waiters; // callers sharing the one listing fetch in flight
     void push_state(bool force);
     std::string connected_dev_id() const;
 
