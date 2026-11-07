@@ -129,7 +129,7 @@ struct SnapmakerControlCommand
     const char* rpc_method; // always a kControlRpcMethods entry
 };
 const std::vector<SnapmakerControlCommand>& snapmaker_control_table();
-// The control commands the bridge actually registers (today: sw_ControlLed only).
+// The control commands the bridge actually registers (the other table entries stay unreachable).
 const std::vector<std::string>& snapmaker_registered_control_commands();
 // Validates the page's params for control command `sw_name` exactly as Snapmaker's handler does (same "param [x] required!" messages, in
 // the same order), then the strict range checks; on success fills the RPC `method` and the whitelisted `rpc_params`. On failure
@@ -137,11 +137,13 @@ const std::vector<std::string>& snapmaker_registered_control_commands();
 bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json& params, std::string& method, nlohmann::json& rpc_params,
                                std::string& error);
 
-// The bridge adds the device-oriented commands to the SSWCP core's 13. All READ-ONLY. Bridge-level emulation (ADR 0005,
-// decision 2 amendment): the page believes it talks to a machine over MQTT; here it is answered from the Moonraker
-// connection the app already has, and the sw_mqtt_* commands are accepted and ignored. Anything that could change printer
-// state (G-code, print control, uploads, deletes, renames, firmware, fan/heater/LED control) is deliberately NOT registered
-// and gets the core's 501; test_snapmaker_device_ui.cpp pins that list.
+// The bridge adds the device-oriented commands to the SSWCP core's 13. Bridge-level emulation (ADR 0005, decision 2 amendment): the
+// page believes it talks to a machine over MQTT; here it is answered from the Moonraker connection the app already has, and the
+// sw_mqtt_* commands are accepted and ignored. Most are read-only. The ones that can change printer state are exactly the control
+// commands of snapmaker_registered_control_commands() (#75, #79): LED, print speed, main and cavity fan, bed temperature, and
+// pause/resume/cancel (the last three only in the matching print state). Everything else that could change state (G-code, print
+// start, uploads, deletes, renames, firmware, nozzle temperature, purifier, device name) is deliberately NOT registered and gets the
+// core's 501; test_snapmaker_device_ui.cpp pins that list.
 class SnapmakerDeviceBridge
 {
 public:

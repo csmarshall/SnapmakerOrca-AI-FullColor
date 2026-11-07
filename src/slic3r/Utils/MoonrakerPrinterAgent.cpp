@@ -422,14 +422,17 @@ std::string MoonrakerPrinterAgent::control_request(const std::string& method, co
     return req.dump();
 }
 
-// Snapmaker's replies are handed to the page as they come (SSWCP_Instance::on_mqtt_msg_arrived); here: any non-error result for our id is
-// success, an object is passed through, a scalar is wrapped as {"result": v}.
+// Snapmaker's replies are handed to the page as they come (SSWCP_Instance::on_mqtt_msg_arrived); here: a non-error, non-null result for our id is
+// success (an object with a state member only when it is "success"), an object is passed through, a scalar is wrapped as {"result": v}.
 MoonrakerPrinterAgent::CameraReply MoonrakerPrinterAgent::parse_control_reply(const std::string& message, int id, nlohmann::json& result)
 {
     const nlohmann::json j = nlohmann::json::parse(message, nullptr, false);
     if (!j.is_object() || !j.contains("id") || !j["id"].is_number_integer() || j["id"].get<long long>() != id)
         return CameraReply::Ignore;
-    if (j.contains("error") || !j.contains("result"))
+    if (j.contains("error") || !j.contains("result") || j["result"].is_null())
+        return CameraReply::Fail;
+    // The printer's control methods answer {"state":"success"}; a state member that says anything else is a refusal.
+    if (j["result"].is_object() && j["result"].contains("state") && j["result"]["state"] != "success")
         return CameraReply::Fail;
     result = j["result"].is_object() ? j["result"] : nlohmann::json{{"result", j["result"]}};
     return CameraReply::Ok;
