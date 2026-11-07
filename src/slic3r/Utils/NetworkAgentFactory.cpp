@@ -101,6 +101,11 @@ bool NetworkAgentFactory::printer_agent_needs_print_host(const std::string& id)
     return info && info->needs_print_host;
 }
 
+bool NetworkAgentFactory::printer_agent_supports_bambu_print_options(const std::string& id)
+{
+    return id.empty() || id == BBL_PRINTER_AGENT_ID;
+}
+
 bool NetworkAgentFactory::is_printer_agent_registered(const std::string& id)
 {
     std::lock_guard<std::mutex> lock(s_registry_mutex);

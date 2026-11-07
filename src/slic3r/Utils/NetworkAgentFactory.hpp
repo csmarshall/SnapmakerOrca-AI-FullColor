@@ -107,6 +107,13 @@ public:
     static bool printer_agent_needs_print_host(const std::string& id);
 
     /**
+     * Whether the Bambu-style Send/Print dialog's Timelapse and Auto Bed Leveling options apply to printers of this agent.
+     * They are Bambu capability flags that the Moonraker-family agents (Snapmaker U1) never send; Snapmaker Orca's U1
+     * send dialog has neither (Plater.cpp on_action_print_plate -> send_gcode_legacy). An empty id counts as Bambu.
+     */
+    static bool printer_agent_supports_bambu_print_options(const std::string& id);
+
+    /**
      * Return the full plugin reference for a plugin-backed printer agent ID, or empty for built-ins.
      */
     static std::string get_printer_agent_plugin_identifier(const std::string& id);

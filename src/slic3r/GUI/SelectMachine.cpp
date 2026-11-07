@@ -5,6 +5,7 @@
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
 #include "FilamentBitmapUtils.hpp"
+#include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Preview.hpp"
@@ -3107,21 +3108,35 @@ void SelectMachineDialog::update_option_opts(MachineObject *obj)
         return;
     }
 
+    // Timelapse and Auto Bed Leveling are Bambu capabilities that the Moonraker-family agents (Snapmaker U1) never send; Snapmaker Orca's
+    // U1 send dialog has neither, so do not offer switches that do nothing (#84).
+    const bool bambu_options = NetworkAgentFactory::printer_agent_supports_bambu_print_options(obj->printer_agent_id);
+    if (!bambu_options) {
+        m_checkbox_list["timelapse"]->setValue("off");
+        m_checkbox_list["timelapse"]->Hide();
+        m_timelapse_folder_btn->Hide();
+        m_timelapse_storage.clear();
+        m_checkbox_list["bed_leveling"]->setValue("off");
+        m_checkbox_list["bed_leveling"]->Hide();
+    }
+
     /*timelapse*/
-    m_checkbox_list["timelapse"]->Show();
-    if (obj->is_support_internal_timelapse) {
+    if (bambu_options) m_checkbox_list["timelapse"]->Show();
+    if (bambu_options && obj->is_support_internal_timelapse) {
         m_timelapse_folder_btn->Show();
         if (m_timelapse_storage.empty()) {
             m_timelapse_storage = "internal";
         }
         update_timelapse_folder_btn_icon();
-    } else {
+    } else if (bambu_options) {
         m_timelapse_folder_btn->Hide();
         m_timelapse_storage.clear();
     }
 
     /*bed_leveling*/
-    if (obj->is_support_bed_leveling == 2) {
+    if (!bambu_options) {
+        // already hidden above
+    } else if (obj->is_support_bed_leveling == 2) {
         m_checkbox_list["bed_leveling"]->Show();
         m_checkbox_list["bed_leveling"]->update_options(ops_auto, _L("This checks the flatness of heatbed. Leveling makes extruded height uniform.\n*Automatic mode: Run a "
                                                                      "leveling check(about 10 seconds). Skip if surface is fine."));
