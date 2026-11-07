@@ -625,6 +625,8 @@ private:
 
     /* update option area*/
     void update_option_opts(MachineObject *obj);
+    // Time-lapse, Auto Bed Leveling and Flow Calibration as plain on/off per-print preferences sent as SET_PRINT_PREFERENCE lines (#85)
+    static bool has_snapmaker_print_preferences(const MachineObject *obj);
     void update_options_layout();
 
     /* timelapse storage-location selector */

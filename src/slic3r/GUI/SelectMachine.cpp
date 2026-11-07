@@ -1995,6 +1995,8 @@ void SelectMachineDialog::update_print_error_info(int code, std::string msg, std
 bool SelectMachineDialog::check_sdcard_for_timelpase(MachineObject* obj)
 {
     if (!obj) return false;
+    // Snapmaker's time-lapse is recorded by the printer, not on a Bambu SD card
+    if (has_snapmaker_print_preferences(obj)) return false;
 
     // must set to a status if return true
     if (m_checkbox_list["timelapse"]->IsShown() && m_checkbox_list["timelapse"]->getValue() == "on")
@@ -3099,6 +3101,11 @@ void SelectMachineDialog::update_options_layout()
     }
 }
 
+bool SelectMachineDialog::has_snapmaker_print_preferences(const MachineObject *obj)
+{
+    return obj && NetworkAgentFactory::printer_agent_supports_snapmaker_print_preferences(obj->printer_agent_id);
+}
+
 void SelectMachineDialog::update_option_opts(MachineObject *obj)
 {
     if (!obj)
@@ -3111,6 +3118,23 @@ void SelectMachineDialog::update_option_opts(MachineObject *obj)
     // Timelapse and Auto Bed Leveling are Bambu capabilities that the Moonraker-family agents (Snapmaker U1) never send; Snapmaker Orca's
     // U1 send dialog has neither, so do not offer switches that do nothing (#84).
     const bool bambu_options = NetworkAgentFactory::printer_agent_supports_bambu_print_options(obj->printer_agent_id);
+
+    // The Snapmaker agent turns them into real per-print preferences (#85): plain on/off, no "auto", no timelapse storage choice.
+    if (has_snapmaker_print_preferences(obj)) {
+        m_timelapse_folder_btn->Hide();
+        m_timelapse_storage.clear();
+        m_checkbox_list["timelapse"]->update_options(ops_no_auto, _L("Record a time-lapse of this print with the printer's camera."));
+        m_checkbox_list["timelapse"]->Show();
+        m_checkbox_list["bed_leveling"]->update_options(ops_no_auto, _L("This checks the flatness of heatbed. Leveling makes extruded height uniform."));
+        m_checkbox_list["bed_leveling"]->Show();
+        m_checkbox_list["flow_cali"]->update_options(ops_no_auto, _L("This process determines the dynamic flow values to improve overall print quality."));
+        m_checkbox_list["flow_cali"]->Show();
+        m_checkbox_list["nozzle_offset_cali"]->Hide();
+        update_pa_value_option(obj);
+        update_options_layout();
+        return;
+    }
+
     if (!bambu_options) {
         m_checkbox_list["timelapse"]->setValue("off");
         m_checkbox_list["timelapse"]->Hide();
@@ -3216,10 +3240,14 @@ void SelectMachineDialog::load_option_vals(MachineObject *obj)
     if (!config) return;
     if (!obj) return;
 
+    const bool snapmaker_prefs = has_snapmaker_print_preferences(obj);
     for (auto item : m_checkbox_list) {
         PrintOption       *opt = item.second;
         const std::string &val = config->get(obj->printer_type, item.first);
-        if (opt->contain_opt(val)) {
+        if (snapmaker_prefs && (item.first == "timelapse" || item.first == "bed_leveling" || item.first == "flow_cali")) {
+            // Snapmaker's defaults are all off, and a value saved for another kind of printer ("auto") has no meaning here
+            opt->setValue(val == "on" ? "on" : "off");
+        } else if (opt->contain_opt(val)) {
             opt->setValue(val);
         } else if (opt->contain_opt("auto")) {
             opt->setValue("auto");
@@ -3230,7 +3258,11 @@ void SelectMachineDialog::load_option_vals(MachineObject *obj)
 
     /*STUDIO-9197*/
     wxString error_messgae;
-    if (obj->canEnableTimelapse(error_messgae) && !has_timelapse_warning(error_messgae)) {
+    if (snapmaker_prefs) {
+        // Bambu's is_support_timelapse and SD-card rules do not apply: the toggle is a preference sent to the printer
+        m_checkbox_list["timelapse"]->enable(true);
+        m_checkbox_list["timelapse"]->update_tooltip(_L("Record a time-lapse of this print with the printer's camera."));
+    } else if (obj->canEnableTimelapse(error_messgae) && !has_timelapse_warning(error_messgae)) {
         m_checkbox_list["timelapse"]->enable(true);
         m_checkbox_list["timelapse"]->update_tooltip(wxEmptyString);
     } else {
@@ -4953,7 +4985,7 @@ void SelectMachineDialog::update_show_status(MachineObject* obj_)
     // TPU/Aero flow-cali gate on printers that don't support PA auto-cali: "auto" blocks; "on" is a
     // non-blocking advisory (the printer falls back to the previous cali value and skips flow
     // calibration), so Send stays enabled and there is no return.
-    if (!can_support_pa_auto_cali() && m_checkbox_list["flow_cali"]->IsShown()) {
+    if (!has_snapmaker_print_preferences(obj_) && !can_support_pa_auto_cali() && m_checkbox_list["flow_cali"]->IsShown()) {
         if (m_checkbox_list["flow_cali"]->getValue() == "auto") {
             show_status(PrintDialogStatus::PrintStatusTPUUnsupportAutoCali);
             return;
