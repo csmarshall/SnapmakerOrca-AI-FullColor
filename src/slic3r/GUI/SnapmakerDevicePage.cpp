@@ -103,6 +103,8 @@ bool SnapmakerDevicePage::start()
             WebView::RunScript(m_browser, wxString::FromUTF8(js));
     }); };
     opt.devices = [this]() { return current_devices(); };
+    // #82: after a light change the page is rebuilt (reset + start) once the current handler has returned, so its switch shows the new state.
+    opt.reload_page = [this]() { CallAfter([this]() { if (m_started) { reset(); start(); } }); };
     // Machine state: the live agent's read-only object query runs on Http's thread; the result is handed to the UI thread
     // through the app (not this page, which may be gone by then). The bridge ignores results after its shutdown.
     opt.query_state = [](const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done) {
