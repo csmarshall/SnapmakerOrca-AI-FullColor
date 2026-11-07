@@ -51,6 +51,14 @@ nlohmann::json snapmaker_devices_to_json(const std::vector<SnapmakerDeviceInfo>&
 nlohmann::json snapmaker_device_to_json(const SnapmakerDeviceInfo& device);
 // The host part of an address as typed or stored: "http://u1.local:7125/x" -> "u1.local".
 std::string snapmaker_bare_host(const std::string& address);
+// File tab: sw_GetFileListPage. The params must be exactly {root:"gcodes", page_number:int 0..10000, files_per_page:int 1..500}.
+bool snapmaker_file_list_params_valid(const nlohmann::json& params);
+// Turns the body of GET /server/files/list?root=gcodes ({"result":[{path,modified,size,permissions},...]}, unsorted, unpaged) into the
+// printer's list_page result {state,root,storage,total,page_number,files_per_page,files:[...]}: sorted by modified descending (ties by
+// path), one page, only the four fields per file. False if the body is not such a list.
+bool snapmaker_file_list_page(const std::string& body, int page_number, int files_per_page, nlohmann::json& out);
+// The roots array of GET /server/files/roots ({"result":[{name,path,permissions},...]}); false if the body is not that.
+bool snapmaker_file_roots(const std::string& body, nlohmann::json& out);
 // "http://<bare host>" of a machine address, the one extra origin the page may load the camera snapshot from; "" if the host is
 // not a plain DNS name, IPv4 address or bracketed IPv6 literal (no credentials, port, path or anything CSP-significant).
 std::string snapmaker_camera_origin(const std::string& address);

@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -550,16 +551,18 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query", "sw_MachineFilesRoots", "sw_MachineFilesMetadata",
         "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys", "sw_FilesThumbnailsBase64", "sw_MachineHeartbeat",
         // camera preview (start/stop only; the timelapse commands stay denied)
-        "sw_CameraStartMonitor", "sw_CameraStopMonitor"};
+        "sw_CameraStartMonitor", "sw_CameraStopMonitor",
+        // read-only file listing (#75)
+        "sw_GetFileListPage"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 41);
+    CHECK(expected.size() == 42);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
 {
     BridgeHarness h;
-    for (const char* cmd : {"sw_GetMachineSystemInfo", "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query", "sw_MachineFilesRoots",
+    for (const char* cmd : {"sw_GetMachineSystemInfo", "sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query",
                             "sw_MachineFilesMetadata", "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys"}) {
         CAPTURE(cmd);
         h.sent.clear();
@@ -1000,7 +1003,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 41);
+    CHECK(registered.size() == 42);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
@@ -1331,4 +1334,186 @@ TEST_CASE("camera RPC over a loopback websocket: success, notification first, er
         CHECK(p.accepted == 0);
         CHECK_FALSE(gate->busy_now());
     }
+}
+
+// ---- file tab (#75): sw_GetFileListPage / sw_MachineFilesRoots, read-only over GET /server/files/list and /roots ----
+
+namespace {
+json listpage_fixture()
+{
+    std::ifstream in((boost::filesystem::path(TEST_DATA_DIR) / "snapmaker_listpage.json").string());
+    REQUIRE(in.good());
+    return json::parse(in);
+}
+// The printer's HTTP list: {"result":[{path,modified,size,permissions}...]} in an arbitrary order, with extra fields the page must not see.
+std::string http_list(std::vector<json> files)
+{
+    for (auto& f : files) f["extra"] = "must not leak";
+    return json{{"result", files}}.dump();
+}
+json file(const std::string& path, double modified, long long size = 10, const std::string& perm = "rw")
+{
+    return {{"path", path}, {"modified", modified}, {"size", size}, {"permissions", perm}};
+}
+std::string list_msg(const json& params) { return camera_msg("sw_GetFileListPage", params); }
+const char* kListPath = "/server/files/list?root=gcodes";
+} // namespace
+
+TEST_CASE("sw_GetFileListPage params: only root gcodes, page 0..10000, per page 1..500; bad params never fetch", "[SSWCP][device_ui][files]")
+{
+    BridgeHarness h;
+    h.resources[kListPath] = http_list({file("a.gcode", 1)});
+    const json ok = {{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 100}};
+    auto with = [&](const char* k, json v) { json p = ok; p[k] = std::move(v); return p; };
+    auto without = [&](const char* k) { json p = ok; p.erase(k); return p; };
+    std::vector<json> bad = {json::array(), json(), with("root", "config"), with("root", "gcodes/"), with("root", "../gcodes"), with("root", 1), without("root"),
+                             with("page_number", -1), with("page_number", 10001), with("page_number", 1.5), with("page_number", "0"), without("page_number"),
+                             with("files_per_page", 0), with("files_per_page", 501), with("files_per_page", -3), with("files_per_page", 2.5), without("files_per_page"),
+                             with("extra", 1)};
+    for (const auto& p : bad) {
+        CAPTURE(p.dump());
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, list_msg(p));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 400);
+    }
+    CHECK(h.fetched.empty());
+    for (const json& p : {ok, with("page_number", 10000), with("files_per_page", 1), with("files_per_page", 500)}) {
+        CAPTURE(p.dump());
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, list_msg(p));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 200);
+    }
+    CHECK(h.fetched.size() == 4);
+    for (const auto& f : h.fetched) CHECK(f == kListPath);
+}
+
+TEST_CASE("sw_GetFileListPage sorts by modified descending (ties by path) and paginates host-side", "[SSWCP][device_ui][files]")
+{
+    BridgeHarness h;
+    // 7 files in a scrambled order; b and c tie on modified.
+    h.resources[kListPath] = http_list({file("old.gcode", 100), file("b.gcode", 500), file("newest.gcode", 900), file("c.gcode", 500),
+                                        file("mid.gcode", 300), file("a.gcode", 500), file("oldest.gcode", 50)});
+    const std::vector<std::string> order = {"newest.gcode", "a.gcode", "b.gcode", "c.gcode", "mid.gcode", "old.gcode", "oldest.gcode"};
+    auto page = [&](int n, int per) {
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", n}, {"files_per_page", per}}));
+        REQUIRE(h.sent.size() == 1);
+        REQUIRE(h.reply(0)["payload"]["code"] == 200);
+        return h.reply(0)["payload"]["data"];
+    };
+    auto paths = [](const json& d) { std::vector<std::string> v; for (const auto& f : d["files"]) v.push_back(f["path"]); return v; };
+    json d = page(0, 3);
+    CHECK(paths(d) == std::vector<std::string>(order.begin(), order.begin() + 3));
+    CHECK(d["total"] == 7);
+    CHECK(d["page_number"] == 0);
+    CHECK(d["files_per_page"] == 3);
+    CHECK(paths(page(1, 3)) == std::vector<std::string>(order.begin() + 3, order.begin() + 6));
+    d = page(2, 3);                                           // the last, partial page
+    CHECK(paths(d) == std::vector<std::string>{"oldest.gcode"});
+    CHECK(d["total"] == 7);
+    d = page(3, 3);                                           // beyond the end: empty, total still right
+    CHECK(d["files"] == json::array());
+    CHECK(d["total"] == 7);
+    CHECK(paths(page(0, 7)) == order);                        // exact fit
+    CHECK(paths(page(1, 7)).empty());
+    CHECK(paths(page(0, 500)) == order);
+    CHECK(paths(page(10000, 1)).empty());
+    for (const auto& f : page(0, 7)["files"])                 // only the four fields
+        CHECK(f.size() == 4);
+}
+
+TEST_CASE("sw_GetFileListPage replies the printer's own list_page shape (saved reply, first page)", "[SSWCP][device_ui][files]")
+{
+    const json fx = listpage_fixture();
+    const json expected = fx["page0"];
+    REQUIRE(expected["files"].size() == 3);
+    BridgeHarness h;
+    std::vector<json> files;
+    for (const auto& f : expected["files"]) files.push_back(f);
+    std::reverse(files.begin(), files.end());                 // the HTTP list is not sorted
+    for (int i = 0; i < 133; ++i) files.push_back(file("older" + std::to_string(i) + ".gcode", 1000.0 + i)); // total 136, all older
+    h.resources[kListPath] = http_list(files);
+    h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 3}}));
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] == 200);
+    CHECK(h.reply(0)["payload"]["data"] == expected);         // same keys, same values, same order of files
+    std::set<std::string> keys, want;
+    const json got = h.reply(0)["payload"]["data"];
+    for (auto it = got.begin(); it != got.end(); ++it) keys.insert(it.key());
+    for (auto it = expected.begin(); it != expected.end(); ++it) want.insert(it.key());
+    CHECK(keys == want);
+}
+
+TEST_CASE("sw_GetFileListPage fails soft: a failed or malformed or oversized list is never an empty success", "[SSWCP][device_ui][files]")
+{
+    const json p = {{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 100}};
+    auto code_for = [&](const std::string* body) {
+        BridgeHarness h;
+        if (body) h.resources[kListPath] = *body;             // absent = the fetch fails
+        h.bridge.on_script_message(h.good, list_msg(p));
+        REQUIRE(h.sent.size() == 1);
+        return h.reply(0)["payload"]["code"].get<int>();
+    };
+    CHECK(code_for(nullptr) != 200);
+    for (const std::string& body : {std::string("not json"), std::string("{}"), std::string(R"({"result":{}})"), std::string(R"({"result":"x"})"), std::string("[]")})
+        CHECK(code_for(&body) != 200);
+    const std::string empty_list = R"({"result":[]})";        // a genuinely empty directory is a real success with total 0
+    CHECK(code_for(&empty_list) == 200);
+    std::string huge = R"({"result":[)" + std::string(2 * 1024 * 1024 + 1, ' ') + "]}";
+    CHECK(code_for(&huge) != 200);                            // over the 2 MB cap, even if the source did not enforce it
+    // No machine source at all.
+    std::vector<std::string> sent;
+    SnapmakerDeviceBridge::Options o;
+    o.port = 5000; o.http_host = "http://127.0.0.1:5000";
+    o.run_script = [&sent](const std::string& js) { sent.push_back(js); };
+    SnapmakerDeviceBridge none(std::move(o));
+    none.on_script_message("http://127.0.0.1:5000/web/flutter_web/index.html", list_msg(p));
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0].find("\"code\":-1") != std::string::npos);
+}
+
+TEST_CASE("sw_GetFileListPage drops a reply that arrives after shutdown", "[SSWCP][device_ui][files]")
+{
+    BridgeHarness h;
+    h.resources[kListPath] = http_list({file("a.gcode", 1)});
+    h.hold_fetch = true;
+    h.bridge.on_script_message(h.good, list_msg({{"root", "gcodes"}, {"page_number", 0}, {"files_per_page", 10}}));
+    CHECK(h.sent.empty());
+    h.bridge.shutdown();
+    h.release_fetches();
+    CHECK(h.sent.empty());
+}
+
+TEST_CASE("sw_MachineFilesRoots replies the roots list from GET /server/files/roots, fail-soft", "[SSWCP][device_ui][files]")
+{
+    const json fx = listpage_fixture();
+    {
+        BridgeHarness h;
+        h.resources["/server/files/roots"] = json{{"result", fx["roots"]}}.dump();
+        h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_MachineFilesRoots"));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 200);
+        CHECK(h.reply(0)["payload"]["data"] == fx["roots"]);
+        REQUIRE(h.fetched.size() == 1);
+        CHECK(h.fetched[0] == "/server/files/roots");
+    }
+    BridgeHarness bad;                                        // fetch fails
+    bad.bridge.on_script_message(bad.good, BridgeHarness::msg("sw_MachineFilesRoots"));
+    REQUIRE(bad.sent.size() == 1);
+    CHECK(bad.reply(0)["payload"]["code"] != 200);
+    BridgeHarness junk;
+    junk.resources["/server/files/roots"] = R"({"result":{"a":1}})";
+    junk.bridge.on_script_message(junk.good, BridgeHarness::msg("sw_MachineFilesRoots"));
+    REQUIRE(junk.sent.size() == 1);
+    CHECK(junk.reply(0)["payload"]["code"] != 200);
+}
+
+TEST_CASE("deleting, downloading and uploading machine files stay denied", "[SSWCP][device_ui][files]")
+{
+    BridgeHarness h;
+    for (const char* cmd : {"sw_DeleteMachineFile", "sw_DownloadMachineFile", "sw_DownLoadFile", "sw_UploadFiletoMachine", "sw_MachinePrintStart",
+                            "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_StartLocalPrint"})
+        CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
 }

@@ -1,0 +1,57 @@
+{
+ "page0": {
+  "state": "success",
+  "root": "gcodes",
+  "storage": "all",
+  "total": 136,
+  "page_number": 0,
+  "files_per_page": 3,
+  "files": [
+   {
+    "path": "Speed Test B - Recess_ABS_1h52m.gcode",
+    "modified": 1794008513.8647993,
+    "size": 10300923,
+    "permissions": "rw"
+   },
+   {
+    "path": "Speed Test A - Recess_ABS_1h52m.gcode",
+    "modified": 1794007463.3799167,
+    "size": 10268916,
+    "permissions": "rw"
+   },
+   {
+    "path": "Fit Test - Recess Ladder_ABS_1h16m.gcode",
+    "modified": 1793993915.4126759,
+    "size": 7556829,
+    "permissions": "rw"
+   }
+  ]
+ },
+ "roots": [
+  {
+   "name": "config",
+   "path": "/oem/printer_data/config",
+   "permissions": "rw"
+  },
+  {
+   "name": "logs",
+   "path": "/userdata/logs",
+   "permissions": "r"
+  },
+  {
+   "name": "gcodes",
+   "path": "/userdata/gcodes",
+   "permissions": "rw"
+  },
+  {
+   "name": "timelapse",
+   "path": "/oem/printer_data/camera",
+   "permissions": "rw"
+  },
+  {
+   "name": "camera",
+   "path": "/oem/printer_data/camera",
+   "permissions": "r"
+  }
+ ]
+}
