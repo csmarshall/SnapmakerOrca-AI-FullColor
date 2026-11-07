@@ -587,7 +587,8 @@ inline constexpr const char* kControlRpcMethods[] = {
     "printer.control.led",          "printer.control.print_speed", "printer.control.purifier", "printer.control.main_fan",
     "printer.control.generic_fan",  "printer.control.bed_temp",    "printer.control.extruder_temp",
     "printer.print.pause",          "printer.print.resume",        "printer.print.cancel",
-    "printer.bed_mesh.abort_probe_mesh", "machine.set_device_name"};
+    "printer.bed_mesh.abort_probe_mesh", "machine.set_device_name",
+    "printer.gcode.script"}; // printer.gcode.script only ever carries nozzle-temperature scripts (snapmaker_nozzle_script_*_valid, below)
 // pause / resume / cancel: they get their own in-flight gate and a longer timeout than the other controls (#79)
 inline bool control_method_is_print(const std::string& method)
 {
@@ -598,6 +599,52 @@ inline bool control_method_allowed(const std::string& method)
     for (const char* m : kControlRpcMethods)
         if (method == m) return true;
     return false;
+}
+
+// Nozzle temperature through the gcode route the Device page uses (#79): `SET_HEATER_TEMPERATURE HEATER=<h> TARGET=<n>` with h one of
+// extruder, extruder1..extruder3 (the page names the heater "extruder" for index 0, else "extruder"+index) and n an integer 0..300.
+// Nothing else is a valid script. Trailing whitespace/newlines are ignored; an embedded newline, extra token, other case or command is not.
+inline bool snapmaker_nozzle_script_line_valid(const std::string& line)
+{
+    std::size_t end = line.size();
+    while (end > 0 && (line[end - 1] == ' ' || line[end - 1] == '\t' || line[end - 1] == '\n' || line[end - 1] == '\r')) --end;
+    const std::string s = line.substr(0, end);
+    static const std::string prefix = "SET_HEATER_TEMPERATURE HEATER=";
+    if (s.compare(0, prefix.size(), prefix) != 0) return false;
+    const std::size_t sp = s.find(' ', prefix.size());
+    if (sp == std::string::npos) return false;
+    const std::string heater = s.substr(prefix.size(), sp - prefix.size());
+    if (heater != "extruder" && heater != "extruder1" && heater != "extruder2" && heater != "extruder3") return false;
+    static const std::string target = " TARGET=";
+    if (s.compare(sp, target.size(), target) != 0) return false;
+    const std::string n = s.substr(sp + target.size());
+    if (n.empty() || n.size() > 3 || (n.size() > 1 && n[0] == '0')) return false;
+    for (char c : n)
+        if (c < '0' || c > '9') return false;
+    return std::stoi(n) <= 300;
+}
+inline constexpr std::size_t kNozzleScriptMax = 4;
+// The page's `script` param: a string (one script) or a non-empty array of at most 4 strings; every string is one valid script (an
+// embedded newline fails the digit check, so two commands in one string are refused).
+inline bool snapmaker_nozzle_script_valid(const nlohmann::json& script)
+{
+    if (script.is_string()) return snapmaker_nozzle_script_line_valid(script.get_ref<const std::string&>());
+    if (!script.is_array() || script.empty() || script.size() > kNozzleScriptMax) return false;
+    for (const auto& e : script)
+        if (!e.is_string() || !snapmaker_nozzle_script_line_valid(e.get_ref<const std::string&>())) return false;
+    return true;
+}
+// The agent's check of the `script` string it is about to send: the scripts the bridge joined with '\n', each valid, at most 4.
+inline bool snapmaker_nozzle_script_joined_valid(const std::string& script)
+{
+    std::size_t begin = 0, count = 0;
+    while (true) {
+        const std::size_t nl = script.find('\n', begin);
+        const std::string line = script.substr(begin, nl == std::string::npos ? std::string::npos : nl - begin);
+        if (++count > kNozzleScriptMax || !snapmaker_nozzle_script_line_valid(line)) return false;
+        if (nl == std::string::npos) return true;
+        begin = nl + 1;
+    }
 }
 
 // The whitelist for camera_monitor_async() and the page bridge: an object with exactly the keys domain ("lan"), clientid

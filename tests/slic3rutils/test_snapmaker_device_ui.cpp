@@ -1019,7 +1019,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 50);
+    CHECK(registered.size() == 51);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }

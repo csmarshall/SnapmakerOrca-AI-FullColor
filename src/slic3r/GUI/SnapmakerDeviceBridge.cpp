@@ -104,6 +104,8 @@ const std::vector<ControlSpec>& control_specs()
         {{"sw_MachinePrintPause", "printer.print.pause"}, {}},
         {{"sw_MachinePrintResume", "printer.print.resume"}, {}},
         {{"sw_MachinePrintCancel", "printer.print.cancel"}, {}},
+        // sw_SendGCodes: handled by hand in snapmaker_control_prepare (nozzle-temperature scripts only); no declarative params
+        {{"sw_SendGCodes", "printer.gcode.script"}, {}},
     };
     return specs;
 }
@@ -121,11 +123,11 @@ const std::vector<SnapmakerControlCommand>& snapmaker_control_table()
 
 const std::vector<std::string>& snapmaker_registered_control_commands()
 {
-    // Approved by Charles after the #79 review. Left out on purpose: sw_ControlExtruderTemp and sw_ControlPurifier (the page drives
-    // those with gcode / other payloads), sw_SetDeviceName, sw_BedMesh_AbortProbeMesh.
+    // Approved by Charles after the #79 review. sw_SendGCodes carries the page's nozzle temperature (SET_HEATER_TEMPERATURE only).
+    // Left out on purpose: sw_ControlExtruderTemp and sw_ControlPurifier (the page does not use them), sw_SetDeviceName, sw_BedMesh_AbortProbeMesh.
     static const std::vector<std::string> registered = {"sw_ControlLed",      "sw_ControlPrintSpeed",  "sw_ControlMainFan",
                                                         "sw_ControlGenericFan", "sw_ControlBedTemp",     "sw_MachinePrintPause",
-                                                        "sw_MachinePrintResume", "sw_MachinePrintCancel"};
+                                                        "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"};
     return registered;
 }
 
@@ -145,6 +147,19 @@ bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json&
         if (sw_name == s.cmd.sw_name) { spec = &s; break; }
     if (!spec) { error = "unsupported command"; return false; }
     if (!params.is_object()) { error = "failure"; return false; }
+    if (sw_name == "sw_SendGCodes") { // Snapmaker: {script: string | array of strings}, joined with "\n" (SSWCP.cpp sw_SendGCodes); ours: nozzle temperature only
+        const auto it = params.find("script");
+        if (it == params.end() || !snapmaker_nozzle_script_valid(*it)) { error = "failure"; return false; }
+        std::string joined;
+        for (const auto& e : it->is_array() ? *it : nlohmann::json::array({*it})) {
+            std::string line = e.get<std::string>();
+            while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            joined += (joined.empty() ? "" : "\n") + line;
+        }
+        method     = spec->cmd.rpc_method;
+        rpc_params = {{"script", joined}};
+        return true;
+    }
     nlohmann::json out = nlohmann::json::object();
     for (const auto& p : spec->params) { // Snapmaker checks every "required" first, in order, then reads the values
         if (p.required && !params.count(p.key)) { error = std::string("param [") + p.missing + "] required!"; return false; }
