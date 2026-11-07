@@ -455,7 +455,7 @@ void MoonrakerPrinterAgent::control_async(const std::string& method, const nlohm
         base_url = device_info.base_url;
         api_key  = device_info.api_key;
     }
-    control_run(base_url, api_key, method, params, std::chrono::milliseconds(5000), m_control_gate, std::move(done));
+    control_run(base_url, api_key, method, params, control_timeout_for(method), control_gate_for(method), std::move(done));
 }
 
 void MoonrakerPrinterAgent::camera_monitor_async(bool start, const nlohmann::json& params,
