@@ -1706,7 +1706,7 @@ TEST_CASE("the forklifted control table is complete, uses allowlisted methods an
     // The unreachable entries still answer "unsupported command" (501) and never reach the machine, even with valid params.
     const std::map<std::string, json> valid = {
         {"sw_ControlPrintSpeed", {{"percentage", 100}}}, {"sw_ControlPurifier", {{"fan_speed", 50}}}, {"sw_ControlMainFan", {{"speed", 50}}},
-        {"sw_ControlGenericFan", {{"name", "fan1"}, {"speed", 50}}}, {"sw_ControlBedTemp", {{"temp", 60}}},
+        {"sw_ControlGenericFan", {{"name", "cavity_fan"}, {"speed", 50}}}, {"sw_ControlBedTemp", {{"temp", 60}}},
         {"sw_ControlExtruderTemp", {{"temp", 200}, {"index", 0}}}, {"sw_SetDeviceName", {{"name", "U1"}}},
         {"sw_BedMesh_AbortProbeMesh", json::object()}, {"sw_MachinePrintPause", json::object()}, {"sw_MachinePrintResume", json::object()},
         {"sw_MachinePrintCancel", json::object()}};
@@ -1749,15 +1749,16 @@ TEST_CASE("snapmaker_control_prepare: Snapmaker's required-param messages and st
     CHECK(err == "param [fan_id] required!");            // sic: Snapmaker checks "name" and reports fan_id
     CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", "fan1"}}));
     CHECK(err == "param [speed] required!");
-    CHECK(prep("sw_ControlGenericFan", {{"name", "fan1"}, {"speed", 50}}));
-    CHECK(out == json{{"name", "fan1"}, {"speed", 50}});
+    CHECK(prep("sw_ControlGenericFan", {{"name", "cavity_fan"}, {"speed", 50}}));
+    CHECK(out == json{{"name", "cavity_fan"}, {"speed", 50}});
+    CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", "fan1"}, {"speed", 50}})); // the name is pinned like the LED's
     CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", "fan 1; M112"}, {"speed", 50}}));
     CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", ""}, {"speed", 50}}));
 
     CHECK_FALSE(prep("sw_ControlBedTemp", json::object()));
     CHECK(err == "param [temp] required!");
     CHECK(prep("sw_ControlBedTemp", {{"temp", 60}}));
-    CHECK_FALSE(prep("sw_ControlBedTemp", {{"temp", 121}}));
+    CHECK_FALSE(prep("sw_ControlBedTemp", {{"temp", 101}}));
     CHECK_FALSE(prep("sw_ControlBedTemp", {{"temp", -5}}));
 
     CHECK_FALSE(prep("sw_ControlExtruderTemp", {{"index", 0}}));
@@ -1787,6 +1788,40 @@ TEST_CASE("snapmaker_control_prepare: Snapmaker's required-param messages and st
         CHECK(prep(cmd, {{"x", 1}}));
         CHECK(out == json::object());                       // no params are forwarded
     }
+}
+
+TEST_CASE("control ranges: min-1, min, max, max+1 and non-integers for every ranged param", "[SSWCP][device_ui][control]")
+{
+    struct Range { const char* cmd; const char* key; int lo, hi; json extra; };
+    const Range ranges[] = {
+        {"sw_ControlLed", "white", 0, 1, {{"name", "cavity_led"}}},
+        {"sw_ControlPrintSpeed", "percentage", 50, 200, json::object()},
+        {"sw_ControlMainFan", "speed", 0, 100, json::object()},
+        {"sw_ControlGenericFan", "speed", 0, 100, {{"name", "cavity_fan"}}},
+        {"sw_ControlBedTemp", "temp", 0, 100, json::object()},
+        {"sw_ControlExtruderTemp", "temp", 0, 300, json::object()},
+        {"sw_ControlExtruderTemp", "index", 0, 3, {{"temp", 200}}},
+    };
+    std::string method, err;
+    json        out;
+    for (const auto& r : ranges) {
+        CAPTURE(r.cmd, r.key);
+        const auto with = [&](const json& v) { json p = r.extra; p[r.key] = v; out = json(); return snapmaker_control_prepare(r.cmd, p, method, out, err); };
+        CHECK_FALSE(with(r.lo - 1));
+        CHECK(with(r.lo));
+        CHECK(out[r.key] == r.lo);
+        CHECK(with(r.hi));
+        CHECK(out[r.key] == r.hi);
+        CHECK_FALSE(with(r.hi + 1));
+        CHECK_FALSE(with(r.lo + 0.5));
+        CHECK_FALSE(with(static_cast<double>(r.lo)));  // 50.0 is not a JSON integer
+        CHECK_FALSE(with(true));
+        CHECK_FALSE(with(false));
+        CHECK_FALSE(with("50"));
+        CHECK_FALSE(with(nullptr));
+    }
+    CHECK_FALSE(snapmaker_control_prepare("sw_ControlGenericFan", {{"name", "cavity_fan "}, {"speed", 1}}, method, out, err));
+    CHECK_FALSE(snapmaker_control_prepare("sw_ControlGenericFan", {{"name", "Cavity_Fan"}, {"speed", 1}}, method, out, err));
 }
 
 TEST_CASE("control_async request builder: allowlisted methods only, and the reply parser", "[SSWCP][device_ui][control]")
@@ -1820,6 +1855,13 @@ TEST_CASE("control_async request builder: allowlisted methods only, and the repl
     CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{},"id":3})", 7, result) == R::Ignore);
     CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","error":{"code":-1,"message":"no"},"id":7})", 7, result) == R::Fail);
     CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","id":7})", 7, result) == R::Fail);
+    // a state other than "success" is the printer saying no, even without an error member
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{"state":"fail"},"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{"state":"error"},"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{"state":true},"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":null,"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{"state":"success"},"error":{"code":1},"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{},"id":7})", 7, result) == R::Ok); // no state member: the shape of a plain ack
 }
 
 TEST_CASE("control RPC over a loopback websocket sends exactly the allowlisted method", "[SSWCP][device_ui][control][loopback]")

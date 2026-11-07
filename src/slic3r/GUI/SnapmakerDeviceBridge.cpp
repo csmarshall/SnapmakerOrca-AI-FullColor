@@ -33,9 +33,9 @@ std::string snapmaker_bare_host(const std::string& address)
 // they are the named constants below. ---
 namespace {
 constexpr int kLedWhiteMin = 0, kLedWhiteMax = 1;       // cavity_led is on/off
-constexpr int kPrintSpeedMin = 10, kPrintSpeedMax = 300; // percent
+constexpr int kPrintSpeedMin = 50, kPrintSpeedMax = 200; // percent
 constexpr int kFanSpeedMin = 0, kFanSpeedMax = 100;      // percent
-constexpr int kBedTempMin = 0, kBedTempMax = 120;
+constexpr int kBedTempMin = 0, kBedTempMax = 100;
 constexpr int kExtruderTempMin = 0, kExtruderTempMax = 300;
 constexpr int kExtruderIndexMin = 0, kExtruderIndexMax = 3, kExtruderMapMin = 0, kExtruderMapMax = 15;
 constexpr int kPurifierDelayMax = 3600, kPurifierWorkMax = 86400;
@@ -87,9 +87,9 @@ const std::vector<ControlSpec>& control_specs()
          true},
         // sw_ControlMainFan: speed
         {{"sw_ControlMainFan", "printer.control.main_fan"}, {{"speed", false, true, "speed", kFanSpeedMin, kFanSpeedMax, nullptr}}},
-        // sw_ControlGenericFan: Snapmaker checks "name" but reports "param [fan_id] required!" - kept verbatim
+        // sw_ControlGenericFan: Snapmaker checks "name" but reports "param [fan_id] required!" - kept verbatim; the name is pinned to cavity_fan
         {{"sw_ControlGenericFan", "printer.control.generic_fan"},
-         {{"name", true, true, "fan_id", 0, 0, nullptr}, {"speed", false, true, "speed", kFanSpeedMin, kFanSpeedMax, nullptr}}},
+         {{"name", true, true, "fan_id", 0, 0, "cavity_fan"}, {"speed", false, true, "speed", kFanSpeedMin, kFanSpeedMax, nullptr}}},
         // sw_ControlBedTemp: temp
         {{"sw_ControlBedTemp", "printer.control.bed_temp"}, {{"temp", false, true, "temp", kBedTempMin, kBedTempMax, nullptr}}},
         // sw_ControlExtruderTemp: temp required; index and map optional (forwarded only when given)
