@@ -1,4 +1,5 @@
 #include "MoonrakerPrinterAgent.hpp"
+#include "SnapmakerPrintPreference.hpp"
 #include <cstring>
 #include "AsioUtils.hpp"
 #include "Http.hpp"
@@ -829,6 +830,17 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     // Start print via gcode script (simpler than JSON-RPC)
     if (update_fn)
         update_fn(PrintingStageSending, 0, _u8L("Starting print..."));
+
+    // Per-print preferences go to the printer first and the plate's G-code is not touched (Snapmaker Orca's send page,
+    // resources/web/flutter_web/main.b347974c91352c2f.js setPrePrintConfiguration ~39855). A refused script means no print.
+    if (supports_print_preferences()) {
+        const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
+                                                                                params.task_bed_leveling);
+        if (!is_snapmaker_print_preference_script(preferences) || !send_gcode_sync(device_info.dev_id, preferences)) {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: print preferences not applied, the print is not started";
+            return BAMBU_NETWORK_ERR_PRINT_LP_PUBLISH_MSG_FAILED;
+        }
+    }
     std::string gcode = "SDCARD_PRINT_FILE FILENAME=" + upload_filename;
     if (!send_gcode_sync(device_info.dev_id, gcode)) {
         return BAMBU_NETWORK_ERR_PRINT_LP_PUBLISH_MSG_FAILED;

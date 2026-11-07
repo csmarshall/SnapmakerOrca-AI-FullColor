@@ -110,6 +110,10 @@ public:
     int set_user_selected_machine(std::string dev_id) override;
 
     // Print Job Operations
+    // Whether start_local_print first sends the per-print preferences (flow calibration, time-lapse, bed leveling) as
+    // SET_PRINT_PREFERENCE lines, as Snapmaker Orca's send page does. Only the Snapmaker agent does.
+    virtual bool supports_print_preferences() const { return false; }
+
     int start_print(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn) override;
     int start_local_print_with_record(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn) override;
     int start_send_gcode_to_sdcard(PrintParams params, OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn, OnWaitFn wait_fn) override;

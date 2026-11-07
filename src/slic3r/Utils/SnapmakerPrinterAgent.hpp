@@ -20,6 +20,8 @@ public:
 
     DeviceUi         device_ui() const override { return DeviceUi::SnapmakerWeb; }
 
+    bool supports_print_preferences() const override { return true; }
+
     bool fetch_filament_info(std::string dev_id, FilamentSyncMode sync_mode = FilamentSyncMode::pull) override;
 
 private:

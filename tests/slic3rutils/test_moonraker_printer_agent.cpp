@@ -43,6 +43,8 @@
 #include "slic3r/GUI/DeviceCore/DevStorage.h"
 #include "slic3r/Utils/IPrinterAgent.hpp"
 #include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
+#include "slic3r/Utils/SnapmakerPrintPreference.hpp"
+#include "slic3r/Utils/SnapmakerPrinterAgent.hpp"
 
 using namespace Slic3r;
 
@@ -240,6 +242,13 @@ public:
         return m_scripts;
     }
 
+    // Answers every gcode script that starts with `prefix` with an HTTP 500 (it is still recorded).
+    void reject_scripts_starting_with(std::string prefix)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_rejected_script_prefix = std::move(prefix);
+    }
+
     // Hangs up every connection that is waiting.
     void release()
     {
@@ -364,8 +373,10 @@ private:
             response.body() = "{}";
         } else if (request.target() == "/printer/gcode/script") {
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_scripts.push_back(nlohmann::json::parse(request.body()).at("script").get<std::string>());
-            response.result(http::status::ok);
+            const std::string script = nlohmann::json::parse(request.body()).at("script").get<std::string>();
+            m_scripts.push_back(script);
+            const bool rejected = !m_rejected_script_prefix.empty() && script.rfind(m_rejected_script_prefix, 0) == 0;
+            response.result(rejected ? http::status::internal_server_error : http::status::ok);
             response.body() = "{}";
         } else if (request.target() == "/server/files/directory?path=gcodes") {
             nlohmann::json result = {{"dirs", nlohmann::json::array()}, {"files", nlohmann::json::array()}};
@@ -490,6 +501,7 @@ private:
     bool m_released     = false;
     std::vector<Upload> m_uploads;
     std::vector<std::string> m_scripts;
+    std::string m_rejected_script_prefix;
     nlohmann::json m_disk_usage = {{"total", 8e9}, {"used", 2e9}, {"free", 6e9}};
 };
 
@@ -573,6 +585,14 @@ public:
         device_info.dev_id   = "printer";
         device_info.base_url = printer.base_url();
     }
+};
+
+// A Moonraker agent that applies the per-print preferences, as the Snapmaker agent does.
+class PreferenceAgent : public PrintAgent
+{
+public:
+    using PrintAgent::PrintAgent;
+    bool supports_print_preferences() const override { return true; }
 };
 
 std::string read_file(const boost::filesystem::path& path)
@@ -695,6 +715,94 @@ TEST_CASE("Printing a plain G-code file uploads it unchanged", "[MoonrakerPrinte
     CHECK(printer.uploads()[0].content == PLATE_1_GCODE);
     CHECK(printer.uploads()[0].filename == "part.gcode");
     CHECK(printer.scripts().at(0) == "SDCARD_PRINT_FILE FILENAME=part.gcode");
+}
+
+namespace {
+
+// The fields the Send dialog sets: Snapmaker's flow calibration, time-lapse and bed leveling.
+PrintParams preference_params(const boost::filesystem::path& file, bool flow_calibrate, bool time_lapse, bool bed_level)
+{
+    PrintParams params = print_params(file, 1, "ignored.gcode.3mf");
+    params.task_flow_cali        = flow_calibrate;
+    params.task_record_timelapse = time_lapse;
+    params.task_bed_leveling     = bed_level;
+    return params;
+}
+
+} // namespace
+
+TEST_CASE("Only the Snapmaker agent applies print preferences", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    CHECK(SnapmakerPrinterAgent("").supports_print_preferences());
+    CHECK_FALSE(MoonrakerPrinterAgent("").supports_print_preferences());
+}
+
+TEST_CASE("A print without print preferences starts with the one start command", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PrintAgent  agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    REQUIRE(agent.start_local_print(preference_params(file, true, true, true), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer.scripts().size() == 1);
+    CHECK(printer.scripts()[0] == "SDCARD_PRINT_FILE FILENAME=part.gcode");
+}
+
+TEST_CASE("Print preferences are sent as one script before the print starts", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    REQUIRE(agent.start_local_print(preference_params(file, true, false, true), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    const auto scripts = printer.scripts();
+    REQUIRE(scripts.size() == 2);
+    CHECK(scripts[0] == build_snapmaker_print_preference_script(true, false, true));
+    CHECK(scripts[0] == "SET_PRINT_PREFERENCE KEY=bed_level VALUE=1\nSET_PRINT_PREFERENCE KEY=flow_calibrate VALUE=1\n"
+                        "SET_PRINT_PREFERENCE KEY=time_lapse_camera VALUE=0");
+    CHECK(scripts[1] == "SDCARD_PRINT_FILE FILENAME=part.gcode");
+}
+
+TEST_CASE("A print whose preferences are refused does not start", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    printer.reject_scripts_starting_with("SET_PRINT_PREFERENCE");
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    CHECK(agent.start_local_print(preference_params(file, true, true, true), nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);
+    const auto scripts = printer.scripts();
+    REQUIRE(scripts.size() == 1);
+    CHECK(scripts[0].rfind("SET_PRINT_PREFERENCE", 0) == 0);
+    for (const std::string& script : scripts)
+        CHECK(script.find("SDCARD_PRINT_FILE") == std::string::npos);
+}
+
+TEST_CASE("The uploaded plate G-code is identical with the preferences on and off", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    TempDir dir;
+    const auto file = dir.path / ".23381.0.3mf";
+    write_3mf(file, {{1, PLATE_1_GCODE}});
+
+    auto run = [&](bool on) {
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        REQUIRE(agent.start_local_print(preference_params(file, on, on, on), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+        return printer.uploads();
+    };
+    const auto off = run(false);
+    const auto on  = run(true);
+    REQUIRE(off.size() == 1);
+    REQUIRE(on.size() == 1);
+    CHECK(on[0].content == PLATE_1_GCODE);
+    CHECK(on[0].content == off[0].content);
+    CHECK(on[0].filename == off[0].filename);
 }
 
 TEST_CASE("Moonraker discovery waits for a complete device identity", "[MoonrakerPrinterAgent][Discovery]")
