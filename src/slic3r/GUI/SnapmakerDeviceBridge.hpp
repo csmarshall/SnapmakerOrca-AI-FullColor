@@ -171,6 +171,9 @@ public:
         // Machine control (#75): IPrinterAgent::control_async with a method from the forklifted table and its validated params; `done(ok,
         // result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
         std::function<void(const std::string& method, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> control;
+        // Rebuilds the page after a successful light change (#82): the page's own light switch only learns the LED state at load, so a
+        // fresh page is the way it shows the new one. The host defers the rebuild past the current handler. Null = no reload.
+        std::function<void()>                                reload_page;
         // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
         std::function<bool(SnapmakerTab)>                    switch_tab;
     };

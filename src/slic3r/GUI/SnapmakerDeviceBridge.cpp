@@ -853,6 +853,7 @@ void SnapmakerDeviceBridge::register_commands()
                             if (ok) inst->reply_ok(std::move(result));
                             else    inst->handle_general_fail(SSWCPCode::Failure, "control request failed");
                         }
+                        if (ok && method == "printer.control.led" && m_options.reload_page) m_options.reload_page(); // #82
                     });
                 };
                 if (!control_method_is_print(method)) { send(); return; }
