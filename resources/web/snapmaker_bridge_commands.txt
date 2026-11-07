@@ -104,7 +104,7 @@ DENIED sw_PullCloudFile
 DENIED sw_Query
 DENIED sw_RenameDevice
 DENIED sw_SendCommand
-DENIED sw_SendGCodes
+REGISTERED sw_SendGCodes
 DENIED sw_ServerClientManagerSetUserinfo
 DENIED sw_SetDeviceName
 DENIED sw_SetFilamentMappingComplete

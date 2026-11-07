@@ -414,6 +414,11 @@ std::string MoonrakerPrinterAgent::control_request(const std::string& method, co
 {
     if (!control_method_allowed(method) || !params.is_object())
         return {};
+    // Defence in depth (#79): the gcode route carries nothing but nozzle-temperature scripts, whatever the caller checked.
+    if (method == "printer.gcode.script" &&
+        (params.size() != 1 || !params.contains("script") || !params["script"].is_string() ||
+         !snapmaker_nozzle_script_joined_valid(params["script"].get<std::string>())))
+        return {};
     nlohmann::json req;
     req["jsonrpc"] = "2.0";
     req["method"]  = method; // only ever a kControlRpcMethods entry
