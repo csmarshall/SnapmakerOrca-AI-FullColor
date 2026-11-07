@@ -515,6 +515,18 @@ public:
         if (done) done(false, nlohmann::json::object());
     }
 
+    /**
+     * Machine control (#75): call one of the forklifted Snapmaker control JSON-RPC methods (kControlRpcMethods; anything else is
+     * refused). `params` must be an object. `done(ok, result)` exactly once, from ANY thread; ok=false for a refused method, no
+     * machine, an error reply or a timeout. Agents without the notion keep the default (fails at once).
+     */
+    virtual void control_async(const std::string& method, const nlohmann::json& params,
+                               std::function<void(bool ok, nlohmann::json result)> done)
+    {
+        (void) method; (void) params;
+        if (done) done(false, nlohmann::json::object());
+    }
+
     virtual void query_machine_objects_async(const std::vector<std::string>& object_names,
                                              std::function<void(bool ok, nlohmann::json result)> done)
     {
@@ -568,6 +580,20 @@ inline std::string strip_url_userinfo(const std::string& url)
 
 // Locale-independent character classes (std::isalnum depends on the C locale).
 inline bool ascii_alnum(unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+// The compile-time allowlist for control_async(): the printer JSON-RPC methods behind Snapmaker's sw_Control* / pause / resume / cancel /
+// set-name / bed-mesh-abort handlers (Moonraker_Mqtt::async_control_* in Snapmaker/OrcaSlicer src/slic3r/Utils/MoonRaker.cpp).
+inline constexpr const char* kControlRpcMethods[] = {
+    "printer.control.led",          "printer.control.print_speed", "printer.control.purifier", "printer.control.main_fan",
+    "printer.control.generic_fan",  "printer.control.bed_temp",    "printer.control.extruder_temp",
+    "printer.print.pause",          "printer.print.resume",        "printer.print.cancel",
+    "printer.bed_mesh.abort_probe_mesh", "machine.set_device_name"};
+inline bool control_method_allowed(const std::string& method)
+{
+    for (const char* m : kControlRpcMethods)
+        if (method == m) return true;
+    return false;
+}
 
 // The whitelist for camera_monitor_async() and the page bridge: an object with exactly the keys domain ("lan"), clientid
 // (^[A-Za-z0-9_.-]{1,64}$) and optionally interval (integer 0..10) and expect_pw (bool). Anything else is refused.

@@ -7,6 +7,7 @@
 
 REGISTERED sw_CameraStartMonitor  # camera.start_monitor on the machine (whitelisted params); the page then loads the snapshot itself
 REGISTERED sw_CameraStopMonitor
+REGISTERED sw_ControlLed  # forklifted from Snapmaker sw_ControlLed -> printer.control.led; name must be cavity_led, white 0 or 1
 REGISTERED sw_FileGetStatus
 REGISTERED sw_FileLog
 REGISTERED sw_FilesThumbnailsBase64
@@ -57,7 +58,6 @@ DENIED sw_ConnectOtherMachine
 DENIED sw_ControlBedTemp
 DENIED sw_ControlExtruderTemp
 DENIED sw_ControlGenericFan
-DENIED sw_ControlLed
 DENIED sw_ControlMainFan
 DENIED sw_ControlPrintSpeed
 DENIED sw_ControlPurifier

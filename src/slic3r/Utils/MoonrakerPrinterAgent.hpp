@@ -66,6 +66,18 @@ public:
                                    std::function<void(bool ok, nlohmann::json result)> done);
     static CameraReply parse_camera_monitor_reply(const std::string& message, int id, nlohmann::json& result);
 
+    // Machine control (#75): one-request websocket RPC for a method on the kControlRpcMethods allowlist (IPrinterAgent.hpp); same
+    // thread/timeout/gate model as camera_monitor_async, with its own gate so a camera stream never blocks the LED.
+    void        control_async(const std::string& method, const nlohmann::json& params,
+                              std::function<void(bool ok, nlohmann::json result)> done) override;
+    // The JSON-RPC request text; "" if `method` is off the allowlist or `params` is not an object (exposed for tests).
+    static std::string control_request(const std::string& method, const nlohmann::json& params, int id);
+    // Ok = a non-error result for `id`, Fail = an error reply or no result, Ignore = notification / another id / not JSON.
+    static CameraReply parse_control_reply(const std::string& message, int id, nlohmann::json& result);
+    static void control_run(const std::string& base_url, const std::string& api_key, const std::string& method, const nlohmann::json& params,
+                            std::chrono::milliseconds total, std::shared_ptr<InFlightGate> gate,
+                            std::function<void(bool ok, nlohmann::json result)> done);
+
     // Cloud Agent Dependency
     void set_cloud_agent(std::shared_ptr<ICloudServiceAgent> cloud) override;
 
@@ -283,6 +295,7 @@ private:
     std::atomic<uint64_t>  connect_generation{0};
     std::thread            connect_thread;
     std::shared_ptr<InFlightGate> m_camera_gate = std::make_shared<InFlightGate>();
+    std::shared_ptr<InFlightGate> m_control_gate = std::make_shared<InFlightGate>();
     std::recursive_mutex   connect_mutex;
     mutable std::mutex     connect_error_mutex;
     std::string            connect_error; // see last_connect_error()

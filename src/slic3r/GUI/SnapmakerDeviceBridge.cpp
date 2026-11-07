@@ -28,6 +28,137 @@ std::string snapmaker_bare_host(const std::string& address)
     return h;
 }
 
+// ---- machine control (#75), forklifted from Snapmaker/OrcaSlicer src/slic3r/GUI/SSWCP.cpp (SSWCP_MachineOption_Instance::sw_*) and
+// src/slic3r/Utils/MoonRaker.cpp (Moonraker_Mqtt::async_*). Only the transport differs. The numeric bounds are ours (Snapmaker has none);
+// they are the named constants below. ---
+namespace {
+constexpr int kLedWhiteMin = 0, kLedWhiteMax = 1;       // cavity_led is on/off
+constexpr int kPrintSpeedMin = 10, kPrintSpeedMax = 300; // percent
+constexpr int kFanSpeedMin = 0, kFanSpeedMax = 100;      // percent
+constexpr int kBedTempMin = 0, kBedTempMax = 120;
+constexpr int kExtruderTempMin = 0, kExtruderTempMax = 300;
+constexpr int kExtruderIndexMin = 0, kExtruderIndexMax = 3, kExtruderMapMin = 0, kExtruderMapMax = 15;
+constexpr int kPurifierDelayMax = 3600, kPurifierWorkMax = 86400;
+constexpr std::size_t kNameMax = 64;
+
+struct ControlParam
+{
+    const char* key;
+    bool        is_string;
+    bool        required;
+    const char* missing; // the [name] in Snapmaker's "param [name] required!" (differs from key for ControlGenericFan)
+    int         lo, hi;  // ints: inclusive range
+    const char* only;    // strings: the one accepted value, or nullptr = a plain identifier / name (see string_ok)
+};
+struct ControlSpec
+{
+    SnapmakerControlCommand    cmd;
+    std::vector<ControlParam>  params;
+    bool                       any_of = false; // at least one (optional) param (sw_ControlPurifier passes m_param_data through)
+};
+bool plain_identifier(const std::string& v)
+{
+    if (v.empty() || v.size() > 32) return false;
+    for (unsigned char c : v)
+        if (!(ascii_alnum(c) || c == '_' || c == '-')) return false;
+    return true;
+}
+bool plain_device_name(const std::string& v)
+{
+    if (v.empty() || v.size() > kNameMax) return false;
+    for (unsigned char c : v)
+        if (c < 0x20 || c == 0x7f) return false;
+    return true;
+}
+const std::vector<ControlSpec>& control_specs()
+{
+    static const std::vector<ControlSpec> specs = {
+        // sw_ControlLed: required name, then white (SSWCP.cpp:sw_ControlLed); async_control_led -> printer.control.led {name, white}
+        {{"sw_ControlLed", "printer.control.led"},
+         {{"name", true, true, "name", 0, 0, "cavity_led"}, {"white", false, true, "white", kLedWhiteMin, kLedWhiteMax, nullptr}}},
+        // sw_ControlPrintSpeed: percentage
+        {{"sw_ControlPrintSpeed", "printer.control.print_speed"},
+         {{"percentage", false, true, "percentage", kPrintSpeedMin, kPrintSpeedMax, nullptr}}},
+        // sw_ControlPurifier: params passed through as they are (fan_speed, delay_time, work_time; async_controlPurifier)
+        {{"sw_ControlPurifier", "printer.control.purifier"},
+         {{"fan_speed", false, false, "fan_speed", kFanSpeedMin, kFanSpeedMax, nullptr},
+          {"delay_time", false, false, "delay_time", 0, kPurifierDelayMax, nullptr},
+          {"work_time", false, false, "work_time", 0, kPurifierWorkMax, nullptr}},
+         true},
+        // sw_ControlMainFan: speed
+        {{"sw_ControlMainFan", "printer.control.main_fan"}, {{"speed", false, true, "speed", kFanSpeedMin, kFanSpeedMax, nullptr}}},
+        // sw_ControlGenericFan: Snapmaker checks "name" but reports "param [fan_id] required!" - kept verbatim
+        {{"sw_ControlGenericFan", "printer.control.generic_fan"},
+         {{"name", true, true, "fan_id", 0, 0, nullptr}, {"speed", false, true, "speed", kFanSpeedMin, kFanSpeedMax, nullptr}}},
+        // sw_ControlBedTemp: temp
+        {{"sw_ControlBedTemp", "printer.control.bed_temp"}, {{"temp", false, true, "temp", kBedTempMin, kBedTempMax, nullptr}}},
+        // sw_ControlExtruderTemp: temp required; index and map optional (forwarded only when given)
+        {{"sw_ControlExtruderTemp", "printer.control.extruder_temp"},
+         {{"temp", false, true, "temp", kExtruderTempMin, kExtruderTempMax, nullptr},
+          {"index", false, false, "index", kExtruderIndexMin, kExtruderIndexMax, nullptr},
+          {"map", false, false, "map", kExtruderMapMin, kExtruderMapMax, nullptr}}},
+        // sw_SetDeviceName: name (printer machine.set_device_name {name})
+        {{"sw_SetDeviceName", "machine.set_device_name"}, {{"name", true, true, "name", 0, 0, ""}}},
+        // no params: sw_BedMesh_AbortProbeMesh, sw_MachinePrintPause / Resume / Cancel
+        {{"sw_BedMesh_AbortProbeMesh", "printer.bed_mesh.abort_probe_mesh"}, {}},
+        {{"sw_MachinePrintPause", "printer.print.pause"}, {}},
+        {{"sw_MachinePrintResume", "printer.print.resume"}, {}},
+        {{"sw_MachinePrintCancel", "printer.print.cancel"}, {}},
+    };
+    return specs;
+}
+} // namespace
+
+const std::vector<SnapmakerControlCommand>& snapmaker_control_table()
+{
+    static const std::vector<SnapmakerControlCommand> table = [] {
+        std::vector<SnapmakerControlCommand> t;
+        for (const auto& s : control_specs()) t.push_back(s.cmd);
+        return t;
+    }();
+    return table;
+}
+
+const std::vector<std::string>& snapmaker_registered_control_commands()
+{
+    static const std::vector<std::string> registered = {"sw_ControlLed"}; // Charles approves the others one by one
+    return registered;
+}
+
+bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json& params, std::string& method, nlohmann::json& rpc_params,
+                               std::string& error)
+{
+    const ControlSpec* spec = nullptr;
+    for (const auto& s : control_specs())
+        if (sw_name == s.cmd.sw_name) { spec = &s; break; }
+    if (!spec) { error = "unsupported command"; return false; }
+    if (!params.is_object()) { error = "failure"; return false; }
+    nlohmann::json out = nlohmann::json::object();
+    for (const auto& p : spec->params) { // Snapmaker checks every "required" first, in order, then reads the values
+        if (p.required && !params.count(p.key)) { error = std::string("param [") + p.missing + "] required!"; return false; }
+    }
+    for (const auto& p : spec->params) {
+        if (!params.count(p.key)) continue;
+        const nlohmann::json& v = params.at(p.key);
+        if (p.is_string) {
+            if (!v.is_string()) { error = "failure"; return false; }
+            const std::string& str = v.get_ref<const std::string&>();
+            const bool ok = p.only ? (p.only[0] ? str == p.only : plain_device_name(str)) : plain_identifier(str);
+            if (!ok) { error = std::string("param [") + p.key + "] invalid!"; return false; }
+            out[p.key] = str;
+        } else {
+            if (!v.is_number_integer()) { error = "failure"; return false; }
+            const long long n = v.get<long long>();
+            if (n < p.lo || n > p.hi) { error = std::string("param [") + p.key + "] out of range!"; return false; }
+            out[p.key] = n;
+        }
+    }
+    if (spec->any_of && out.empty()) { error = "failure"; return false; }
+    method     = spec->cmd.rpc_method;
+    rpc_params = std::move(out);
+    return true;
+}
+
 bool snapmaker_file_list_params_valid(const nlohmann::json& p)
 {
     if (!p.is_object() || p.size() != 3) return false;
@@ -681,6 +812,29 @@ void SnapmakerDeviceBridge::register_commands()
                     if (auto inst = weak.lock()) {
                         if (ok) inst->reply_ok(std::move(result));
                         else    inst->handle_general_fail(SSWCPCode::Failure, "camera request failed");
+                    }
+                });
+            },
+            false);
+    }
+
+    // --- machine control (#75): only the commands in snapmaker_registered_control_commands() are reachable (sw_ControlLed); the rest of the
+    // forklifted table stays unregistered and gets the core's 501. ---
+    for (const std::string& cmd : snapmaker_registered_control_commands()) {
+        m_sswcp.register_command(
+            cmd,
+            [this, cmd](SSWCP_Instance& i) {
+                std::string method, error;
+                nlohmann::json rpc_params;
+                if (!snapmaker_control_prepare(cmd, i.params(), method, rpc_params, error)) { i.handle_general_fail(SSWCPCode::Failure, error); return; }
+                if (!m_options.control) { i.handle_general_fail(SSWCPCode::Failure, "Connection lost!"); return; }
+                auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+                auto alive = m_alive;
+                m_options.control(method, rpc_params, [weak, alive](bool ok, nlohmann::json result) {
+                    if (!*alive) return;
+                    if (auto inst = weak.lock()) {
+                        if (ok) inst->reply_ok(std::move(result));
+                        else    inst->handle_general_fail(SSWCPCode::Failure, "control request failed");
                     }
                 });
             },
