@@ -889,6 +889,42 @@ TEST_CASE("selecting a different machine resets the cached state and drops repli
     CHECK(last["header"] == json{{"event_id", "s"}});
 }
 
+// Real bug seen in the app (2026-11-06): the page's first GetMachineState calls are out when the first tick() sees the
+// connected machine for the first time. That was treated as "a different machine selected" and abandoned them, so they were
+// answered code 200 with an EMPTY status; the page applies a reply as the whole state and showed "idle", 0% and bed 0/0
+// during a print (full pushes did not repair it).
+TEST_CASE("the first sight of the connected machine does not abandon the state queries already out", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices = {connected_u1()};
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState")); // out before any tick
+    REQUIRE(h.queries.size() >= 1);
+    h.bridge.tick();                                   // first sight of the machine
+    CHECK(h.sent.empty());                             // nobody was answered with an empty state
+    h.queries[0].done(true, moonraker_result(59));
+    REQUIRE_FALSE(h.sent.empty());
+    CHECK(h.reply(0)["payload"]["data"] == moonraker_result(59));
+}
+
+TEST_CASE("a failed state query is answered with the last good state, never an empty one", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.devices = {connected_u1()};
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    h.queries.back().done(true, moonraker_result(59));
+    REQUIRE(h.sent.size() == 1);
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    h.queries.back().done(false, json::object());      // the printer did not answer this time
+    REQUIRE(h.sent.size() == 2);
+    CHECK(h.reply(1)["payload"]["code"] == 200);
+    CHECK(h.reply(1)["payload"]["data"] == moonraker_result(59)); // the page keeps what it had
+    // With nothing good yet the old fail-soft empty state remains.
+    BridgeHarness fresh;
+    fresh.bridge.on_script_message(fresh.good, BridgeHarness::msg("sw_GetMachineState"));
+    fresh.queries.back().done(false, json::object());
+    CHECK(fresh.reply(0)["payload"]["data"] == snapmaker_empty_machine_state());
+}
+
 TEST_CASE("only allow-listed Klipper objects are ever queried", "[SSWCP][device_ui]")
 {
     for (const char* ok : {"extruder", "extruder1", "extruder3", "heater_bed", "print_stats", "fan", "fan_generic cavity_fan", "led cavity_led",
