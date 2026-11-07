@@ -121,8 +121,20 @@ const std::vector<SnapmakerControlCommand>& snapmaker_control_table()
 
 const std::vector<std::string>& snapmaker_registered_control_commands()
 {
-    static const std::vector<std::string> registered = {"sw_ControlLed"}; // Charles approves the others one by one
+    // Approved by Charles after the #79 review. Left out on purpose: sw_ControlExtruderTemp and sw_ControlPurifier (the page drives
+    // those with gcode / other payloads), sw_SetDeviceName, sw_BedMesh_AbortProbeMesh.
+    static const std::vector<std::string> registered = {"sw_ControlLed",      "sw_ControlPrintSpeed",  "sw_ControlMainFan",
+                                                        "sw_ControlGenericFan", "sw_ControlBedTemp",     "sw_MachinePrintPause",
+                                                        "sw_MachinePrintResume", "sw_MachinePrintCancel"};
     return registered;
+}
+
+bool snapmaker_print_state_allows(const std::string& rpc_method, const std::string& state)
+{
+    if (rpc_method == "printer.print.cancel") return state == "printing" || state == "paused";
+    if (rpc_method == "printer.print.pause") return state == "printing";
+    if (rpc_method == "printer.print.resume") return state == "paused";
+    return false;
 }
 
 bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json& params, std::string& method, nlohmann::json& rpc_params,
@@ -818,8 +830,10 @@ void SnapmakerDeviceBridge::register_commands()
             false);
     }
 
-    // --- machine control (#75): only the commands in snapmaker_registered_control_commands() are reachable (sw_ControlLed); the rest of the
-    // forklifted table stays unregistered and gets the core's 501. ---
+    // --- machine control (#75, #79): only the commands in snapmaker_registered_control_commands() are reachable; the rest of the
+    // forklifted table stays unregistered and gets the core's 501. pause / resume / cancel first ask the machine for print_stats.state
+    // and are sent only in the matching state (the RPC carries no job id); a failed query refuses. One print.* request at a time
+    // (the state query counts): a second one is answered "failure" without a query or an RPC. ---
     for (const std::string& cmd : snapmaker_registered_control_commands()) {
         m_sswcp.register_command(
             cmd,
@@ -830,12 +844,33 @@ void SnapmakerDeviceBridge::register_commands()
                 if (!m_options.control) { i.handle_general_fail(SSWCPCode::Failure, "Connection lost!"); return; }
                 auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
                 auto alive = m_alive;
-                m_options.control(method, rpc_params, [weak, alive](bool ok, nlohmann::json result) {
+                auto send  = [this, weak, alive, method, rpc_params] {
+                    m_options.control(method, rpc_params, [this, weak, alive, method](bool ok, nlohmann::json result) {
+                        if (!*alive) return;
+                        if (control_method_is_print(method)) m_print_control_busy = false;
+                        if (auto inst = weak.lock()) {
+                            if (ok) inst->reply_ok(std::move(result));
+                            else    inst->handle_general_fail(SSWCPCode::Failure, "control request failed");
+                        }
+                    });
+                };
+                if (!control_method_is_print(method)) { send(); return; }
+
+                if (m_print_control_busy || !m_options.query_state) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                m_print_control_busy = true;
+                m_options.query_state({"print_stats"}, [this, weak, alive, method, send](bool ok, nlohmann::json result) {
                     if (!*alive) return;
-                    if (auto inst = weak.lock()) {
-                        if (ok) inst->reply_ok(std::move(result));
-                        else    inst->handle_general_fail(SSWCPCode::Failure, "control request failed");
+                    std::string state;
+                    if (ok && result.is_object() && result.contains("status") && result["status"].is_object() &&
+                        result["status"].contains("print_stats") && result["status"]["print_stats"].is_object() &&
+                        result["status"]["print_stats"].contains("state") && result["status"]["print_stats"]["state"].is_string())
+                        state = result["status"]["print_stats"]["state"].get<std::string>();
+                    if (m_closed || !snapmaker_print_state_allows(method, state)) {
+                        m_print_control_busy = false;
+                        if (auto inst = weak.lock()) inst->handle_general_fail(SSWCPCode::Failure, "failure");
+                        return;
                     }
+                    send(); // m_print_control_busy stays set until the RPC answers
                 });
             },
             false);

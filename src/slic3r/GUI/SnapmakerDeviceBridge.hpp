@@ -137,6 +137,11 @@ const std::vector<std::string>& snapmaker_registered_control_commands();
 bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json& params, std::string& method, nlohmann::json& rpc_params,
                                std::string& error);
 
+// The print_stats.state a pause / resume / cancel RPC may be sent in: cancel in printing or paused, pause in printing, resume in
+// paused. False for any other state, any other method and the empty string. The RPC carries no job id, so the bridge asks the machine
+// first (Options::query_state) and sends only when this allows it; if the query fails nothing is sent.
+bool snapmaker_print_state_allows(const std::string& rpc_method, const std::string& state);
+
 // The bridge adds the device-oriented commands to the SSWCP core's 13. Bridge-level emulation (ADR 0005, decision 2 amendment): the
 // page believes it talks to a machine over MQTT; here it is answered from the Moonraker connection the app already has, and the
 // sw_mqtt_* commands are accepted and ignored. Most are read-only. The ones that can change printer state are exactly the control
@@ -226,6 +231,7 @@ private:
     nlohmann::json                      m_last_devices = nlohmann::json::array();
     bool                                m_closed       = false;
     std::shared_ptr<bool>               m_alive        = std::make_shared<bool>(true); // delayed replies check it
+    bool                                m_print_control_busy = false; // a pause/resume/cancel (state query or RPC) is in flight
     std::vector<std::string>            m_state_objects; // the subscription's / SetSubscribeFilter's object names
     nlohmann::json                      m_last_state_status; // last pushed `status`
     bool                                m_state_in_flight = false;

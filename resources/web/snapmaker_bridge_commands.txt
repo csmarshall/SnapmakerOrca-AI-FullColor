@@ -7,7 +7,11 @@
 
 REGISTERED sw_CameraStartMonitor  # camera.start_monitor on the machine (whitelisted params); the page then loads the snapshot itself
 REGISTERED sw_CameraStopMonitor
+REGISTERED sw_ControlBedTemp
+REGISTERED sw_ControlGenericFan
 REGISTERED sw_ControlLed  # forklifted from Snapmaker sw_ControlLed -> printer.control.led; name must be cavity_led, white 0 or 1
+REGISTERED sw_ControlMainFan
+REGISTERED sw_ControlPrintSpeed
 REGISTERED sw_FileGetStatus
 REGISTERED sw_FileLog
 REGISTERED sw_FilesThumbnailsBase64
@@ -22,6 +26,9 @@ REGISTERED sw_GetUserLoginState
 REGISTERED sw_MachineFilesMetadata
 REGISTERED sw_MachineFilesRoots
 REGISTERED sw_MachineHeartbeat
+REGISTERED sw_MachinePrintCancel
+REGISTERED sw_MachinePrintPause
+REGISTERED sw_MachinePrintResume
 REGISTERED sw_RemoveCache
 REGISTERED sw_SetCache
 REGISTERED sw_SetSubscribeFilter
@@ -55,11 +62,7 @@ DENIED sw_BedMesh_AbortProbeMesh
 DENIED sw_CancelPullCloudFile
 DENIED sw_Connect
 DENIED sw_ConnectOtherMachine
-DENIED sw_ControlBedTemp
 DENIED sw_ControlExtruderTemp
-DENIED sw_ControlGenericFan
-DENIED sw_ControlMainFan
-DENIED sw_ControlPrintSpeed
 DENIED sw_ControlPurifier
 DENIED sw_DeleteCameraTimelapse
 DENIED sw_DeleteDevices
@@ -87,9 +90,6 @@ DENIED sw_LaunchConsole  # RISKY
 DENIED sw_Log  # RISKY
 DENIED sw_MachineFilesGetDirectory
 DENIED sw_MachineFilesThumbnails
-DENIED sw_MachinePrintCancel
-DENIED sw_MachinePrintPause
-DENIED sw_MachinePrintResume
 DENIED sw_MachinePrintStart
 DENIED sw_NewProject  # RISKY
 DENIED sw_NotifyUploadTimelaspe
