@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <cstddef>
 #include <functional>
 #include <future>
@@ -35,8 +36,10 @@
 #include <boost/beast/websocket/rfc6455.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 #include <boost/beast/websocket/stream.hpp>
+#include <boost/filesystem.hpp>
 #include <nlohmann/json.hpp>
 
+#include "libslic3r/miniz_extension.hpp"
 #include "slic3r/GUI/DeviceCore/DevStorage.h"
 #include "slic3r/Utils/IPrinterAgent.hpp"
 #include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
@@ -219,6 +222,24 @@ public:
         m_disk_usage = std::move(disk_usage);
     }
 
+    struct Upload
+    {
+        std::string filename;
+        std::string content;
+    };
+
+    std::vector<Upload> uploads()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_uploads;
+    }
+
+    std::vector<std::string> scripts()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_scripts;
+    }
+
     // Hangs up every connection that is waiting.
     void release()
     {
@@ -337,7 +358,16 @@ private:
             return;
         }
         http::response<http::string_body> response{http::status::not_found, request.version()};
-        if (request.target() == "/server/files/directory?path=gcodes") {
+        if (request.target() == "/server/files/upload") {
+            record_upload(request);
+            response.result(http::status::ok);
+            response.body() = "{}";
+        } else if (request.target() == "/printer/gcode/script") {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_scripts.push_back(nlohmann::json::parse(request.body()).at("script").get<std::string>());
+            response.result(http::status::ok);
+            response.body() = "{}";
+        } else if (request.target() == "/server/files/directory?path=gcodes") {
             nlohmann::json result = {{"dirs", nlohmann::json::array()}, {"files", nlohmann::json::array()}};
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
@@ -350,6 +380,34 @@ private:
         response.prepare_payload();
         beast::error_code ec;
         http::write(stream, response, ec);
+    }
+
+    // Records the file part of a multipart/form-data upload: its filename and its bytes.
+    void record_upload(const http::request<http::string_body>& request)
+    {
+        const std::string content_type{request[http::field::content_type]};
+        const auto boundary_at = content_type.find("boundary=");
+        if (boundary_at == std::string::npos)
+            return;
+        const std::string delimiter = "--" + content_type.substr(boundary_at + 9);
+        const std::string& body     = request.body();
+        for (size_t part = body.find(delimiter); part != std::string::npos;) {
+            const size_t start = part + delimiter.size();
+            const size_t next  = body.find(delimiter, start);
+            if (next == std::string::npos)
+                break;
+            const size_t headers_end = body.find("\r\n\r\n", start);
+            const std::string headers = body.substr(start, headers_end - start);
+            const auto name_at        = headers.find("filename=\"");
+            if (name_at != std::string::npos && headers_end < next) {
+                const size_t name_start = name_at + 10;
+                std::lock_guard<std::mutex> lock(m_mutex);
+                // The part's content ends with the CRLF before the next delimiter.
+                m_uploads.push_back({headers.substr(name_start, headers.find('"', name_start) - name_start),
+                                     body.substr(headers_end + 4, next - 2 - (headers_end + 4))});
+            }
+            part = next;
+        }
     }
 
     // Keeps a read pending, which answers pings, until released or closed, and with `chatter` also sends a notification every 50 ms.
@@ -430,6 +488,8 @@ private:
     int m_http_hung_up  = 0;
     int m_close_frames  = 0;
     bool m_released     = false;
+    std::vector<Upload> m_uploads;
+    std::vector<std::string> m_scripts;
     nlohmann::json m_disk_usage = {{"total", 8e9}, {"used", 2e9}, {"free", 6e9}};
 };
 
@@ -504,7 +564,138 @@ template<class Agent> bool destroys_within(std::unique_ptr<Agent>& agent, std::c
     return destroyed.wait_for(limit) == std::future_status::ready;
 }
 
+// Lets a test aim the agent at a fake printer without the app's printer preset.
+class PrintAgent : public MoonrakerPrinterAgent
+{
+public:
+    explicit PrintAgent(const FakePrinter& printer) : MoonrakerPrinterAgent("")
+    {
+        device_info.dev_id   = "printer";
+        device_info.base_url = printer.base_url();
+    }
+};
+
+std::string read_file(const boost::filesystem::path& path)
+{
+    std::ifstream in(path.string(), std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+// A scratch directory that is removed with it.
+struct TempDir
+{
+    TempDir() : path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("u1-send-%%%%-%%%%")) { boost::filesystem::create_directories(path); }
+    ~TempDir() { boost::system::error_code ec; boost::filesystem::remove_all(path, ec); }
+    boost::filesystem::path path;
+};
+
+// Writes a sliced project: a zip with the given plates' G-code under Metadata/plate_<N>.gcode, as the slicer saves it.
+std::string write_3mf(const boost::filesystem::path& path, const std::vector<std::pair<int, std::string>>& plates)
+{
+    mz_zip_archive zip{};
+    REQUIRE(open_zip_writer(&zip, path.string()));
+    const std::string other = "<model/>";
+    REQUIRE(mz_zip_writer_add_mem(&zip, "3D/3dmodel.model", other.data(), other.size(), MZ_DEFAULT_COMPRESSION));
+    for (const auto& [index, gcode] : plates) {
+        const std::string entry = "Metadata/plate_" + std::to_string(index) + ".gcode";
+        REQUIRE(mz_zip_writer_add_mem(&zip, entry.c_str(), gcode.data(), gcode.size(), MZ_DEFAULT_COMPRESSION));
+    }
+    REQUIRE(mz_zip_writer_finalize_archive(&zip));
+    close_zip_writer(&zip);
+    return read_file(path);
+}
+
+PrintParams print_params(const boost::filesystem::path& file, int plate_index, const std::string& project_name)
+{
+    PrintParams params;
+    params.filename     = file.string();
+    params.plate_index  = plate_index;
+    params.project_name = project_name;
+    return params;
+}
+
+const std::string PLATE_1_GCODE = "; plate one\nG28\nG1 X10 Y10\n";
+const std::string PLATE_2_GCODE = "; plate two\nG28\nG1 X20 Y20\n";
+
 } // namespace
+
+TEST_CASE("Printing a sliced project uploads the plate's G-code, not the zip", "[MoonrakerPrinterAgent][Upload]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PrintAgent  agent(printer);
+    const auto  file = dir.path / ".23381.0.3mf";
+    const std::string zip = write_3mf(file, {{1, PLATE_1_GCODE}, {2, PLATE_2_GCODE}});
+    REQUIRE(zip.substr(0, 4) == std::string("PK\x03\x04"));
+
+    SECTION("start_local_print picks the plate by index and starts the print under the uploaded name")
+    {
+        REQUIRE(agent.start_local_print(print_params(file, 2, "Speed Test.gcode.3mf"), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+        const auto uploads = printer.uploads();
+        REQUIRE(uploads.size() == 1);
+        CHECK(uploads[0].content == PLATE_2_GCODE);
+        CHECK(uploads[0].filename == "Speed Test.gcode");
+        REQUIRE(printer.scripts().size() == 1);
+        CHECK(printer.scripts()[0] == "SDCARD_PRINT_FILE FILENAME=Speed Test.gcode");
+    }
+    SECTION("start_send_gcode_to_sdcard uploads the same bytes under the same name and starts nothing")
+    {
+        REQUIRE(agent.start_send_gcode_to_sdcard(print_params(file, 1, "Speed Test.gcode.3mf"), nullptr, nullptr, nullptr) ==
+                BAMBU_NETWORK_SUCCESS);
+        const auto uploads = printer.uploads();
+        REQUIRE(uploads.size() == 1);
+        CHECK(uploads[0].content == PLATE_1_GCODE);
+        CHECK(uploads[0].filename == "Speed Test.gcode");
+        CHECK(printer.scripts().empty());
+    }
+    SECTION("without a project name the name comes from the 3MF, minus leading dots and the container extensions")
+    {
+        const auto named = dir.path / "..benchy.gcode.3mf";
+        boost::filesystem::copy_file(file, named);
+        REQUIRE(agent.start_local_print(print_params(named, 1, ""), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+        REQUIRE(printer.uploads().size() == 1);
+        CHECK(printer.uploads()[0].filename == "benchy.gcode");
+        CHECK(printer.scripts().at(0) == "SDCARD_PRINT_FILE FILENAME=benchy.gcode");
+    }
+    SECTION("the project name cannot escape the gcodes directory")
+    {
+        REQUIRE(agent.start_local_print(print_params(file, 1, "../../etc/evil.gcode.3mf"), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+        CHECK(printer.uploads().at(0).filename == "evil.gcode");
+    }
+}
+
+TEST_CASE("Printing a sliced project without the plate's G-code uploads nothing", "[MoonrakerPrinterAgent][Upload]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PrintAgent  agent(printer);
+    const auto  file = dir.path / "project.gcode.3mf";
+    write_3mf(file, {{1, PLATE_1_GCODE}});
+
+    for (const int plate : {2, 0, -1}) {
+        CAPTURE(plate);
+        CHECK(agent.start_local_print(print_params(file, plate, "p.gcode.3mf"), nullptr, nullptr) == BAMBU_NETWORK_ERR_FILE_NOT_EXIST);
+        CHECK(agent.start_send_gcode_to_sdcard(print_params(file, plate, "p.gcode.3mf"), nullptr, nullptr, nullptr) ==
+              BAMBU_NETWORK_ERR_FILE_NOT_EXIST);
+    }
+    CHECK(printer.uploads().empty());
+    CHECK(printer.scripts().empty());
+}
+
+TEST_CASE("Printing a plain G-code file uploads it unchanged", "[MoonrakerPrinterAgent][Upload]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PrintAgent  agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    REQUIRE(agent.start_local_print(print_params(file, 1, "ignored.gcode.3mf"), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer.uploads().size() == 1);
+    CHECK(printer.uploads()[0].content == PLATE_1_GCODE);
+    CHECK(printer.uploads()[0].filename == "part.gcode");
+    CHECK(printer.scripts().at(0) == "SDCARD_PRINT_FILE FILENAME=part.gcode");
+}
 
 TEST_CASE("Moonraker discovery waits for a complete device identity", "[MoonrakerPrinterAgent][Discovery]")
 {
