@@ -4712,6 +4712,19 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         }
         bool has_type = false;
         auto filament_type = ams.opt_string("filament_type", 0u);
+        // A project-embedded preset of the tray's material type is the user's own tuning for this slot; keep it and take
+        // only the tray colour, as for an unchanged filament, rather than swapping in the system preset sharing the tray id.
+        if (this->filament_presets.size() > ams_filament_presets.size() && !filament_type.empty()) {
+            const Preset* current = filaments.find_preset(this->filament_presets[ams_filament_presets.size()], false);
+            if (current && current->is_project_embedded && current->config.opt_string("filament_type", 0u) == filament_type) {
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": keeping project preset %1% (type %2% matches tray)") % current->name % filament_type;
+                ams_filament_presets.push_back(current->name);
+                ams_filament_colors.push_back(filament_color);
+                ams_filament_color_types.push_back(filament_color_type);
+                ams_multi_color_filment.push_back(filament_multi_color);
+                continue;
+            }
+        }
         auto iter = std::find_if(filaments.begin(), filaments.end(), [this, &filament_id, &has_type, filament_type](auto &f) {
             has_type |= f.config.opt_string("filament_type", 0u) == filament_type;
             return f.is_compatible && filaments.get_preset_base(f) == &f && f.filament_id == filament_id; });

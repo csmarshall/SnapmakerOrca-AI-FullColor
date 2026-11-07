@@ -8885,3 +8885,93 @@ TEST_CASE("Local bundle reload refuses changed code-bearing values until approve
         CHECK(changes.empty());
     }
 }
+
+namespace {
+
+// A bundle whose filament list holds a project-embedded ABS preset (slot 0) and a system preset that wins the tray's
+// filament_id lookup, mirroring a U1 project whose embedded presets must survive a sync.
+struct AmsSyncFixture
+{
+    PresetBundle bundle;
+    static constexpr const char* tray_id = "OFeVzkSU";
+
+    explicit AmsSyncFixture(bool embedded)
+    {
+        DynamicPrintConfig project = bundle.filaments.default_preset().config;
+        project.option<ConfigOptionStrings>("filament_type", true)->values = {"ABS"};
+        bundle.filaments.load_preset("", "Project ABS", project, false);
+        DynamicPrintConfig system = project;
+        bundle.filaments.load_preset("", "System Fiberon", system, false);
+        for (Preset& p : bundle.filaments) {
+            if (p.name == "Project ABS") {
+                p.is_project_embedded = embedded;
+                p.is_system           = !embedded;
+                p.filament_id         = embedded ? "" : "OTHERID1";
+                p.is_compatible       = true;
+            } else if (p.name == "System Fiberon") {
+                p.is_system     = true;
+                p.filament_id   = tray_id;
+                p.is_compatible = true;
+            }
+        }
+        bundle.filament_presets = {"Project ABS"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values      = {"#111111"};
+        bundle.project_config.option<ConfigOptionStrings>("filament_colour_type")->values = {"0"};
+        bundle.project_config.option<ConfigOptionInts>("filament_map")->values            = {1};
+        bundle.project_config.option<ConfigOptionInts>("filament_volume_map")->values     = {0};
+    }
+
+    unsigned int sync(const std::string& type)
+    {
+        DynamicPrintConfig tray;
+        tray.set_key_value("filament_id", new ConfigOptionStrings{tray_id});
+        tray.set_key_value("filament_type", new ConfigOptionStrings{type});
+        tray.set_key_value("filament_colour", new ConfigOptionStrings{"#FF0000"});
+        tray.set_key_value("filament_colour_type", new ConfigOptionStrings{"0"});
+        tray.set_key_value("filament_multi_colour", new ConfigOptionStrings{"#FF0000"});
+        tray.set_key_value("ams_id", new ConfigOptionStrings{"0"});
+        tray.set_key_value("slot_id", new ConfigOptionStrings{"0"});
+        bundle.filament_ams_list.clear();
+        bundle.filament_ams_list[0] = tray;
+        std::vector<std::pair<DynamicPrintConfig*, std::string>> unknowns;
+        std::map<int, AMSMapInfo>                                maps;
+        MergeFilamentInfo                                        merge;
+        return bundle.sync_ams_list(unknowns, false, maps, false, merge);
+    }
+};
+
+} // namespace
+
+TEST_CASE("AMS sync keeps a project-embedded preset whose type matches the tray and updates the colour", "[Preset][AMS][Regression]")
+{
+    AmsSyncFixture f(true);
+    f.sync("ABS");
+    CHECK(f.bundle.filament_presets == std::vector<std::string>{"Project ABS"});
+    CHECK(f.bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#FF0000"});
+}
+
+TEST_CASE("AMS sync replaces a project-embedded preset whose type differs from the tray", "[Preset][AMS][Regression]")
+{
+    AmsSyncFixture f(true);
+    f.sync("PETG");
+    // No preset carries the tray's id with type PETG, but the id match still picks the system preset.
+    CHECK(f.bundle.filament_presets == std::vector<std::string>{"System Fiberon"});
+}
+
+TEST_CASE("AMS sync still replaces a non-embedded slot with the preset matching the tray id", "[Preset][AMS][Regression]")
+{
+    AmsSyncFixture f(false);
+    f.sync("ABS");
+    CHECK(f.bundle.filament_presets == std::vector<std::string>{"System Fiberon"});
+    CHECK(f.bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values == std::vector<std::string>{"#FF0000"});
+}
+
+TEST_CASE("The Fiberon PPS-GF20 U1 profile is typed PPS so it does not win ABS lookups", "[Preset][AMS][Regression]")
+{
+    const fs::path file = fs::path(PROFILES_DIR) / "Snapmaker" / "filament" / "Polymaker" / "Fiberon PPS-GF20 @Snapmaker U1 base.json";
+    std::ifstream  in(file.string());
+    REQUIRE(in.good());
+    const nlohmann::json j = nlohmann::json::parse(in);
+    REQUIRE(j.at("filament_id") == "OFeVzkSU");
+    CHECK(j.at("filament_type").at(0) == "PPS");
+}
