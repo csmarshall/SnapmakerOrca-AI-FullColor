@@ -88,6 +88,12 @@ struct BridgeHarness
     bool                              hold_camera = false;
     json                              camera_result = {{"state", "success"}, {"url", "/files/camera/monitor.jpg"}, {"pw", "ab"}, {"salt", "cd"}, {"iterations", 1204}};
     std::vector<std::function<void(bool, json)>> camera_pending;
+    // Control source (#75): every forwarded RPC is recorded; it answers at once with control_ok, or waits in control_pending.
+    struct ControlCall { std::string method; json params; };
+    std::vector<ControlCall>          control_calls;
+    bool                              control_ok = true;
+    bool                              hold_control = false;
+    std::vector<std::function<void(bool, json)>> control_pending;
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -113,6 +119,10 @@ struct BridgeHarness
               o.camera_monitor = [this](bool start, const json& params, std::function<void(bool, json)> done) {
                       camera_calls.push_back({start, params});
                       if (hold_camera) camera_pending.push_back(std::move(done)); else done(camera_ok, camera_ok ? camera_result : json::object());
+                  };
+              o.control = [this](const std::string& method, const json& params, std::function<void(bool, json)> done) {
+                      control_calls.push_back({method, params});
+                      if (hold_control) control_pending.push_back(std::move(done)); else done(control_ok, control_ok ? json{{"state", "success"}} : json::object());
                   };
               return o;
           }())
@@ -514,7 +524,7 @@ TEST_CASE("the read-only guarantee: no control action is registered, each gets a
     const std::vector<std::string> controls = {
         "sw_SendGCodes", "sw_MachinePrintStart", "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel",
         "sw_UploadFiletoMachine", "sw_UploadFile", "sw_UploadFileResult", "sw_DeleteCameraTimelapse", "sw_DeleteRecentFiles", "sw_DeleteDevices", "sw_RenameDevice",
-        "sw_SetDeviceName", "sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlPurifier", "sw_ControlMainFan", "sw_ControlGenericFan",
+        "sw_SetDeviceName", "sw_ControlPrintSpeed", "sw_ControlPurifier", "sw_ControlMainFan", "sw_ControlGenericFan",
         "sw_ControlBedTemp", "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
         "sw_SendCommand", "sw_Query", "sw_AddDevice", "sw_SwitchModel", "sw_UpdateDeviceInfo", "sw_mqtt_set_engine",
         "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping", "sw_DownloadMachineFile", "sw_DownLoadFile",
@@ -553,10 +563,12 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         // camera preview (start/stop only; the timelapse commands stay denied)
         "sw_CameraStartMonitor", "sw_CameraStopMonitor",
         // read-only file listing (#75)
-        "sw_GetFileListPage"};
+        "sw_GetFileListPage",
+        // machine control (#75): the LED only; the other forklifted controls stay denied
+        "sw_ControlLed"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 42);
+    CHECK(expected.size() == 43);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -1003,7 +1015,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 42);
+    CHECK(registered.size() == 43);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
@@ -1582,4 +1594,262 @@ TEST_CASE("deleting, downloading and uploading machine files stay denied", "[SSW
     for (const char* cmd : {"sw_DeleteMachineFile", "sw_DownloadMachineFile", "sw_DownLoadFile", "sw_UploadFiletoMachine", "sw_MachinePrintStart",
                             "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_StartLocalPrint"})
         CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
+}
+
+// ---- machine control (#75): Snapmaker's control handlers forklifted into a table; only sw_ControlLed is reachable ----
+
+namespace {
+std::string control_msg(const std::string& cmd, const json& params) { return camera_msg(cmd, params); }
+} // namespace
+
+TEST_CASE("sw_ControlLed forwards the exact printer.control.led RPC for on and off", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    REQUIRE(h.bridge.sswcp().is_registered("sw_ControlLed"));
+    for (int white : {1, 0}) {
+        h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", white}}));
+        REQUIRE(h.control_calls.size() == (white ? 1u : 2u));
+        CHECK(h.control_calls.back().method == "printer.control.led");
+        CHECK(h.control_calls.back().params == json{{"name", "cavity_led"}, {"white", white}});
+        CHECK(h.reply(h.sent.size() - 1)["payload"]["code"] == 200);
+    }
+    // keys the page adds are not forwarded
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 1}, {"gcode", "M112"}}));
+    CHECK(h.control_calls.back().params == json{{"name", "cavity_led"}, {"white", 1}});
+}
+
+TEST_CASE("sw_ControlLed reproduces Snapmaker's messages and refuses bad values without asking the machine", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    const auto fail_msg = [&](const json& params) {
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", params));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == -1);
+        return h.reply(0)["payload"]["message"].get<std::string>();
+    };
+    CHECK(fail_msg(json::object()) == "param [name] required!");
+    CHECK(fail_msg({{"white", 1}}) == "param [name] required!");
+    CHECK(fail_msg({{"name", "cavity_led"}}) == "param [white] required!");
+    CHECK(fail_msg({{"name", 5}, {"white", 1}}) == "failure");             // get<std::string>() throws in Snapmaker
+    CHECK(fail_msg({{"name", "cavity_led"}, {"white", "1"}}) == "failure");
+    CHECK(fail_msg({{"name", "cavity_led"}, {"white", 1.5}}) == "failure");
+    CHECK(fail_msg({{"name", "chamber_led"}, {"white", 1}}) != "failure");   // wrong LED name: rejected
+    CHECK(fail_msg({{"name", "cavity_led "}, {"white", 1}}) != "failure");
+    CHECK(fail_msg({{"name", "cavity_led"}, {"white", 2}}) != "failure");    // white is 0 or 1
+    CHECK(fail_msg({{"name", "cavity_led"}, {"white", -1}}) != "failure");
+    CHECK(fail_msg({{"name", "cavity_led"}, {"white", 255}}) != "failure");
+    CHECK(h.control_calls.empty());
+
+    h.control_ok = false; // the machine says no / times out
+    h.sent.clear();
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 1}}));
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] != 200);
+
+    std::vector<std::string> sent; // no machine source at all
+    SnapmakerDeviceBridge::Options o;
+    o.port = 5000; o.http_host = "http://127.0.0.1:5000";
+    o.run_script = [&sent](const std::string& js) { sent.push_back(js); };
+    SnapmakerDeviceBridge none(std::move(o));
+    none.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 1}}));
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0].find("\"code\":-1") != std::string::npos);
+}
+
+TEST_CASE("a control reply that arrives after shutdown is dropped", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    h.hold_control = true;
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 1}}));
+    REQUIRE(h.control_pending.size() == 1);
+    CHECK(h.sent.empty());
+    h.bridge.shutdown();
+    h.control_pending[0](true, json{{"state", "success"}});
+    CHECK(h.sent.empty());
+}
+
+TEST_CASE("the late control reply is safe after the bridge is destroyed (m_alive)", "[SSWCP][device_ui][control]")
+{
+    std::function<void(bool, json)> late;
+    std::vector<std::string>        sent;
+    {
+        SnapmakerDeviceBridge::Options o;
+        o.port = 5000; o.http_host = "http://127.0.0.1:5000";
+        o.run_script = [&sent](const std::string& js) { sent.push_back(js); };
+        o.control = [&late](const std::string&, const json&, std::function<void(bool, json)> done) { late = std::move(done); };
+        SnapmakerDeviceBridge bridge(std::move(o));
+        bridge.on_script_message("http://127.0.0.1:5000/web/flutter_web/index.html", control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 0}}));
+        REQUIRE(late);
+    }
+    late(true, json{{"state", "success"}}); // must neither crash nor reach the dead bridge's callbacks
+    CHECK(sent.empty());
+}
+
+TEST_CASE("the forklifted control table is complete, uses allowlisted methods and exposes only the LED", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    const std::map<std::string, std::string> expected = {
+        {"sw_ControlLed", "printer.control.led"}, {"sw_ControlPrintSpeed", "printer.control.print_speed"},
+        {"sw_ControlPurifier", "printer.control.purifier"}, {"sw_ControlMainFan", "printer.control.main_fan"},
+        {"sw_ControlGenericFan", "printer.control.generic_fan"}, {"sw_ControlBedTemp", "printer.control.bed_temp"},
+        {"sw_ControlExtruderTemp", "printer.control.extruder_temp"}, {"sw_SetDeviceName", "machine.set_device_name"},
+        {"sw_BedMesh_AbortProbeMesh", "printer.bed_mesh.abort_probe_mesh"}, {"sw_MachinePrintPause", "printer.print.pause"},
+        {"sw_MachinePrintResume", "printer.print.resume"}, {"sw_MachinePrintCancel", "printer.print.cancel"}};
+    std::map<std::string, std::string> actual;
+    for (const auto& c : snapmaker_control_table()) {
+        actual[c.sw_name] = c.rpc_method;
+        CHECK(control_method_allowed(c.rpc_method));
+    }
+    CHECK(actual == expected);
+    CHECK(snapmaker_registered_control_commands() == std::vector<std::string>{"sw_ControlLed"});
+    // The unreachable entries still answer "unsupported command" (501) and never reach the machine, even with valid params.
+    const std::map<std::string, json> valid = {
+        {"sw_ControlPrintSpeed", {{"percentage", 100}}}, {"sw_ControlPurifier", {{"fan_speed", 50}}}, {"sw_ControlMainFan", {{"speed", 50}}},
+        {"sw_ControlGenericFan", {{"name", "fan1"}, {"speed", 50}}}, {"sw_ControlBedTemp", {{"temp", 60}}},
+        {"sw_ControlExtruderTemp", {{"temp", 200}, {"index", 0}}}, {"sw_SetDeviceName", {{"name", "U1"}}},
+        {"sw_BedMesh_AbortProbeMesh", json::object()}, {"sw_MachinePrintPause", json::object()}, {"sw_MachinePrintResume", json::object()},
+        {"sw_MachinePrintCancel", json::object()}};
+    for (const auto& [cmd, params] : valid) {
+        CAPTURE(cmd);
+        CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, control_msg(cmd, params));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 501);
+        CHECK(h.reply(0)["payload"]["message"] == "unsupported command");
+    }
+    CHECK(h.control_calls.empty());
+}
+
+TEST_CASE("snapmaker_control_prepare: Snapmaker's required-param messages and strict ranges for every table entry", "[SSWCP][device_ui][control]")
+{
+    std::string method, err;
+    json        out;
+    const auto prep = [&](const std::string& cmd, const json& p) { out = json(); return snapmaker_control_prepare(cmd, p, method, out, err); };
+    CHECK_FALSE(prep("sw_NoSuchThing", json::object()));
+    CHECK(err == "unsupported command");
+    CHECK_FALSE(prep("sw_ControlLed", json::array()));
+
+    CHECK_FALSE(prep("sw_ControlPrintSpeed", json::object()));
+    CHECK(err == "param [percentage] required!");
+    CHECK(prep("sw_ControlPrintSpeed", {{"percentage", 100}}));
+    CHECK(method == "printer.control.print_speed");
+    CHECK(out == json{{"percentage", 100}});
+    CHECK_FALSE(prep("sw_ControlPrintSpeed", {{"percentage", 0}}));
+    CHECK_FALSE(prep("sw_ControlPrintSpeed", {{"percentage", 100000}}));
+
+    CHECK_FALSE(prep("sw_ControlMainFan", json::object()));
+    CHECK(err == "param [speed] required!");
+    CHECK(prep("sw_ControlMainFan", {{"speed", 0}}));
+    CHECK_FALSE(prep("sw_ControlMainFan", {{"speed", 101}}));
+    CHECK_FALSE(prep("sw_ControlMainFan", {{"speed", -1}}));
+
+    CHECK_FALSE(prep("sw_ControlGenericFan", {{"speed", 5}}));
+    CHECK(err == "param [fan_id] required!");            // sic: Snapmaker checks "name" and reports fan_id
+    CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", "fan1"}}));
+    CHECK(err == "param [speed] required!");
+    CHECK(prep("sw_ControlGenericFan", {{"name", "fan1"}, {"speed", 50}}));
+    CHECK(out == json{{"name", "fan1"}, {"speed", 50}});
+    CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", "fan 1; M112"}, {"speed", 50}}));
+    CHECK_FALSE(prep("sw_ControlGenericFan", {{"name", ""}, {"speed", 50}}));
+
+    CHECK_FALSE(prep("sw_ControlBedTemp", json::object()));
+    CHECK(err == "param [temp] required!");
+    CHECK(prep("sw_ControlBedTemp", {{"temp", 60}}));
+    CHECK_FALSE(prep("sw_ControlBedTemp", {{"temp", 121}}));
+    CHECK_FALSE(prep("sw_ControlBedTemp", {{"temp", -5}}));
+
+    CHECK_FALSE(prep("sw_ControlExtruderTemp", {{"index", 0}}));
+    CHECK(err == "param [temp] required!");
+    CHECK(prep("sw_ControlExtruderTemp", {{"temp", 200}}));
+    CHECK(out == json{{"temp", 200}});                    // index / map only forwarded when given
+    CHECK(prep("sw_ControlExtruderTemp", {{"temp", 200}, {"index", 3}, {"map", 1}}));
+    CHECK(out == json{{"temp", 200}, {"index", 3}, {"map", 1}});
+    CHECK_FALSE(prep("sw_ControlExtruderTemp", {{"temp", 301}}));
+    CHECK_FALSE(prep("sw_ControlExtruderTemp", {{"temp", 200}, {"index", 4}}));
+
+    CHECK_FALSE(prep("sw_ControlPurifier", json::object()));
+    CHECK(prep("sw_ControlPurifier", {{"fan_speed", 50}, {"delay_time", 10}, {"work_time", 60}, {"evil", 1}}));
+    CHECK(out == json{{"fan_speed", 50}, {"delay_time", 10}, {"work_time", 60}});
+    CHECK_FALSE(prep("sw_ControlPurifier", {{"fan_speed", 500}}));
+
+    CHECK_FALSE(prep("sw_SetDeviceName", json::object()));
+    CHECK(err == "param [name] required!");
+    CHECK(prep("sw_SetDeviceName", {{"name", "My U1"}}));
+    CHECK(method == "machine.set_device_name");
+    CHECK_FALSE(prep("sw_SetDeviceName", {{"name", ""}}));
+    CHECK_FALSE(prep("sw_SetDeviceName", {{"name", std::string("a\nb")}}));
+    CHECK_FALSE(prep("sw_SetDeviceName", {{"name", std::string(65, 'a')}}));
+
+    for (const char* cmd : {"sw_BedMesh_AbortProbeMesh", "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel"}) {
+        CAPTURE(cmd);
+        CHECK(prep(cmd, {{"x", 1}}));
+        CHECK(out == json::object());                       // no params are forwarded
+    }
+}
+
+TEST_CASE("control_async request builder: allowlisted methods only, and the reply parser", "[SSWCP][device_ui][control]")
+{
+    using R = MoonrakerPrinterAgent::CameraReply;
+    const json led = {{"name", "cavity_led"}, {"white", 1}};
+    const json req = json::parse(MoonrakerPrinterAgent::control_request("printer.control.led", led, 4));
+    CHECK(req["jsonrpc"] == "2.0");
+    CHECK(req["method"] == "printer.control.led");
+    CHECK(req["params"] == led);
+    CHECK(req["id"] == 4);
+    CHECK(MoonrakerPrinterAgent::control_request("printer.emergency_stop", json::object(), 1).empty());
+    CHECK(MoonrakerPrinterAgent::control_request("camera.start_monitor", json::object(), 1).empty());
+    CHECK(MoonrakerPrinterAgent::control_request("printer.gcode.script", {{"script", "M112"}}, 1).empty());
+    CHECK(MoonrakerPrinterAgent::control_request("printer.control.led", json::array(), 1).empty());
+
+    int calls = 0; bool ok = true;
+    MoonrakerPrinterAgent("").control_async("printer.emergency_stop", json::object(), [&](bool o, json) { ++calls; ok = o; });
+    CHECK(calls == 1);
+    CHECK_FALSE(ok);
+    MoonrakerPrinterAgent("").control_async("printer.control.led", led, [&](bool o, json) { ++calls; ok = o; }); // valid, no machine connected
+    CHECK(calls == 2);
+    CHECK_FALSE(ok);
+
+    json result;
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{"state":"success"},"id":7})", 7, result) == R::Ok);
+    CHECK(result["state"] == "success");
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":"ok","id":7})", 7, result) == R::Ok);
+    CHECK(result == json{{"result", "ok"}});
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","method":"notify_status_update","params":[{}]})", 7, result) == R::Ignore);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{},"id":3})", 7, result) == R::Ignore);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","error":{"code":-1,"message":"no"},"id":7})", 7, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","id":7})", 7, result) == R::Fail);
+}
+
+TEST_CASE("control RPC over a loopback websocket sends exactly the allowlisted method", "[SSWCP][device_ui][control][loopback]")
+{
+    using namespace std::chrono_literals;
+    const json led = {{"name", "cavity_led"}, {"white", 0}};
+    SECTION("success") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::Success);
+        CameraResult r;
+        Run::control_run(p.url(), "KEY", "printer.control.led", led, 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK(r.ok);
+        const json sent = json::parse(p.last_request());
+        CHECK(sent["method"] == "printer.control.led");
+        CHECK(sent["params"] == led);
+        { std::lock_guard<std::mutex> l(p.m); CHECK(p.api_key == "KEY"); }
+    }
+    SECTION("an error reply fails") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::ErrorReply);
+        CameraResult r;
+        Run::control_run(p.url(), "", "printer.control.led", led, 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK_FALSE(r.ok);
+    }
+    SECTION("a method off the allowlist never opens a connection") {
+        LoopbackPrinter p(LoopbackPrinter::Mode::Success);
+        CameraResult r;
+        Run::control_run(p.url(), "", "printer.emergency_stop", json::object(), 3000ms, std::make_shared<Run::InFlightGate>(), r.callback());
+        REQUIRE(r.wait(5s));
+        CHECK_FALSE(r.ok);
+        CHECK(p.accepted == 0);
+    }
 }

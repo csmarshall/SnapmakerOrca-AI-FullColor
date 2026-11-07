@@ -117,6 +117,26 @@ nlohmann::json snapmaker_thumbnail_error(const std::string& path);
 // Of a /server/files/thumbnails result list, the entry with the most pixels whose reported size fits the cap ({} if none).
 nlohmann::json snapmaker_pick_thumbnail(const nlohmann::json& list);
 
+// ---- machine control (#75): Snapmaker's control handlers forklifted into a table ----
+// One entry per sw_* control command of Snapmaker/OrcaSlicer src/slic3r/GUI/SSWCP.cpp (sw_ControlLed, sw_ControlPrintSpeed, sw_ControlPurifier,
+// sw_ControlMainFan, sw_ControlGenericFan, sw_ControlBedTemp, sw_ControlExtruderTemp, sw_SetDeviceName, sw_BedMesh_AbortProbeMesh,
+// sw_MachinePrint{Pause,Resume,Cancel}) with the printer JSON-RPC method of Moonraker_Mqtt::async_control_* (src/slic3r/Utils/MoonRaker.cpp).
+// The table is data only: the bridge registers just the commands in snapmaker_registered_control_commands(); every other entry is
+// unreachable from the page until it is added there (and moved to REGISTERED in snapmaker_bridge_commands.txt).
+struct SnapmakerControlCommand
+{
+    const char* sw_name;
+    const char* rpc_method; // always a kControlRpcMethods entry
+};
+const std::vector<SnapmakerControlCommand>& snapmaker_control_table();
+// The control commands the bridge actually registers (today: sw_ControlLed only).
+const std::vector<std::string>& snapmaker_registered_control_commands();
+// Validates the page's params for control command `sw_name` exactly as Snapmaker's handler does (same "param [x] required!" messages, in
+// the same order), then the strict range checks; on success fills the RPC `method` and the whitelisted `rpc_params`. On failure
+// returns false with Snapmaker's message in `error` ("failure" for a wrongly typed value, as their get<int>() throw yields).
+bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json& params, std::string& method, nlohmann::json& rpc_params,
+                               std::string& error);
+
 // The bridge adds the device-oriented commands to the SSWCP core's 13. All READ-ONLY. Bridge-level emulation (ADR 0005,
 // decision 2 amendment): the page believes it talks to a machine over MQTT; here it is answered from the Moonraker
 // connection the app already has, and the sw_mqtt_* commands are accepted and ignored. Anything that could change printer
@@ -141,6 +161,9 @@ public:
         // Camera preview: IPrinterAgent::camera_monitor_async (start or stop the machine's monitor stream) with the page's
         // whitelisted params; `done(ok, result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
         std::function<void(bool start, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> camera_monitor;
+        // Machine control (#75): IPrinterAgent::control_async with a method from the forklifted table and its validated params; `done(ok,
+        // result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
+        std::function<void(const std::string& method, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> control;
         // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
         std::function<bool(SnapmakerTab)>                    switch_tab;
     };
