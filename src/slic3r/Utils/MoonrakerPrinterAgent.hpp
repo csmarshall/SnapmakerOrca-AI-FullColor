@@ -68,9 +68,19 @@ public:
     static CameraReply parse_camera_monitor_reply(const std::string& message, int id, nlohmann::json& result);
 
     // Machine control (#75): one-request websocket RPC for a method on the kControlRpcMethods allowlist (IPrinterAgent.hpp); same
-    // thread/timeout/gate model as camera_monitor_async, with its own gate so a camera stream never blocks the LED.
+    // thread/timeout/gate model as camera_monitor_async, with its own gate so a camera stream never blocks the LED (print.* has a third gate, below).
     void        control_async(const std::string& method, const nlohmann::json& params,
                               std::function<void(bool ok, nlohmann::json result)> done) override;
+    // pause / resume / cancel run on their own gate with kPrintControlTimeout (a cancel can outlast 5 s; the socket closing early does not
+    // stop the cancel, so the bridge re-checks the print state before any retry); every other control keeps kControlTimeout and the shared gate.
+    static constexpr std::chrono::milliseconds kControlTimeout{5000};
+    static constexpr std::chrono::milliseconds kPrintControlTimeout{20000};
+    static std::chrono::milliseconds control_timeout_for(const std::string& method)
+    {
+        return control_method_is_print(method) ? kPrintControlTimeout : kControlTimeout;
+    }
+    std::shared_ptr<InFlightGate> control_gate_for(const std::string& method) const { return control_method_is_print(method) ? m_print_gate : m_control_gate; }
+    std::shared_ptr<InFlightGate> camera_gate() const { return m_camera_gate; }
     // The JSON-RPC request text; "" if `method` is off the allowlist or `params` is not an object (exposed for tests).
     static std::string control_request(const std::string& method, const nlohmann::json& params, int id);
     // Ok = a non-error result for `id`, Fail = an error reply or no result, Ignore = notification / another id / not JSON.
@@ -298,6 +308,7 @@ private:
     std::thread            connect_thread;
     std::shared_ptr<InFlightGate> m_camera_gate = std::make_shared<InFlightGate>();
     std::shared_ptr<InFlightGate> m_control_gate = std::make_shared<InFlightGate>();
+    std::shared_ptr<InFlightGate> m_print_gate = std::make_shared<InFlightGate>();
     std::recursive_mutex   connect_mutex;
     mutable std::mutex     connect_error_mutex;
     std::string            connect_error; // see last_connect_error()

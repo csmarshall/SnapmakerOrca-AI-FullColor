@@ -1864,6 +1864,42 @@ TEST_CASE("control_async request builder: allowlisted methods only, and the repl
     CHECK(MoonrakerPrinterAgent::parse_control_reply(R"({"jsonrpc":"2.0","result":{},"id":7})", 7, result) == R::Ok); // no state member: the shape of a plain ack
 }
 
+TEST_CASE("print.* control has its own gate and a 20 s timeout; the other controls keep 5 s and a gate shared with each other only", "[SSWCP][device_ui][control]")
+{
+    using namespace std::chrono_literals;
+    for (const char* m : {"printer.print.pause", "printer.print.resume", "printer.print.cancel"}) {
+        CAPTURE(m);
+        CHECK(control_method_is_print(m));
+        CHECK(MoonrakerPrinterAgent::control_timeout_for(m) == 20000ms);
+    }
+    for (const char* m : {"printer.control.led", "printer.control.print_speed", "printer.control.main_fan", "printer.control.generic_fan",
+                          "printer.control.bed_temp", "printer.control.extruder_temp", "printer.bed_mesh.abort_probe_mesh"}) {
+        CAPTURE(m);
+        CHECK_FALSE(control_method_is_print(m));
+        CHECK(MoonrakerPrinterAgent::control_timeout_for(m) == 5000ms);
+    }
+    MoonrakerPrinterAgent agent("");
+    const auto print = agent.control_gate_for("printer.print.cancel");
+    const auto other = agent.control_gate_for("printer.control.led");
+    REQUIRE(print);
+    REQUIRE(other);
+    CHECK(print == agent.control_gate_for("printer.print.pause"));
+    CHECK(print == agent.control_gate_for("printer.print.resume"));
+    CHECK(other == agent.control_gate_for("printer.control.main_fan"));
+    CHECK(print != other);
+    CHECK(print != agent.camera_gate());
+    CHECK(other != agent.camera_gate());
+    // a cancel in flight neither blocks the LED nor the camera, and a second cancel is refused at once
+    REQUIRE(print->try_acquire());
+    CHECK(other->try_acquire());
+    CHECK(agent.camera_gate()->try_acquire());
+    CHECK_FALSE(print->try_acquire());
+    int calls = 0; bool ok = true;
+    MoonrakerPrinterAgent::control_run("ws://127.0.0.1:1", "", "printer.print.cancel", json::object(), 20000ms, print, [&](bool o, json) { ++calls; ok = o; });
+    CHECK(calls == 1);
+    CHECK_FALSE(ok);
+}
+
 TEST_CASE("control RPC over a loopback websocket sends exactly the allowlisted method", "[SSWCP][device_ui][control][loopback]")
 {
     using namespace std::chrono_literals;

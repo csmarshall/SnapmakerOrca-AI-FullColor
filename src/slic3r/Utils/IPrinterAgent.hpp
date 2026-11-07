@@ -588,6 +588,11 @@ inline constexpr const char* kControlRpcMethods[] = {
     "printer.control.generic_fan",  "printer.control.bed_temp",    "printer.control.extruder_temp",
     "printer.print.pause",          "printer.print.resume",        "printer.print.cancel",
     "printer.bed_mesh.abort_probe_mesh", "machine.set_device_name"};
+// pause / resume / cancel: they get their own in-flight gate and a longer timeout than the other controls (#79)
+inline bool control_method_is_print(const std::string& method)
+{
+    return method == "printer.print.pause" || method == "printer.print.resume" || method == "printer.print.cancel";
+}
 inline bool control_method_allowed(const std::string& method)
 {
     for (const char* m : kControlRpcMethods)
