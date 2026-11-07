@@ -522,10 +522,10 @@ TEST_CASE("the read-only guarantee: no control action is registered, each gets a
 {
     BridgeHarness h;
     const std::vector<std::string> controls = {
-        "sw_SendGCodes", "sw_MachinePrintStart", "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel",
+        "sw_SendGCodes", "sw_MachinePrintStart",
         "sw_UploadFiletoMachine", "sw_UploadFile", "sw_UploadFileResult", "sw_DeleteCameraTimelapse", "sw_DeleteRecentFiles", "sw_DeleteDevices", "sw_RenameDevice",
-        "sw_SetDeviceName", "sw_ControlPrintSpeed", "sw_ControlPurifier", "sw_ControlMainFan", "sw_ControlGenericFan",
-        "sw_ControlBedTemp", "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
+        "sw_SetDeviceName", "sw_ControlPurifier",
+        "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
         "sw_SendCommand", "sw_Query", "sw_AddDevice", "sw_SwitchModel", "sw_UpdateDeviceInfo", "sw_mqtt_set_engine",
         "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping", "sw_DownloadMachineFile", "sw_DownLoadFile",
         "sw_PullCloudFile", "sw_ServerClientManagerSetUserinfo",
@@ -564,11 +564,13 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_CameraStartMonitor", "sw_CameraStopMonitor",
         // read-only file listing (#75)
         "sw_GetFileListPage",
-        // machine control (#75): the LED only; the other forklifted controls stay denied
-        "sw_ControlLed"};
+        // machine control (#75, #79): LED, speed, fans, bed temperature, pause/resume/cancel; nozzle temperature, purifier, device name
+        // and the bed-mesh abort stay denied
+        "sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp", "sw_MachinePrintPause",
+        "sw_MachinePrintResume", "sw_MachinePrintCancel"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 43);
+    CHECK(expected.size() == 50);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -1015,7 +1017,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 43);
+    CHECK(registered.size() == 50);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
@@ -1592,11 +1594,11 @@ TEST_CASE("deleting, downloading and uploading machine files stay denied", "[SSW
 {
     BridgeHarness h;
     for (const char* cmd : {"sw_DeleteMachineFile", "sw_DownloadMachineFile", "sw_DownLoadFile", "sw_UploadFiletoMachine", "sw_MachinePrintStart",
-                            "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_StartLocalPrint"})
+                            "sw_StartLocalPrint"})
         CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
 }
 
-// ---- machine control (#75): Snapmaker's control handlers forklifted into a table; only sw_ControlLed is reachable ----
+// ---- machine control (#75): Snapmaker's control handlers forklifted into a table; only the approved ones are reachable ----
 
 namespace {
 std::string control_msg(const std::string& cmd, const json& params) { return camera_msg(cmd, params); }
@@ -1686,7 +1688,7 @@ TEST_CASE("the late control reply is safe after the bridge is destroyed (m_alive
     CHECK(sent.empty());
 }
 
-TEST_CASE("the forklifted control table is complete, uses allowlisted methods and exposes only the LED", "[SSWCP][device_ui][control]")
+TEST_CASE("the forklifted control table is complete, uses allowlisted methods and exposes only the approved controls", "[SSWCP][device_ui][control]")
 {
     BridgeHarness h;
     const std::map<std::string, std::string> expected = {
@@ -1702,14 +1704,14 @@ TEST_CASE("the forklifted control table is complete, uses allowlisted methods an
         CHECK(control_method_allowed(c.rpc_method));
     }
     CHECK(actual == expected);
-    CHECK(snapmaker_registered_control_commands() == std::vector<std::string>{"sw_ControlLed"});
+    CHECK(snapmaker_registered_control_commands() ==
+          std::vector<std::string>{"sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp",
+                                   "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel"});
     // The unreachable entries still answer "unsupported command" (501) and never reach the machine, even with valid params.
     const std::map<std::string, json> valid = {
-        {"sw_ControlPrintSpeed", {{"percentage", 100}}}, {"sw_ControlPurifier", {{"fan_speed", 50}}}, {"sw_ControlMainFan", {{"speed", 50}}},
-        {"sw_ControlGenericFan", {{"name", "cavity_fan"}, {"speed", 50}}}, {"sw_ControlBedTemp", {{"temp", 60}}},
+        {"sw_ControlPurifier", {{"fan_speed", 50}}},
         {"sw_ControlExtruderTemp", {{"temp", 200}, {"index", 0}}}, {"sw_SetDeviceName", {{"name", "U1"}}},
-        {"sw_BedMesh_AbortProbeMesh", json::object()}, {"sw_MachinePrintPause", json::object()}, {"sw_MachinePrintResume", json::object()},
-        {"sw_MachinePrintCancel", json::object()}};
+        {"sw_BedMesh_AbortProbeMesh", json::object()}};
     for (const auto& [cmd, params] : valid) {
         CAPTURE(cmd);
         CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
@@ -1930,4 +1932,204 @@ TEST_CASE("control RPC over a loopback websocket sends exactly the allowlisted m
         CHECK_FALSE(r.ok);
         CHECK(p.accepted == 0);
     }
+}
+
+
+// ---- print-state guard and registration of the approved controls (#79) ----
+
+namespace {
+// Answers the newest state query of the harness with a print_stats state (or a failure when `state` is null).
+void answer_state_query(BridgeHarness& h, const json& state)
+{
+    REQUIRE_FALSE(h.queries.empty());
+    auto q = std::move(h.queries.back());
+    h.queries.pop_back();
+    CHECK(q.objects == std::vector<std::string>{"print_stats"});
+    if (state.is_null()) q.done(false, json::object());
+    else q.done(true, json{{"status", {{"print_stats", {{"state", state}}}}}});
+}
+const std::map<std::string, std::string> kPrintCmds = {{"sw_MachinePrintPause", "printer.print.pause"},
+                                                       {"sw_MachinePrintResume", "printer.print.resume"},
+                                                       {"sw_MachinePrintCancel", "printer.print.cancel"}};
+} // namespace
+
+TEST_CASE("snapmaker_print_state_allows: cancel in printing/paused, pause only printing, resume only paused", "[SSWCP][device_ui][control]")
+{
+    for (const char* st : {"standby", "ready", "complete", "cancelled", "error", "", "Printing", "printing "}) {
+        CAPTURE(st);
+        for (const char* m : {"printer.print.cancel", "printer.print.pause", "printer.print.resume"})
+            CHECK_FALSE(snapmaker_print_state_allows(m, st));
+    }
+    CHECK(snapmaker_print_state_allows("printer.print.cancel", "printing"));
+    CHECK(snapmaker_print_state_allows("printer.print.cancel", "paused"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.cancel", "standby"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.cancel", "complete"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.cancel", "cancelled"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.cancel", "error"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.cancel", ""));
+    CHECK(snapmaker_print_state_allows("printer.print.pause", "printing"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.pause", "paused"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.pause", "standby"));
+    CHECK(snapmaker_print_state_allows("printer.print.resume", "paused"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.resume", "printing"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.print.resume", "standby"));
+    CHECK_FALSE(snapmaker_print_state_allows("printer.control.led", "printing")); // not a print method: never allowed through this
+    CHECK_FALSE(snapmaker_print_state_allows("printer.bed_mesh.abort_probe_mesh", "printing"));
+}
+
+TEST_CASE("pause/resume/cancel through the bridge: sent only in the matching print state", "[SSWCP][device_ui][control][guard]")
+{
+    struct Row { const char* cmd; const char* state; bool sent; };
+    const Row rows[] = {
+        {"sw_MachinePrintCancel", "printing", true},  {"sw_MachinePrintCancel", "paused", true},   {"sw_MachinePrintCancel", "standby", false},
+        {"sw_MachinePrintCancel", "complete", false}, {"sw_MachinePrintCancel", "cancelled", false}, {"sw_MachinePrintCancel", "error", false},
+        {"sw_MachinePrintPause", "printing", true},   {"sw_MachinePrintPause", "paused", false},   {"sw_MachinePrintPause", "standby", false},
+        {"sw_MachinePrintResume", "paused", true},    {"sw_MachinePrintResume", "printing", false}, {"sw_MachinePrintResume", "standby", false},
+    };
+    for (const auto& r : rows) {
+        CAPTURE(r.cmd, r.state);
+        BridgeHarness h;
+        REQUIRE(h.bridge.sswcp().is_registered(r.cmd));
+        h.bridge.on_script_message(h.good, control_msg(r.cmd, json::object()));
+        CHECK(h.control_calls.empty());                       // nothing is sent before the state is known
+        answer_state_query(h, r.state);
+        if (r.sent) {
+            REQUIRE(h.control_calls.size() == 1);
+            CHECK(h.control_calls[0].method == kPrintCmds.at(r.cmd));
+            CHECK(h.control_calls[0].params == json::object());
+            REQUIRE(h.sent.size() == 1);
+            CHECK(h.reply(0)["payload"]["code"] == 200);
+        } else {
+            CHECK(h.control_calls.empty());
+            REQUIRE(h.sent.size() == 1);
+            CHECK(h.reply(0)["payload"]["code"] != 0);
+        }
+    }
+}
+
+TEST_CASE("pause/resume/cancel fail closed when the state is unknown", "[SSWCP][device_ui][control][guard]")
+{
+    for (const auto& [cmd, method] : kPrintCmds) {
+        CAPTURE(cmd);
+        SECTION("the query fails") {
+            BridgeHarness h;
+            h.bridge.on_script_message(h.good, control_msg(cmd, json::object()));
+            answer_state_query(h, json());
+            CHECK(h.control_calls.empty());
+            REQUIRE(h.sent.size() == 1);
+            CHECK(h.reply(0)["payload"]["code"] != 0);
+        }
+        SECTION("no state source at all") {
+            BridgeHarness h;
+            h.have_source = false;
+            h.bridge.on_script_message(h.good, control_msg(cmd, json::object()));
+            CHECK(h.control_calls.empty());
+            REQUIRE(h.sent.size() == 1);
+            CHECK(h.reply(0)["payload"]["code"] != 0);
+        }
+        SECTION("the reply carries no print_stats state, or a non-string one") {
+            for (const json& result : {json::object(), json{{"status", json::object()}}, json{{"status", {{"print_stats", json::object()}}}},
+                                       json{{"status", {{"print_stats", {{"state", 3}}}}}}, json{{"status", {{"print_stats", {{"state", nullptr}}}}}},
+                                       json("printing")}) {
+                BridgeHarness h;
+                h.bridge.on_script_message(h.good, control_msg(cmd, json::object()));
+                REQUIRE(h.queries.size() == 1);
+                h.queries[0].done(true, result);
+                CHECK(h.control_calls.empty());
+                REQUIRE(h.sent.size() == 1);
+                CHECK(h.reply(0)["payload"]["code"] != 0);
+            }
+        }
+    }
+}
+
+TEST_CASE("a second pause/resume/cancel while one is in flight is refused with no second RPC", "[SSWCP][device_ui][control][guard]")
+{
+    SECTION("while the state query is pending") {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        REQUIRE(h.sent.size() == 1);                           // the second is answered at once
+        CHECK(h.reply(0)["payload"]["code"] != 0);
+        CHECK(h.reply(0)["payload"]["message"] == "failure");
+        REQUIRE(h.queries.size() == 1);                        // and did not start another query
+        answer_state_query(h, "printing");
+        CHECK(h.control_calls.size() == 1);
+    }
+    SECTION("while the RPC is pending, for any print command; then a fresh request needs a fresh state query") {
+        BridgeHarness h;
+        h.hold_control = true;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        answer_state_query(h, "printing");
+        REQUIRE(h.control_calls.size() == 1);
+        for (const char* other : {"sw_MachinePrintCancel", "sw_MachinePrintPause", "sw_MachinePrintResume"}) {
+            h.bridge.on_script_message(h.good, control_msg(other, json::object()));
+        }
+        CHECK(h.control_calls.size() == 1);
+        CHECK(h.queries.empty());
+        CHECK(h.sent.size() == 3);
+        h.control_pending[0](false, json::object());           // the first one times out
+        REQUIRE(h.sent.size() == 4);
+        CHECK(h.reply(3)["payload"]["code"] != 0);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        CHECK(h.control_calls.size() == 1);                    // not sent until the state is known again
+        REQUIRE(h.queries.size() == 1);
+        answer_state_query(h, "standby");                      // the first cancel did run
+        CHECK(h.control_calls.size() == 1);
+    }
+    SECTION("the busy flag is cleared by a failed query") {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        answer_state_query(h, json());
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        answer_state_query(h, "printing");
+        CHECK(h.control_calls.size() == 1);
+    }
+}
+
+TEST_CASE("print control is a separate gate from the camera and from the LED and other controls at the bridge", "[SSWCP][device_ui][control][guard]")
+{
+    BridgeHarness h;
+    h.hold_control = true;
+    h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+    answer_state_query(h, "printing");
+    REQUIRE(h.control_calls.size() == 1);
+    // while the pause is in flight: LED, speed, fan, bed temperature and the camera all go through
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 1}}));
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlPrintSpeed", {{"percentage", 100}}));
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlMainFan", {{"speed", 10}}));
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlBedTemp", {{"temp", 60}}));
+    CHECK(h.control_calls.size() == 5);
+    CHECK(h.control_calls[1].method == "printer.control.led");
+    CHECK(h.control_calls[2].method == "printer.control.print_speed");
+    CHECK(h.control_calls[3].method == "printer.control.main_fan");
+    CHECK(h.control_calls[4].method == "printer.control.bed_temp");
+    CHECK(h.queries.empty());                                  // none of those asked for the print state
+    h.bridge.on_script_message(h.good, control_msg("sw_CameraStartMonitor", {{"domain", "lan"}, {"clientid", "abc"}}));
+    CHECK(h.camera_calls.size() == 1);
+}
+
+TEST_CASE("the newly registered controls forward the exact RPC with no state query", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlPrintSpeed", {{"percentage", 50}}));
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlMainFan", {{"speed", 0}}));
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlGenericFan", {{"name", "cavity_fan"}, {"speed", 100}}));
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlBedTemp", {{"temp", 100}, {"gcode", "M112"}}));
+    REQUIRE(h.control_calls.size() == 4);
+    CHECK(h.control_calls[0].method == "printer.control.print_speed");
+    CHECK(h.control_calls[0].params == json{{"percentage", 50}});
+    CHECK(h.control_calls[1].params == json{{"speed", 0}});
+    CHECK(h.control_calls[2].method == "printer.control.generic_fan");
+    CHECK(h.control_calls[2].params == json{{"name", "cavity_fan"}, {"speed", 100}});
+    CHECK(h.control_calls[3].params == json{{"temp", 100}});
+    CHECK(h.queries.empty());
+    // still denied
+    for (const char* cmd : {"sw_ControlExtruderTemp", "sw_ControlPurifier", "sw_SetDeviceName", "sw_BedMesh_AbortProbeMesh"}) {
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, control_msg(cmd, json::object()));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 501);
+    }
+    CHECK(h.control_calls.size() == 4);
 }
