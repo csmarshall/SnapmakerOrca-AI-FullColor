@@ -819,6 +819,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SpoolmanJoin.hpp
     Utils/MoonrakerPrinterAgent.cpp
     Utils/MoonrakerPrinterAgent.hpp
+    Utils/SnapmakerPrintPreference.hpp
     Utils/Moonraker.cpp
     Utils/Moonraker.hpp
     Utils/BBLCloudServiceAgent.cpp
