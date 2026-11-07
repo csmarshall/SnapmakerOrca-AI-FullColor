@@ -7717,6 +7717,8 @@ TEST_CASE("A multi-toolhead project saved without filament self indices loads ev
     config.opt<ConfigOptionStrings>("filament_colour")->values = colors;
     config.opt<ConfigOptionFloats>("nozzle_diameter")->values = std::vector<double>(colors.size(), 0.4);
     config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+    // A per-extruder printer option that full_print_config() leaves out; set_num_extruders() asserts it exists.
+    config.option<ConfigOptionEnumsGeneric>("default_nozzle_volume_type", true)->values = { int(nvtStandard) };
     Preset::normalize(config);
 
     PresetBundle bundle;
