@@ -6,6 +6,7 @@
 #include "NetworkAgentFactory.hpp"
 #include "bambu_networking.hpp"
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -49,6 +50,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/fstream.hpp>
 #include <boost/log/trivial.hpp>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -653,6 +655,96 @@ int MoonrakerPrinterAgent::start_local_print_with_record(PrintParams      params
     return BAMBU_NETWORK_SUCCESS;
 }
 
+namespace {
+
+// The G-code to upload for a print job, and the name it gets in the printer's gcodes root.
+// A sliced project (.gcode.3mf, a zip) is unpacked to a temporary file that is removed with this object.
+struct UploadSource
+{
+    std::string path;
+    std::string name;
+    ~UploadSource()
+    {
+        if (!m_temp.empty()) {
+            boost::system::error_code ec;
+            boost::filesystem::remove(m_temp, ec);
+        }
+    }
+    boost::filesystem::path m_temp;
+};
+
+bool is_zip_file(const boost::filesystem::path& path)
+{
+    // Zip local file header magic, PK\x03\x04: the extension alone cannot be trusted either way
+    boost::filesystem::ifstream in(path, std::ios::binary);
+    char                        magic[4] = {};
+    in.read(magic, sizeof(magic));
+    return in.gcount() == 4 && magic[0] == 'P' && magic[1] == 'K' && magic[2] == 3 && magic[3] == 4;
+}
+
+// "Name.gcode.3mf" and ".23381.0.3mf" become "Name.gcode" and "23381.0.gcode": no leading dots, one .gcode extension.
+std::string gcode_name_from_project(std::string name)
+{
+    for (const char* ext : {".3mf", ".gcode"})
+        if (boost::iends_with(name, ext))
+            name.resize(name.size() - std::strlen(ext));
+    boost::trim_left_if(name, boost::is_any_of(". "));
+    return (name.empty() ? "print" : name) + ".gcode";
+}
+
+// Resolves what start_local_print and start_send_gcode_to_sdcard upload. Plain G-code is uploaded as it is.
+// Snapmaker's own Moonraker upload (src/slic3r/Utils/Moonraker.cpp, Moonraker::upload with upload_data.source_path) is only ever
+// handed plain G-code and has no counterpart for a sliced project, so the plate extraction here is Orca's: Metadata/plate_<N>.gcode
+// is where the slicer stores each plate's G-code in the .gcode.3mf, N being the 1-based PrintParams::plate_index (SendJob.cpp: curr_plate_idx).
+int resolve_upload_source(const PrintParams& params, const std::string& plain_name, UploadSource& source, const std::string& source_path)
+{
+    namespace fs = boost::filesystem;
+    if (!fs::exists(fs::path(source_path))) {
+        BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: G-code file does not exist: " << source_path;
+        return BAMBU_NETWORK_ERR_FILE_NOT_EXIST;
+    }
+    if (!params.dst_file.empty() || !is_zip_file(source_path)) {
+        source.path = source_path;
+        source.name = plain_name;
+        return BAMBU_NETWORK_SUCCESS;
+    }
+
+    const std::string entry = "Metadata/plate_" + std::to_string(params.plate_index) + ".gcode";
+    if (params.plate_index < 1) {
+        BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: invalid plate index " << params.plate_index << " for " << source_path;
+        return BAMBU_NETWORK_ERR_FILE_NOT_EXIST;
+    }
+    mz_zip_archive zip{};
+    if (!open_zip_reader(&zip, source_path)) {
+        BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: cannot open sliced project " << source_path;
+        return BAMBU_NETWORK_ERR_OPEN_FILE_FAILED;
+    }
+    int result = BAMBU_NETWORK_SUCCESS;
+    const int index = mz_zip_reader_locate_file(&zip, entry.c_str(), nullptr, 0);
+    if (index < 0) {
+        BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: " << source_path << " has no " << entry << "; slice the plate first";
+        result = BAMBU_NETWORK_ERR_FILE_NOT_EXIST;
+    } else {
+        fs::path temp = fs::temp_directory_path() / fs::unique_path("orca-send-%%%%-%%%%-%%%%.gcode");
+        if (extract_zip_entry_to_file(&zip, static_cast<mz_uint>(index), temp)) {
+            source.m_temp = temp;
+            source.path   = temp.string();
+            std::string project = params.project_name.empty() ? params.task_name : params.project_name;
+            if (project.empty())
+                project = fs::path(source_path).filename().string();
+            // Only the basename, whatever the project name holds
+            source.name = gcode_name_from_project(fs::path(project).filename().string());
+        } else {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: cannot extract " << entry << " from " << source_path;
+            result = BAMBU_NETWORK_ERR_OPEN_FILE_FAILED;
+        }
+    }
+    close_zip_reader(&zip);
+    return result;
+}
+
+} // namespace
+
 int MoonrakerPrinterAgent::start_send_gcode_to_sdcard(PrintParams      params,
                                                       OnUpdateStatusFn update_fn,
                                                       WasCancelledFn   cancel_fn,
@@ -672,10 +764,13 @@ int MoonrakerPrinterAgent::start_send_gcode_to_sdcard(PrintParams      params,
     }
 
     // Sanitize filename to prevent path traversal attacks
-    std::string safe_filename = sanitize_filename(filename);
+    UploadSource source;
+    if (const int err = resolve_upload_source(params, sanitize_filename(filename), source, params.filename); err != BAMBU_NETWORK_SUCCESS)
+        return err;
+    const std::string safe_filename = sanitize_filename(source.name);
 
     // Upload only, don't start print
-    if (!upload_gcode(params.filename, safe_filename, device_info.base_url, device_info.api_key, update_fn, cancel_fn)) {
+    if (!upload_gcode(source.path, safe_filename, device_info.base_url, device_info.api_key, update_fn, cancel_fn)) {
         return BAMBU_NETWORK_ERR_PRINT_SG_UPLOAD_FTP_FAILED;
     }
 
@@ -700,26 +795,21 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
         gcode_path = params.dst_file;
     }
 
-    // Check if file exists and has .gcode extension
-    namespace fs = boost::filesystem;
-    fs::path source_path(gcode_path);
-    if (!fs::exists(source_path)) {
-        BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: G-code file does not exist: " << gcode_path;
-        return BAMBU_NETWORK_ERR_FILE_NOT_EXIST;
-    }
-
     // Extract filename for upload (relative to gcodes root)
-    std::string upload_filename = source_path.filename().string();
-    if (!boost::iends_with(upload_filename, ".gcode")) {
-        upload_filename += ".gcode";
+    std::string plain_name = boost::filesystem::path(gcode_path).filename().string();
+    if (!boost::iends_with(plain_name, ".gcode")) {
+        plain_name += ".gcode";
     }
+    UploadSource source;
+    if (const int err = resolve_upload_source(params, sanitize_filename(plain_name), source, gcode_path); err != BAMBU_NETWORK_SUCCESS)
+        return err;
     // Sanitize filename to prevent path traversal attacks (extra safety)
-    upload_filename = sanitize_filename(upload_filename);
+    const std::string upload_filename = sanitize_filename(source.name);
 
     // Upload file
     if (update_fn)
         update_fn(PrintingStageUpload, 0, _u8L("Uploading G-code..."));
-    if (!upload_gcode(gcode_path, upload_filename, device_info.base_url, device_info.api_key, update_fn, cancel_fn)) {
+    if (!upload_gcode(source.path, upload_filename, device_info.base_url, device_info.api_key, update_fn, cancel_fn)) {
         return BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED;
     }
 
