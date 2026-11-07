@@ -8958,6 +8958,20 @@ TEST_CASE("AMS sync replaces a project-embedded preset whose type differs from t
     CHECK(f.bundle.filament_presets == std::vector<std::string>{"System Fiberon"});
 }
 
+TEST_CASE("AMS sync keeps an external 3MF preset that is not flagged project-embedded (parent missing from the profiles)", "[Preset][AMS][Regression]")
+{
+    AmsSyncFixture f(false);
+    for (Preset& p : f.bundle.filaments)
+        if (p.name == "Project ABS") {
+            p.is_system           = false;
+            p.is_project_embedded = false;
+            p.is_external         = true;
+            p.filament_id         = "";
+        }
+    f.sync("ABS");
+    CHECK(f.bundle.filament_presets == std::vector<std::string>{"Project ABS"});
+}
+
 TEST_CASE("AMS sync still replaces a non-embedded slot with the preset matching the tray id", "[Preset][AMS][Regression]")
 {
     AmsSyncFixture f(false);

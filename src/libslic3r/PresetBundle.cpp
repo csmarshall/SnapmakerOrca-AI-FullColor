@@ -4716,7 +4716,9 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         // only the tray colour, as for an unchanged filament, rather than swapping in the system preset sharing the tray id.
         if (this->filament_presets.size() > ams_filament_presets.size() && !filament_type.empty()) {
             const Preset* current = filaments.find_preset(this->filament_presets[ams_filament_presets.size()], false);
-            if (current && current->is_project_embedded && current->config.opt_string("filament_type", 0u) == filament_type) {
+            // A 3MF preset whose parent is gone from the profile set (U1 2.4.1 projects: 'Snapmaker ABS @U1 0.4 nozzle') is loaded as an
+            // external preset on the default base, not flagged project-embedded, but it is just as much the project's own tuning.
+            if (current && (current->is_project_embedded || current->is_external) && !current->is_system && current->config.opt_string("filament_type", 0u) == filament_type) {
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": keeping project preset %1% (type %2% matches tray)") % current->name % filament_type;
                 ams_filament_presets.push_back(current->name);
                 ams_filament_colors.push_back(filament_color);
