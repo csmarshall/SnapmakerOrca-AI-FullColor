@@ -19,6 +19,7 @@ namespace Slic3r {
 static constexpr char ORCA_PRINTER_AGENT_ID[] = "orca";
 static constexpr char BBL_PRINTER_AGENT_ID[] = "bbl";
 static constexpr char MOONRAKER_PRINTER_AGENT_ID[] = "moonraker";
+static constexpr char SNAPMAKER_PRINTER_AGENT_ID[] = "snapmaker";
 
 // Factory function type for creating printer agents
 using PrinterAgentFactory =
@@ -112,6 +113,12 @@ public:
      * send dialog has neither (Plater.cpp on_action_print_plate -> send_gcode_legacy). An empty id counts as Bambu.
      */
     static bool printer_agent_supports_bambu_print_options(const std::string& id);
+
+    /**
+     * Whether the Send/Print dialog offers Time-lapse, Auto Bed Leveling and Flow Calibration as real toggles: they are sent as
+     * SET_PRINT_PREFERENCE lines before the print starts (SnapmakerPrintPreference.hpp). Only the Snapmaker agent does this.
+     */
+    static bool printer_agent_supports_snapmaker_print_preferences(const std::string& id);
 
     /**
      * Return the full plugin reference for a plugin-backed printer agent ID, or empty for built-ins.

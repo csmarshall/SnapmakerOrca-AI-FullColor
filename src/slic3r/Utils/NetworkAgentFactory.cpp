@@ -106,6 +106,11 @@ bool NetworkAgentFactory::printer_agent_supports_bambu_print_options(const std::
     return id.empty() || id == BBL_PRINTER_AGENT_ID;
 }
 
+bool NetworkAgentFactory::printer_agent_supports_snapmaker_print_preferences(const std::string& id)
+{
+    return id == SNAPMAKER_PRINTER_AGENT_ID;
+}
+
 bool NetworkAgentFactory::is_printer_agent_registered(const std::string& id)
 {
     std::lock_guard<std::mutex> lock(s_registry_mutex);
