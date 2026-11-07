@@ -1620,6 +1620,51 @@ TEST_CASE("sw_ControlLed forwards the exact printer.control.led RPC for on and o
     CHECK(h.control_calls.back().params == json{{"name", "cavity_led"}, {"white", 1}});
 }
 
+// #82: the page's light switch reads 'led cavity_led' -> color_data; the default query never asked for it, so the switch stayed ON.
+TEST_CASE("the default machine-state query asks for led cavity_led and the reply carries its color_data (#82)", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_GetMachineState"));
+    REQUIRE(h.queries.size() == 1);
+    CHECK(std::find(h.queries[0].objects.begin(), h.queries[0].objects.end(), "led cavity_led") != h.queries[0].objects.end());
+    json state = moonraker_result(59);
+    state["status"]["led cavity_led"] = {{"color_data", json::array({json::array({0, 0, 0, 0})})}};
+    h.queries[0].done(true, state);
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["data"]["status"]["led cavity_led"]["color_data"] == json::array({json::array({0, 0, 0, 0})}));
+}
+
+TEST_CASE("a successful sw_ControlLed re-queries the state and pushes it to subscribers at once (#82)", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "msub"));
+    REQUIRE(h.queries.size() == 1);
+    json on = moonraker_result(59);
+    on["status"]["led cavity_led"] = {{"color_data", json::array({json::array({0.0, 0.0, 0.0, 1.0})})}};
+    h.queries[0].done(true, on);
+    const auto pushed = h.sent.size();
+
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 0}}));
+    REQUIRE(h.queries.size() == 2);                       // no tick: refreshed promptly
+    json off = on;
+    off["status"]["led cavity_led"] = {{"color_data", json::array({json::array({0, 0, 0, 0})})}};
+    h.queries[1].done(true, off);
+    REQUIRE(h.sent.size() == pushed + 2);                 // the control reply and the pushed state
+    const json last = h.reply(h.sent.size() - 1);
+    CHECK(last["header"] == json{{"event_id", "msub"}});
+    CHECK(last["payload"]["data"]["status"]["led cavity_led"]["color_data"] == json::array({json::array({0, 0, 0, 0})}));
+}
+
+TEST_CASE("a failed sw_ControlLed does not refresh the state (#82)", "[SSWCP][device_ui][control]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "msub"));
+    h.queries[0].done(true, moonraker_result(59));
+    h.control_ok = false;
+    h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 0}}));
+    CHECK(h.queries.size() == 1);
+}
+
 TEST_CASE("sw_ControlLed reproduces Snapmaker's messages and refuses bad values without asking the machine", "[SSWCP][device_ui][control]")
 {
     BridgeHarness h;
