@@ -2583,6 +2583,8 @@ TEST_CASE("Mixed-color filament metadata is snapshotted per printer, with its fi
     // export_selections skips the built-in "Default Printer" placeholder entirely.
     add_inmemory_preset(bundle.printers, "Test Printer");
     bundle.printers.select_preset_by_name("Test Printer", true);
+    // export_selections() asserts every filament slot names a preset; a fresh bundle starts with none.
+    bundle.filament_presets = { bundle.filaments.get_selected_preset_name() };
     bundle.set_num_filaments(2u, std::string("#FF0000"));
     bundle.project_config.option<ConfigOptionBools>("filament_is_mixed")->values          = { false, true };
     bundle.project_config.option<ConfigOptionStrings>("filament_mixed_components")->values = { "", "1,2" };
@@ -2616,6 +2618,8 @@ TEST_CASE("A multi-point gradient curve survives the app-config snapshot", "[Pre
     PresetBundle bundle;
     add_inmemory_preset(bundle.printers, "Test Printer");
     bundle.printers.select_preset_by_name("Test Printer", true);
+    // export_selections() asserts every filament slot names a preset; a fresh bundle starts with none.
+    bundle.filament_presets = { bundle.filaments.get_selected_preset_name() };
     bundle.set_num_filaments(3u, std::string("#FF0000"));
     bundle.project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values = curves;
 
@@ -8730,6 +8734,8 @@ TEST_CASE("A selection is not taken while project presets are loaded", "[Preset]
 TEST_CASE("Selections reach the app config only while no export blocker lives", "[Preset][Bundle]")
 {
     PresetBundle bundle;
+    // export_selections() asserts there is a filament slot; a fresh bundle starts with none.
+    bundle.filament_presets = { bundle.filaments.get_selected_preset_name() };
     AppConfig    app_config;
     {
         PresetBundle::SelectionExportBlocker blocker(bundle);
