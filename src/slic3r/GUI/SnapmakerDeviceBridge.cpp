@@ -672,6 +672,8 @@ void SnapmakerDeviceBridge::register_commands()
             [this, start](SSWCP_Instance& i) {
                 if (!camera_monitor_params_valid(i.params())) { i.handle_general_fail(SSWCPCode::BadRequest, "invalid camera parameters"); return; }
                 if (!m_options.camera_monitor) { i.handle_general_fail(SSWCPCode::Failure, "no machine connected"); return; }
+                if (start) m_camera_running = nlohmann::json{{"domain", i.params().at("domain")}, {"clientid", i.params().at("clientid")}};
+                else       m_camera_running = nlohmann::json();
                 auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
                 auto alive = m_alive;
                 m_options.camera_monitor(start, i.params(), [weak, alive](bool ok, nlohmann::json result) {
@@ -816,6 +818,8 @@ void SnapmakerDeviceBridge::set_active(bool active)
     if (m_closed || m_active == active)
         return;
     m_active = active;
+    if (!active)
+        stop_camera_if_running();
     if (active) {
         refresh_devices();
         push_state(true);
@@ -858,8 +862,18 @@ void SnapmakerDeviceBridge::tick()
         push_state(false);
 }
 
+void SnapmakerDeviceBridge::stop_camera_if_running()
+{
+    if (m_camera_running.is_null() || !m_options.camera_monitor)
+        return;
+    nlohmann::json params = std::move(m_camera_running);
+    m_camera_running      = nlohmann::json();
+    m_options.camera_monitor(false, params, [](bool, nlohmann::json) {}); // best effort, nobody waits for the reply
+}
+
 void SnapmakerDeviceBridge::shutdown()
 {
+    stop_camera_if_running();
     m_closed = true;
     *m_alive = false;
     m_sswcp.drop_all_subscriptions();

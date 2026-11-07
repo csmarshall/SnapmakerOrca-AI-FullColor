@@ -148,7 +148,7 @@ public:
     explicit SnapmakerDeviceBridge(Options options);
     SnapmakerDeviceBridge(const SnapmakerDeviceBridge&)            = delete;
     SnapmakerDeviceBridge& operator=(const SnapmakerDeviceBridge&) = delete;
-    ~SnapmakerDeviceBridge() { *m_alive = false; }
+    ~SnapmakerDeviceBridge() { stop_camera_if_running(); *m_alive = false; }
 
     // Returns false (and does nothing) after shutdown() or when `page_url` is not the page's own origin.
     bool on_script_message(const std::string& page_url, const std::string& message);
@@ -184,6 +184,10 @@ private:
     void run_query(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done);
     void request_state(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> cb);
     void abandon_state_query();
+    // The page never stops the stream itself when it is hidden or closed, and the machine keeps streaming until told otherwise:
+    // the bridge remembers the {domain, clientid} of the last start and sends one stop for it when the page is hidden or shut down.
+    void           stop_camera_if_running();
+    nlohmann::json m_camera_running; // null when no start is outstanding
     void push_state(bool force);
     std::string connected_dev_id() const;
 
