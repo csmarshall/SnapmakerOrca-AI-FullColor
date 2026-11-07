@@ -1065,6 +1065,50 @@ TEST_CASE("camera bridge commands are registered, relay start/stop and unwrap th
     CHECK(h.reply(1)["payload"]["code"] == 200);
 }
 
+TEST_CASE("a camera left running is stopped once when the page is hidden, shut down or destroyed (#76)", "[SSWCP][device_ui][camera]")
+{
+    const json stop_params = {{"domain", "lan"}, {"clientid", "orca-3d-printer"}};
+    SECTION("hidden")
+    {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+        REQUIRE(h.camera_calls.size() == 1);
+        h.bridge.set_active(false);
+        REQUIRE(h.camera_calls.size() == 2);
+        CHECK_FALSE(h.camera_calls[1].start);
+        CHECK(h.camera_calls[1].params == stop_params);
+        h.bridge.set_active(true);
+        h.bridge.set_active(false);
+        h.bridge.shutdown();
+        CHECK(h.camera_calls.size() == 2);                                   // already stopped: no second stop
+    }
+    SECTION("shutdown")
+    {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+        h.bridge.shutdown();
+        REQUIRE(h.camera_calls.size() == 2);
+        CHECK_FALSE(h.camera_calls[1].start);
+        CHECK(h.camera_calls[1].params == stop_params);
+    }
+    SECTION("the page stopped it itself: nothing more is sent")
+    {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, camera_msg("sw_CameraStartMonitor", kCameraParams));
+        h.bridge.on_script_message(h.good, camera_msg("sw_CameraStopMonitor", stop_params));
+        h.bridge.set_active(false);
+        h.bridge.shutdown();
+        CHECK(h.camera_calls.size() == 2);
+    }
+    SECTION("never started: nothing is sent")
+    {
+        BridgeHarness h;
+        h.bridge.set_active(false);
+        h.bridge.shutdown();
+        CHECK(h.camera_calls.empty());
+    }
+}
+
 TEST_CASE("camera bridge commands refuse bad params without asking the machine, and fail when it fails", "[SSWCP][device_ui][camera]")
 {
     BridgeHarness h;
