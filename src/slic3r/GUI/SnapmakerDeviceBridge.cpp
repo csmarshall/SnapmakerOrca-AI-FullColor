@@ -491,7 +491,7 @@ const std::vector<std::string>& snapmaker_default_state_objects()
 {
     static const std::vector<std::string> objs = {"extruder", "extruder1", "extruder2", "extruder3", "heater_bed", "print_stats",
                                                   "display_status", "virtual_sdcard", "gcode_move", "webhooks", "toolhead",
-                                                  "print_task_config", "machine_state_manager", "idle_timeout", "fan",
+                                                  "print_task_config", "machine_state_manager", "idle_timeout", "fan", "led cavity_led",
                                                   "filament_detect", "motion_report"};
     return objs;
 }
@@ -848,6 +848,7 @@ void SnapmakerDeviceBridge::register_commands()
                     m_options.control(method, rpc_params, [this, weak, alive, method](bool ok, nlohmann::json result) {
                         if (!*alive) return;
                         if (control_method_is_print(method)) m_print_control_busy = false;
+                        if (ok && method == "printer.control.led") push_state(true); // #82: the page reads the LED from the state; do not wait for the poll
                         if (auto inst = weak.lock()) {
                             if (ok) inst->reply_ok(std::move(result));
                             else    inst->handle_general_fail(SSWCPCode::Failure, "control request failed");
