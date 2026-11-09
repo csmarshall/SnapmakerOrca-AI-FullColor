@@ -651,9 +651,11 @@ void SnapmakerDeviceBridge::push_state(bool force)
         m_last_state_status = result["status"];
         // The page applies a push only as a Moonraker notification {method, data:[status, eventtime]} (bundle parser A.Kc.a1H;
         // Snapmaker's own Moonraker_Mqtt callbacks hand it exactly this). A bare {eventtime, status} is dropped (#82).
+        // eventtime comes from the printer: take it only when it is a number (value() throws on any other type)
+        const auto   event_time_it = result.find("eventtime");
+        const double event_time    = event_time_it != result.end() && event_time_it->is_number() ? event_time_it->get<double>() : 0.0;
         m_sswcp.push("sw_SubscribeMachineState",
-                     nlohmann::json{{"method", "notify_status_update"},
-                                    {"data", nlohmann::json::array({result["status"], result.value("eventtime", 0.0)})}});
+                     nlohmann::json{{"method", "notify_status_update"}, {"data", nlohmann::json::array({result["status"], event_time})}});
     });
 }
 

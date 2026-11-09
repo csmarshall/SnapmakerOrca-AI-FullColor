@@ -861,6 +861,19 @@ TEST_CASE("a flood of GetMachineState hits the pending cap with a 429 and still 
     CHECK(too_many == 50);
 }
 
+TEST_CASE("a pushed state survives a printer eventtime that is not a number", "[SSWCP][device_ui]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, BridgeHarness::msg("sw_SubscribeMachineState", "msub"));
+    REQUIRE(h.queries.size() == 1);
+    json odd = moonraker_result(59);
+    odd["eventtime"] = "not-a-number";
+    REQUIRE_NOTHROW(h.queries[0].done(true, odd));
+    REQUIRE(h.sent.size() == 2);
+    CHECK(h.reply(1)["payload"]["data"]["method"] == "notify_status_update");
+    CHECK(h.reply(1)["payload"]["data"]["data"][1] == 0.0);
+}
+
 TEST_CASE("a subscriber added while a poll is in flight still gets an initial state", "[SSWCP][device_ui]")
 {
     BridgeHarness h;
