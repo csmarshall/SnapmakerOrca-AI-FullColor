@@ -7193,6 +7193,10 @@ struct Plater::priv
     MenuFactory menus;
 
     SelectMachineDialog* m_select_machine_dlg = nullptr;
+    // True while the Send dialog's modal loop runs. Work that builds a WebView (the Device tab) must wait until it ends:
+    // WKWebView's synchronous RunScript yields inside the modal session and never returns (#84).
+    bool                  m_select_machine_dlg_running = false;
+    std::function<void()> m_after_select_machine_dlg;
     SendMultiMachinePage* m_send_multi_dlg = nullptr;
     SendToPrinterDialog* m_send_to_sdcard_dlg = nullptr;
 
@@ -13839,7 +13843,14 @@ void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print
         m_select_machine_dlg = new SelectMachineDialog(q);
     m_select_machine_dlg->set_print_type(print_type);
     m_select_machine_dlg->prepare(plate_idx);
+    m_select_machine_dlg_running = true;
     m_select_machine_dlg->ShowModal();
+    m_select_machine_dlg_running = false;
+    if (m_after_select_machine_dlg) {
+        auto after = std::move(m_after_select_machine_dlg);
+        m_after_select_machine_dlg = nullptr;
+        after();
+    }
 }
 
 void Plater::priv::on_action_send_to_multi_machine(SimpleEvent&)
@@ -21243,11 +21254,18 @@ void Plater::print_job_finished(wxCommandEvent &evt)
     // Keep the active session while asynchronous status traffic may still be in flight.
     if (!selected || selected->get_dev_id() != dev_id || selected->connection_type() != "lan")
         dev->set_selected_machine(dev_id);
-    p->main_frame->request_select_tab(TAB_ID_MONITOR);
-    // Selects the status page on a built Device tab; one built by the switch starts there.
-    MonitorPanel* curr_monitor = MonitorPanel::if_built();
-    if(curr_monitor)
-       curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
+    auto show_monitor = [this] {
+        p->main_frame->request_select_tab(TAB_ID_MONITOR);
+        // Selects the status page on a built Device tab; one built by the switch starts there.
+        MonitorPanel* curr_monitor = MonitorPanel::if_built();
+        if(curr_monitor)
+           curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
+    };
+    // The Device tab builds a WebView; doing that inside the Send dialog's modal loop hangs the app (#84), so wait for the dialog to close.
+    if (p->m_select_machine_dlg_running)
+        p->m_after_select_machine_dlg = std::move(show_monitor);
+    else
+        show_monitor();
 }
 
 void Plater::send_job_finished(wxCommandEvent& evt)
