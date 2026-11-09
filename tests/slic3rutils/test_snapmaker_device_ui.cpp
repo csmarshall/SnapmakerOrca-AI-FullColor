@@ -404,7 +404,10 @@ TEST_CASE("sw_SubscribeMachineState acks, pushes the first state, then only chan
     h.queries[0].done(true, moonraker_result(59));
     REQUIRE(h.sent.size() == 2);
     CHECK(h.reply(1)["header"] == json{{"event_id", "msub"}});
-    CHECK(h.reply(1)["payload"]["data"] == moonraker_result(59));
+    // The page only applies a push shaped as a Moonraker notification: {method, data:[status, eventtime]} (#82).
+    CHECK(h.reply(1)["payload"]["data"]["method"] == "notify_status_update");
+    CHECK(h.reply(1)["payload"]["data"]["data"][0] == moonraker_result(59)["status"]);
+    CHECK(h.reply(1)["payload"]["data"]["data"][1] == moonraker_result(59)["eventtime"]);
 
     // Throttle: ticks 1 and 2 do not query; tick 3 does.
     h.bridge.tick(); h.bridge.tick();
@@ -419,7 +422,7 @@ TEST_CASE("sw_SubscribeMachineState acks, pushes the first state, then only chan
     REQUIRE(h.queries.size() == 3);
     h.queries[2].done(true, moonraker_result(60));                 // changed
     REQUIRE(h.sent.size() == 3);
-    CHECK(h.reply(2)["payload"]["data"]["status"]["heater_bed"]["temperature"] == 60);
+    CHECK(h.reply(2)["payload"]["data"]["data"][0]["heater_bed"]["temperature"] == 60);
 
     // A failing poll pushes nothing and does not wedge the next poll.
     h.bridge.tick(); h.bridge.tick(); h.bridge.tick();
@@ -869,7 +872,7 @@ TEST_CASE("a subscriber added while a poll is in flight still gets an initial st
     std::set<std::string> got;
     for (std::size_t i = 0; i < h.sent.size(); ++i) {
         json r = h.reply(i);
-        if (r["header"].contains("event_id") && r["payload"]["data"].contains("status")) got.insert(r["header"]["event_id"].get<std::string>());
+        if (r["header"].contains("event_id") && r["payload"]["data"].contains("method")) got.insert(r["header"]["event_id"].get<std::string>());
     }
     CHECK(got == std::set<std::string>{"first", "second"});
 }
@@ -1654,7 +1657,7 @@ TEST_CASE("a successful sw_ControlLed re-queries the state and pushes it to subs
     REQUIRE(h.sent.size() == pushed + 2);                 // the control reply and the pushed state
     const json last = h.reply(h.sent.size() - 1);
     CHECK(last["header"] == json{{"event_id", "msub"}});
-    CHECK(last["payload"]["data"]["status"]["led cavity_led"]["color_data"] == json::array({json::array({0, 0, 0, 0})}));
+    CHECK(last["payload"]["data"]["data"][0]["led cavity_led"]["color_data"] == json::array({json::array({0, 0, 0, 0})}));
 }
 
 TEST_CASE("the page is rebuilt after a successful light change only (#82)", "[SSWCP][device_ui][control]")

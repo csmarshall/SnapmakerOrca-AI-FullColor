@@ -649,7 +649,11 @@ void SnapmakerDeviceBridge::push_state(bool force)
         if (!force_now && result["status"] == m_last_state_status)
             return;
         m_last_state_status = result["status"];
-        m_sswcp.push("sw_SubscribeMachineState", result);
+        // The page applies a push only as a Moonraker notification {method, data:[status, eventtime]} (bundle parser A.Kc.a1H;
+        // Snapmaker's own Moonraker_Mqtt callbacks hand it exactly this). A bare {eventtime, status} is dropped (#82).
+        m_sswcp.push("sw_SubscribeMachineState",
+                     nlohmann::json{{"method", "notify_status_update"},
+                                    {"data", nlohmann::json::array({result["status"], result.value("eventtime", 0.0)})}});
     });
 }
 
