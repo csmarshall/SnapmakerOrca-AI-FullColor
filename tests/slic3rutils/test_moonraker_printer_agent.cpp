@@ -249,6 +249,14 @@ public:
         m_rejected_script_prefix = std::move(prefix);
     }
 
+    // Makes /printer/gcode/help list exactly these commands (without it the route answers 404, i.e. "unknown").
+    void set_gcode_commands(std::vector<std::string> commands)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_gcode_commands = std::move(commands);
+        m_has_gcode_help = true;
+    }
+
     // Hangs up every connection that is waiting.
     void release()
     {
@@ -378,6 +386,15 @@ private:
             const bool rejected = !m_rejected_script_prefix.empty() && script.rfind(m_rejected_script_prefix, 0) == 0;
             response.result(rejected ? http::status::internal_server_error : http::status::ok);
             response.body() = "{}";
+        } else if (request.target() == "/printer/gcode/help") {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_has_gcode_help) {
+                nlohmann::json result = nlohmann::json::object();
+                for (const std::string& command : m_gcode_commands)
+                    result[command] = "help text";
+                response.result(http::status::ok);
+                response.body() = nlohmann::json{{"result", result}}.dump();
+            }
         } else if (request.target() == "/server/files/directory?path=gcodes") {
             nlohmann::json result = {{"dirs", nlohmann::json::array()}, {"files", nlohmann::json::array()}};
             {
@@ -502,6 +519,8 @@ private:
     std::vector<Upload> m_uploads;
     std::vector<std::string> m_scripts;
     std::string m_rejected_script_prefix;
+    std::vector<std::string> m_gcode_commands;
+    bool                     m_has_gcode_help = false;
     nlohmann::json m_disk_usage = {{"total", 8e9}, {"used", 2e9}, {"free", 6e9}};
 };
 
@@ -782,6 +801,34 @@ TEST_CASE("A print whose preferences are refused does not start", "[MoonrakerPri
     CHECK(scripts[0].rfind("SET_PRINT_PREFERENCE", 0) == 0);
     for (const std::string& script : scripts)
         CHECK(script.find("SDCARD_PRINT_FILE") == std::string::npos);
+}
+
+TEST_CASE("Print preferences are skipped when the printer has no such command", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    printer.set_gcode_commands({"SDCARD_PRINT_FILE", "PRINT_START"});
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    REQUIRE(agent.start_local_print(preference_params(file, true, true, true), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer.scripts().size() == 1);
+    CHECK(printer.scripts()[0] == "SDCARD_PRINT_FILE FILENAME=part.gcode");
+}
+
+TEST_CASE("Print preferences are sent when the printer lists the command", "[MoonrakerPrinterAgent][PrintPreference]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    printer.set_gcode_commands({"SDCARD_PRINT_FILE", "SET_PRINT_PREFERENCE"});
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    REQUIRE(agent.start_local_print(preference_params(file, true, false, true), nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer.scripts().size() == 2);
+    CHECK(printer.scripts()[0].rfind("SET_PRINT_PREFERENCE", 0) == 0);
 }
 
 TEST_CASE("The uploaded plate G-code is identical with the preferences on and off", "[MoonrakerPrinterAgent][PrintPreference]")

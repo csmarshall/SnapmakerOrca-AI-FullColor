@@ -833,7 +833,13 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
 
     // Per-print preferences go to the printer first and the plate's G-code is not touched (Snapmaker Orca's send page,
     // resources/web/flutter_web/main.b347974c91352c2f.js setPrePrintConfiguration ~39855). A refused script means no print.
-    if (supports_print_preferences()) {
+    // Klipper answers an unknown command on its console, not with an HTTP error, so ask the printer first: community firmware
+    // such as 2.0.0-paxx12 has no SET_PRINT_PREFERENCE (seen on a real U1) and the lines would silently do nothing (#85).
+    bool preferences_known_unsupported = false;
+    if (supports_print_preferences() && gcode_command_known(device_info.base_url, device_info.api_key, "SET_PRINT_PREFERENCE", preferences_known_unsupported) &&
+        preferences_known_unsupported)
+        BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: the printer has no SET_PRINT_PREFERENCE command, time-lapse / bed-leveling / flow-calibration choices are not applied";
+    if (supports_print_preferences() && !preferences_known_unsupported) {
         const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
                                                                                 params.task_bed_leveling);
         if (!is_snapmaker_print_preference_script(preferences) || !send_gcode_sync(device_info.dev_id, preferences)) {
@@ -1709,6 +1715,20 @@ void MoonrakerPrinterAgent::send_gcode_async(const std::string& dev_id, const st
             }
         })
         .perform();
+}
+
+// Asks /printer/gcode/help whether the printer registers `command`. Returns false when the list could not be read (the answer is
+// then unknown); otherwise sets `missing` to true when the command is absent.
+bool MoonrakerPrinterAgent::gcode_command_known(const std::string& base_url, const std::string& api_key, const std::string& command, bool& missing) const
+{
+    nlohmann::json json;
+    std::string    error;
+    if (!get_json(join_url(base_url, "/printer/gcode/help"), api_key, [] { return false; }, json, error))
+        return false;
+    if (!json.contains("result") || !json["result"].is_object())
+        return false;
+    missing = !json["result"].contains(command);
+    return true;
 }
 
 bool MoonrakerPrinterAgent::send_gcode_sync(const std::string& dev_id, const std::string& gcode) const

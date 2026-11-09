@@ -222,6 +222,7 @@ private:
                               nlohmann::json&              status,
                               std::string&                 error,
                               const std::function<bool()>& cancelled) const;
+    bool gcode_command_known(const std::string& base_url, const std::string& api_key, const std::string& command, bool& missing) const;
     bool send_gcode_sync(const std::string& dev_id, const std::string& gcode) const;
     void send_gcode_async(const std::string& dev_id, const std::string& gcode,
                           std::function<void(bool)> on_result = {}) const;
