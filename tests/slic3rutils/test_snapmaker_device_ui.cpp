@@ -94,7 +94,6 @@ struct BridgeHarness
     bool                              control_ok = true;
     bool                              hold_control = false;
     std::vector<std::function<void(bool, json)>> control_pending;
-    int                               reloads = 0; // reload_page requests (#82)
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -104,7 +103,6 @@ struct BridgeHarness
               o.http_host  = "http://127.0.0.1:5000";
               o.run_script = [this](const std::string& js) { sent.push_back(js); };
               o.devices    = [this] { return devices; };
-              o.reload_page = [this] { ++reloads; };
               o.query_state = [this](const std::vector<std::string>& objs, std::function<void(bool, json)> done) {
                   if (!have_source) { done(false, json::object()); return; }
                   queries.push_back({objs, std::move(done)});
@@ -1671,27 +1669,6 @@ TEST_CASE("a successful sw_ControlLed re-queries the state and pushes it to subs
     const json last = h.reply(h.sent.size() - 1);
     CHECK(last["header"] == json{{"event_id", "msub"}});
     CHECK(last["payload"]["data"]["data"][0]["led cavity_led"]["color_data"] == json::array({json::array({0, 0, 0, 0})}));
-}
-
-TEST_CASE("the page is rebuilt after a successful light change only (#82)", "[SSWCP][device_ui][control]")
-{
-    {
-        BridgeHarness h;
-        h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 0}}));
-        CHECK(h.reloads == 1);
-    }
-    {
-        BridgeHarness h;
-        h.control_ok = false;
-        h.bridge.on_script_message(h.good, control_msg("sw_ControlLed", {{"name", "cavity_led"}, {"white", 0}}));
-        CHECK(h.reloads == 0);
-    }
-    {
-        BridgeHarness h;
-        h.bridge.on_script_message(h.good, control_msg("sw_ControlPrintSpeed", {{"percentage", 100}}));
-        h.bridge.on_script_message(h.good, control_msg("sw_ControlMainFan", {{"speed", 50}}));
-        CHECK(h.reloads == 0);
-    }
 }
 
 TEST_CASE("a failed sw_ControlLed does not refresh the state (#82)", "[SSWCP][device_ui][control]")
