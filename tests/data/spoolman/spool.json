@@ -1,0 +1,1098 @@
+{
+  "result": [
+    {
+      "id": 1,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 2,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "PolyDissolve™ S1 (PVA) Natural",
+        "vendor": {
+          "id": 2,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "Polymaker",
+          "extra": {}
+        },
+        "material": "PVA",
+        "density": 1.13,
+        "diameter": 1.75,
+        "weight": 750.0,
+        "spool_weight": 125.0,
+        "color_hex": "E8E6D0",
+        "external_id": "polymaker_pva_polydissolves1(pva)natural_750_175_c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 750.0,
+      "initial_weight": 750.0,
+      "spool_weight": 125.0,
+      "used_weight": 0.0,
+      "remaining_length": 275941.38589167333,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 2,
+      "registered": "2026-10-15T22:21:38Z",
+      "first_used": "2026-10-25T03:31:54Z",
+      "last_used": "2026-11-05T13:27:48Z",
+      "filament": {
+        "id": 3,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Transparent",
+        "vendor": {
+          "id": 3,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "Sunlu",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.23,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 209.0,
+        "settings_extruder_temp": 235,
+        "settings_bed_temp": 80,
+        "color_hex": "C4C2C8",
+        "external_id": "sunlu_petg_transparent_1000_175_p",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 588.7767126000094,
+      "initial_weight": 1000.0,
+      "spool_weight": 209.0,
+      "used_weight": 411.22328739999057,
+      "remaining_length": 199012.12371037048,
+      "used_length": 138997.37879108306,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0401005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 3,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 4,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Transparent Red",
+        "vendor": {
+          "id": 3,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "Sunlu",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.23,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 209.0,
+        "settings_extruder_temp": 255,
+        "settings_bed_temp": 80,
+        "color_hex": "FF4747",
+        "external_id": "sunlu_petg_transparentred_1000_175_p",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 209.0,
+      "used_weight": 0.0,
+      "remaining_length": 338009.50250145356,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 4,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 5,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Transparent Blue",
+        "vendor": {
+          "id": 3,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "Sunlu",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.23,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 209.0,
+        "settings_extruder_temp": 255,
+        "settings_bed_temp": 80,
+        "color_hex": "3A87FE",
+        "external_id": "sunlu_petg_transparentblue_1000_175_p",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 209.0,
+      "used_weight": 0.0,
+      "remaining_length": 338009.50250145356,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 5,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 6,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Transparent Green",
+        "vendor": {
+          "id": 3,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "Sunlu",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.23,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 209.0,
+        "settings_extruder_temp": 255,
+        "settings_bed_temp": 80,
+        "color_hex": "44F867",
+        "external_id": "sunlu_petg_transparentgreen_1000_175_p",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 209.0,
+      "used_weight": 0.0,
+      "remaining_length": 338009.50250145356,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 6,
+      "registered": "2026-10-15T22:21:38Z",
+      "first_used": "2026-10-16T04:17:00Z",
+      "last_used": "2026-10-31T04:09:37Z",
+      "filament": {
+        "id": 7,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Blue",
+        "vendor": {
+          "id": 4,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "CHCKX",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.24,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 250.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 75,
+        "color_hex": "61B8FF",
+        "external_id": "ofd_c4868180-f7dc-4d13-8c24-54fc0903de00",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 437.45614395605116,
+      "initial_weight": 1000.0,
+      "spool_weight": 250.0,
+      "used_weight": 562.5438560439488,
+      "remaining_length": 146671.87928168598,
+      "used_length": 188611.74013507843,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0402005A5A5A5A\""
+      },
+      "tags": [
+        {
+          "uid": "0402005A5A5A5A",
+          "added": "2026-10-16T02:52:51Z"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 8,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Black",
+        "vendor": {
+          "id": 5,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "Overture",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.25,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 132.0,
+        "color_hex": "000000",
+        "external_id": "overture_petg_black_1000_175_c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 132.0,
+      "used_weight": 0.0,
+      "remaining_length": 332601.35046143027,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 8,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 9,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "PCTG Black",
+        "vendor": {
+          "id": 4,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "CHCKX",
+          "extra": {}
+        },
+        "material": "PCTG",
+        "density": 1.21,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "color_hex": "000000",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "used_weight": 0.0,
+      "remaining_length": 343596.4364270974,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 9,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 10,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Glow PLA Green",
+        "vendor": {
+          "id": 6,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "YOUSU",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.24,
+        "diameter": 1.75,
+        "weight": 250.0,
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 250.0,
+      "initial_weight": 250.0,
+      "used_weight": 0.0,
+      "remaining_length": 83820.9048541911,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 10,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 11,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Glow PLA Blue",
+        "vendor": {
+          "id": 6,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "YOUSU",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.24,
+        "diameter": 1.75,
+        "weight": 250.0,
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 250.0,
+      "initial_weight": 250.0,
+      "used_weight": 0.0,
+      "remaining_length": 83820.9048541911,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 11,
+      "registered": "2026-10-15T22:21:38Z",
+      "first_used": "2026-10-31T05:03:53Z",
+      "last_used": "2026-10-31T17:40:07Z",
+      "filament": {
+        "id": 12,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Glow PLA Purple",
+        "vendor": {
+          "id": 6,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "YOUSU",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.24,
+        "diameter": 1.75,
+        "weight": 250.0,
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 0.0,
+      "initial_weight": 250.0,
+      "used_weight": 257.3936864991928,
+      "remaining_length": 0.0,
+      "used_length": 86299.88682447333,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0403005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 12,
+      "registered": "2026-10-15T22:21:38Z",
+      "filament": {
+        "id": 13,
+        "registered": "2026-10-15T22:21:38Z",
+        "name": "Glow PLA Rainbow",
+        "vendor": {
+          "id": 6,
+          "registered": "2026-10-15T22:21:38Z",
+          "name": "YOUSU",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.24,
+        "diameter": 1.75,
+        "weight": 250.0,
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 250.0,
+      "initial_weight": 250.0,
+      "used_weight": 0.0,
+      "remaining_length": 83820.9048541911,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 13,
+      "registered": "2026-10-15T23:07:32Z",
+      "filament": {
+        "id": 14,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "PETG HF White",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.3,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 70,
+        "color_hex": "F4F9FF",
+        "external_id": "ofd_c8972b14-92ac-4703-876a-c89b1b0b79b5",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "used_weight": 0.0,
+      "remaining_length": 319808.9908282983,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 14,
+      "registered": "2026-10-15T23:07:32Z",
+      "first_used": "2026-10-19T20:52:05Z",
+      "last_used": "2026-10-20T17:31:55Z",
+      "filament": {
+        "id": 14,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "PETG HF White",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.3,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 70,
+        "color_hex": "F4F9FF",
+        "external_id": "ofd_c8972b14-92ac-4703-876a-c89b1b0b79b5",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 580.9951281451317,
+      "initial_weight": 1000.0,
+      "used_weight": 419.0048718548683,
+      "remaining_length": 185807.46560825247,
+      "used_length": 134001.5252200459,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"\""
+      },
+      "tags": []
+    },
+    {
+      "id": 15,
+      "registered": "2026-10-15T23:07:32Z",
+      "first_used": "2026-10-19T04:59:18Z",
+      "last_used": "2026-11-07T17:53:26Z",
+      "filament": {
+        "id": 15,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "PETG HF Black",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.3,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 70,
+        "color_hex": "16171B",
+        "external_id": "ofd_9000a567-f28b-49a0-b33c-25cbad275055",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 395.89768710140834,
+      "initial_weight": 1000.0,
+      "used_weight": 604.1023128985917,
+      "remaining_length": 126611.63978315883,
+      "used_length": 193197.3510451395,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0404005a5a5a5a\""
+      },
+      "tags": [
+        {
+          "uid": "0404005A5A5A5A",
+          "added": "2026-10-18T01:53:24Z"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "registered": "2026-10-15T23:07:32Z",
+      "filament": {
+        "id": 16,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "PETG HF Red",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.3,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 70,
+        "color_hex": "FF1523",
+        "external_id": "ofd_25925a9b-47ed-4192-bee6-0bcb8e4bd35c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "used_weight": 0.0,
+      "remaining_length": 319808.9908282983,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": [
+        {
+          "uid": "0405005A5A5A5A",
+          "added": "2026-10-18T01:57:33Z"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "registered": "2026-10-15T23:07:32Z",
+      "first_used": "2026-10-19T05:03:49Z",
+      "last_used": "2026-11-05T22:18:31Z",
+      "filament": {
+        "id": 16,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "PETG HF Red",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.3,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 70,
+        "color_hex": "FF1523",
+        "external_id": "ofd_25925a9b-47ed-4192-bee6-0bcb8e4bd35c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 609.9224467658444,
+      "initial_weight": 1000.0,
+      "used_weight": 390.07755323415563,
+      "remaining_length": 195058.68218371118,
+      "used_length": 124750.30864458713,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0405005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 18,
+      "registered": "2026-10-15T23:07:32Z",
+      "filament": {
+        "id": 17,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "Matte PLA Ivory White",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.31,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 210,
+        "settings_bed_temp": 42,
+        "color_hex": "FFFFFF",
+        "external_id": "ofd_4b931042-9c8f-43bc-bb6a-ba6669e44764",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "used_weight": 0.0,
+      "remaining_length": 317367.7008219755,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": []
+    },
+    {
+      "id": 19,
+      "registered": "2026-10-15T23:07:32Z",
+      "first_used": "2026-10-31T22:20:51Z",
+      "last_used": "2026-11-04T01:49:04Z",
+      "filament": {
+        "id": 17,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "Matte PLA Ivory White",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.31,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 210,
+        "settings_bed_temp": 42,
+        "color_hex": "FFFFFF",
+        "external_id": "ofd_4b931042-9c8f-43bc-bb6a-ba6669e44764",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 534.6532652355734,
+      "initial_weight": 1000.0,
+      "used_weight": 465.34673476442657,
+      "remaining_length": 169681.67752477576,
+      "used_length": 147686.0232971997,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0406005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 20,
+      "registered": "2026-10-15T23:07:32Z",
+      "first_used": "2026-10-31T22:19:51Z",
+      "last_used": "2026-11-04T01:48:04Z",
+      "filament": {
+        "id": 18,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "Matte PLA Carbon Black",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.31,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 210,
+        "settings_bed_temp": 42,
+        "color_hex": "000000",
+        "external_id": "ofd_7bd6d1e4-d0e1-445b-b7b6-cf019a9955e8",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 988.4063415047785,
+      "initial_weight": 1000.0,
+      "used_weight": 11.593658495221439,
+      "remaining_length": 313688.24808123184,
+      "used_length": 3679.452740743592,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0407005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 21,
+      "registered": "2026-10-16T02:28:19Z",
+      "first_used": "2026-11-02T16:12:11Z",
+      "last_used": "2026-11-03T12:56:40Z",
+      "filament": {
+        "id": 1,
+        "registered": "2026-10-14T16:59:31Z",
+        "name": "PETG+ Black",
+        "vendor": {
+          "id": 1,
+          "registered": "2026-10-14T16:59:31Z",
+          "name": "Inland",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.23,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "article_number": "PETG+175SB1",
+        "settings_extruder_temp": 240,
+        "settings_bed_temp": 70,
+        "color_hex": "000000",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 987.7518015124318,
+      "initial_weight": 1000.0,
+      "used_weight": 12.248198487568125,
+      "remaining_length": 333869.49502413155,
+      "used_length": 4140.0074773219585,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0408005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 22,
+      "registered": "2026-10-18T01:55:25Z",
+      "filament": {
+        "id": 18,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "Matte PLA Carbon Black",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.31,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 210,
+        "settings_bed_temp": 42,
+        "color_hex": "000000",
+        "external_id": "ofd_7bd6d1e4-d0e1-445b-b7b6-cf019a9955e8",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 0.0,
+      "used_weight": 0.0,
+      "remaining_length": 317367.7008219755,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": [
+        {
+          "uid": "0409005A5A5A5A",
+          "added": "2026-10-19T19:13:51Z"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "registered": "2026-10-19T15:51:14Z",
+      "first_used": "2026-10-19T16:25:05Z",
+      "last_used": "2026-11-05T13:34:43Z",
+      "filament": {
+        "id": 19,
+        "registered": "2026-10-19T15:51:04Z",
+        "name": "TPU",
+        "vendor": {
+          "id": 1,
+          "registered": "2026-10-14T16:59:31Z",
+          "name": "Inland",
+          "extra": {}
+        },
+        "material": "TPU",
+        "density": 1.21,
+        "diameter": 1.75,
+        "settings_extruder_temp": 220,
+        "settings_bed_temp": 50,
+        "color_hex": "E22400",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 973.854149800386,
+      "initial_weight": 1000.0,
+      "spool_weight": 0.0,
+      "used_weight": 26.145850199614014,
+      "remaining_length": 334612.8154711533,
+      "used_length": 8983.620955944089,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"040a005a5a5a5a\""
+      },
+      "tags": [
+        {
+          "uid": "040A005A5A5A5A",
+          "added": "2026-10-19T15:51:16Z"
+        },
+        {
+          "uid": "0401005A5A5A5A",
+          "added": "2026-10-19T16:10:56Z"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "registered": "2026-10-20T17:33:01Z",
+      "filament": {
+        "id": 14,
+        "registered": "2026-10-15T23:07:32Z",
+        "name": "PETG HF White",
+        "vendor": {
+          "id": 7,
+          "registered": "2026-10-15T23:07:32Z",
+          "name": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.3,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 250,
+        "settings_bed_temp": 70,
+        "color_hex": "F4F9FF",
+        "external_id": "ofd_c8972b14-92ac-4703-876a-c89b1b0b79b5",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 0.0,
+      "used_weight": 0.0,
+      "remaining_length": 319808.9908282983,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {},
+      "tags": [
+        {
+          "uid": "040B005A5A5A5A",
+          "added": "2026-10-20T17:33:01Z"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "registered": "2026-10-20T18:06:30Z",
+      "first_used": "2026-10-20T21:00:47Z",
+      "last_used": "2026-10-25T00:58:23Z",
+      "filament": {
+        "id": 20,
+        "registered": "2026-10-20T18:06:30Z",
+        "name": "White",
+        "vendor": {
+          "id": 8,
+          "registered": "2026-10-20T18:06:30Z",
+          "name": "Overture",
+          "external_id": "Overture",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.25,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 132.0,
+        "color_hex": "F5F5F4",
+        "external_id": "overture_petg_white_1000_175_c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 0.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 132.0,
+      "used_weight": 1180.948677237316,
+      "remaining_length": 0.0,
+      "used_length": 392785.12487477105,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"040C005A5A5A5A\""
+      },
+      "tags": [
+        {
+          "uid": "040C005A5A5A5A",
+          "added": "2026-10-20T19:35:33Z"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "registered": "2026-10-20T18:06:30Z",
+      "first_used": "2026-10-20T20:51:07Z",
+      "last_used": "2026-11-05T22:30:33Z",
+      "filament": {
+        "id": 20,
+        "registered": "2026-10-20T18:06:30Z",
+        "name": "White",
+        "vendor": {
+          "id": 8,
+          "registered": "2026-10-20T18:06:30Z",
+          "name": "Overture",
+          "external_id": "Overture",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.25,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 132.0,
+        "color_hex": "F5F5F4",
+        "external_id": "overture_petg_white_1000_175_c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 0.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 132.0,
+      "used_weight": 1008.9252111950142,
+      "remaining_length": 0.0,
+      "used_length": 335569.8877580455,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"040d005a5a5a5a,040e005a5a5a5a\""
+      },
+      "tags": [
+        {
+          "uid": "040D005A5A5A5A",
+          "added": "2026-10-20T19:36:42Z"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "registered": "2026-10-23T18:21:03Z",
+      "filament": {
+        "id": 20,
+        "registered": "2026-10-20T18:06:30Z",
+        "name": "White",
+        "vendor": {
+          "id": 8,
+          "registered": "2026-10-20T18:06:30Z",
+          "name": "Overture",
+          "external_id": "Overture",
+          "extra": {}
+        },
+        "material": "PETG",
+        "density": 1.25,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 132.0,
+        "color_hex": "F5F5F4",
+        "external_id": "overture_petg_white_1000_175_c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 1000.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 132.0,
+      "used_weight": 0.0,
+      "remaining_length": 332601.35046143027,
+      "used_length": 0.0,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"\""
+      },
+      "tags": []
+    },
+    {
+      "id": 28,
+      "registered": "2026-10-30T23:00:45Z",
+      "first_used": "2026-10-31T04:39:22Z",
+      "last_used": "2026-11-02T15:05:19Z",
+      "filament": {
+        "id": 21,
+        "registered": "2026-10-30T23:00:45Z",
+        "name": "Matte PLA Lava Orange",
+        "vendor": {
+          "id": 9,
+          "registered": "2026-10-30T23:00:45Z",
+          "name": "Snapmaker",
+          "external_id": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.31,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 210,
+        "settings_bed_temp": 42,
+        "color_hex": "F78E0E",
+        "external_id": "ofd_3cfe8278-d718-483d-9944-71b381e9ee05",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 854.9991823968535,
+      "initial_weight": 1000.0,
+      "used_weight": 145.00081760314657,
+      "remaining_length": 271349.12472195824,
+      "used_length": 46018.57610001725,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"040f005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 29,
+      "registered": "2026-10-30T23:00:45Z",
+      "first_used": "2026-10-31T05:07:09Z",
+      "last_used": "2026-11-02T15:06:19Z",
+      "filament": {
+        "id": 21,
+        "registered": "2026-10-30T23:00:45Z",
+        "name": "Matte PLA Lava Orange",
+        "vendor": {
+          "id": 9,
+          "registered": "2026-10-30T23:00:45Z",
+          "name": "Snapmaker",
+          "external_id": "Snapmaker",
+          "extra": {}
+        },
+        "material": "PLA",
+        "density": 1.31,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "settings_extruder_temp": 210,
+        "settings_bed_temp": 42,
+        "color_hex": "F78E0E",
+        "external_id": "ofd_3cfe8278-d718-483d-9944-71b381e9ee05",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 773.1888839846011,
+      "initial_weight": 1000.0,
+      "used_weight": 226.81111601539888,
+      "remaining_length": 245385.17841130198,
+      "used_length": 71982.52241067348,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0410005a5a5a5a\""
+      },
+      "tags": []
+    },
+    {
+      "id": 30,
+      "registered": "2026-11-05T22:28:39Z",
+      "first_used": "2026-11-05T22:34:04Z",
+      "last_used": "2026-11-11T14:30:02Z",
+      "filament": {
+        "id": 22,
+        "registered": "2026-11-05T22:28:39Z",
+        "name": "PolyLite™ ABS Light Grey",
+        "vendor": {
+          "id": 10,
+          "registered": "2026-11-05T22:28:39Z",
+          "name": "Polymaker",
+          "external_id": "Polymaker",
+          "extra": {}
+        },
+        "material": "ABS",
+        "density": 1.12,
+        "diameter": 1.75,
+        "weight": 1000.0,
+        "spool_weight": 140.0,
+        "color_hex": "A9A9A9",
+        "external_id": "polymaker_abs_polyliteabsdarkgrey_1000_175_c",
+        "extra": {},
+        "tags": []
+      },
+      "remaining_weight": 0.0,
+      "initial_weight": 1000.0,
+      "spool_weight": 140.0,
+      "used_weight": 1039.1902890215322,
+      "remaining_length": 0.0,
+      "used_length": 385754.5686550956,
+      "archived": false,
+      "extra": {
+        "card_uids": "\"0411005a5a5a5a\""
+      },
+      "tags": []
+    }
+  ]
+}

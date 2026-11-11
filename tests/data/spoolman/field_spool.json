@@ -1,0 +1,12 @@
+{
+  "result": [
+    {
+      "name": "Card UIDs",
+      "order": 1,
+      "field_type": "text",
+      "default_value": "\"\"",
+      "key": "card_uids",
+      "entity_type": "spool"
+    }
+  ]
+}
