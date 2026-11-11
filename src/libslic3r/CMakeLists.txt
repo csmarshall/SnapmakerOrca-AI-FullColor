@@ -446,6 +446,8 @@ set(lisbslic3r_sources
     ShortEdgeCollapse.hpp
     ShortestPath.cpp
     ShortestPath.hpp
+    Spoolman/SpoolmanCatalog.cpp
+    Spoolman/SpoolmanCatalog.hpp
     SLA/AGGRaster.hpp
     SLA/BoostAdapter.hpp
     SLA/Clustering.cpp
