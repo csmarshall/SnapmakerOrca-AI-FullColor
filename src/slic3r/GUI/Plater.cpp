@@ -6941,6 +6941,21 @@ std::string& Sidebar::get_search_line()
 
 static std::map<std::string, std::string> printer_thumbnails = {};
 
+// Path of the vendor profile's cover picture for a printer model (the image the printer setup and the sidebar show), or "" if there is none.
+// Shared with the Send dialog's machine icon (#89).
+std::string find_printer_cover(const PresetBundle& preset_bundle, const std::string& model_name)
+{
+    const std::string cover_file = model_name + "_cover.png";
+    for (const auto& vendor_profile : preset_bundle.vendors)
+        for (const auto& vendor_model : vendor_profile.second.models) {
+            if (vendor_model.name != model_name) continue;
+            boost::filesystem::path cover_path = boost::filesystem::absolute(boost::filesystem::path(resources_dir()) / "/profiles/" /
+                                                                             vendor_profile.second.id / cover_file).make_preferred();
+            if (boost::filesystem::exists(cover_path)) return cover_path.string();
+        }
+    return {};
+}
+
 void Sidebar::update_printer_thumbnail()
 {
     auto& preset_bundle = wxGetApp().preset_bundle;
@@ -6961,24 +6976,13 @@ void Sidebar::update_printer_thumbnail()
         */
 
         // Orca: try to use the printer model cover as the thumbnail
-        const auto model_name = selected_preset.config.opt_string("printer_model");
-        std::string cover_file = model_name + "_cover.png";
-        for (auto vendor_profile : preset_bundle->vendors) {
-            for (auto vendor_model : vendor_profile.second.models) {
-                if (vendor_model.name == model_name) {
-                    // Try to find the printer cover
-                    boost::filesystem::path cover_path = boost::filesystem::absolute(boost::filesystem::path(resources_dir()) /
-                                                                                     "/profiles/" / vendor_profile.second.id / cover_file)
-                                                             .make_preferred();
-                    if (boost::filesystem::exists(cover_path)) {
-                        try {
-                            p->image_printer->SetBitmap(create_scaled_bitmap(cover_path.string(), this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
-                            printer_thumbnails[printer_type] = cover_path.string(); // Cache the path so we don't look up again
-                            return;
-                        } catch (...) {}
-                    }
-                }
-            }
+        const std::string cover_path = find_printer_cover(*preset_bundle, selected_preset.config.opt_string("printer_model"));
+        if (!cover_path.empty()) {
+            try {
+                p->image_printer->SetBitmap(create_scaled_bitmap(cover_path, this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
+                printer_thumbnails[printer_type] = cover_path; // Cache the path so we don't look up again
+                return;
+            } catch (...) {}
         }
         p->image_printer->SetBitmap(create_scaled_bitmap("printer_placeholder", this, PRINTER_THUMBNAIL_SIZE.GetHeight()));
         printer_thumbnails[printer_type] = "printer_placeholder"; // Avoid unnecessary try

@@ -60,6 +60,7 @@ class TextInput;
 
 namespace Slic3r {
 
+class PresetBundle;
 struct PlateData;
 typedef std::vector<PlateData*> PlateDataPtrs;
 struct PublishedMaterialEntry;
@@ -342,6 +343,9 @@ private:
     wxBoxSizer* m_scrolled_sizer = nullptr;
     bool            m_need_auto_sync_after_connect_printer{false};
 };
+
+// Vendor-profile cover picture path for a printer model, or "" (#89).
+std::string find_printer_cover(const PresetBundle& preset_bundle, const std::string& model_name);
 
 class Plater: public wxPanel
 {

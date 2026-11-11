@@ -7122,16 +7122,24 @@ void PrinterInfoBox::SetPrinters(const std::vector<MachineObject*>& sorted_print
         drop_item.text = shown_dev_name;
         drop_item.text_static_tips = _get_tips(obj);
 
-        // update image
+        // update image: non-Bambu devices have no printer_preview_<type> resource, so use the cover picture the printer setup and sidebar
+        // show for the selected printer model (#89); Bambu printers keep their own preview.
+        const bool bambu_icon = NetworkAgentFactory::printer_agent_supports_bambu_print_options(obj->printer_agent_id);
+        std::string cover;
+        if (!bambu_icon) {
+            auto& bundle = wxGetApp().preset_bundle;
+            cover = find_printer_cover(*bundle, bundle->printers.get_edited_preset().config.opt_string("printer_model"));
+        }
         try
         {
-            drop_item.icon = create_scaled_bitmap("printer_preview_" + obj->printer_type, this, 32);
-            drop_item.icon_textctrl = create_scaled_bitmap("printer_preview_" + obj->printer_type, this, 52);
+            const std::string icon_name = cover.empty() ? "printer_preview_" + obj->printer_type : cover;
+            drop_item.icon = create_scaled_bitmap(icon_name, this, 32);
+            drop_item.icon_textctrl = create_scaled_bitmap(icon_name, this, 52);
         }
         catch (const std::exception&)
         {
-            drop_item.icon = create_scaled_bitmap("printer_preview_BL-P001", this, 32);
-            drop_item.icon_textctrl = create_scaled_bitmap("printer_preview_BL-P001", this, 52);
+            drop_item.icon = create_scaled_bitmap("printer_placeholder", this, 32);
+            drop_item.icon_textctrl = create_scaled_bitmap("printer_placeholder", this, 52);
         }
 
         drop_item.tip = obj->get_printer_type_display_str();
