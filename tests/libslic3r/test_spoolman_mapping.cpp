@@ -568,6 +568,7 @@ TEST_CASE("Spoolman mapping: price is per spool, cost is per kg", "[Spoolman]")
     f.price  = 15;
     f.weight = 750;
     auto r = map_filament(f, make_parent());
+    REQUIRE(find(r, "filament_cost") != nullptr);
     CHECK(find(r, "filament_cost")->value == "20"); // 15 per 750 g = 20 per kg, computed by hand
     CHECK(find(r, "filament_cost")->source == "native:price");
     f.weight.reset();
@@ -671,14 +672,30 @@ TEST_CASE("Spoolman allowlist: exactly the expected filament options are reachab
         CHECK(is_filament_option(k));
 }
 
+// True when the allowlist entry's kind agrees with the option's ConfigOptionDef type (vector-ness ignored).
+static bool kind_matches_definition(const AllowedKey &a)
+{
+    const ConfigOptionDef *def = print_config_def.get(a.key);
+    if (def == nullptr)
+        return false;
+    const auto base = static_cast<ConfigOptionType>(def->type & ~coVectorType);
+    switch (a.kind) {
+    case AllowedKind::Float: return base == coFloat;
+    case AllowedKind::Int: return base == coInt;
+    case AllowedKind::Bool: return base == coBool;
+    case AllowedKind::Text:
+    case AllowedKind::Colour: return base == coString;
+    }
+    return false;
+}
+
 TEST_CASE("Spoolman allowlist: every entry has finite limits and matches its option type", "[Spoolman]")
 {
     for (const AllowedKey &a : spoolman_allowlist()) {
         INFO(a.key);
-        const ConfigOptionDef *def = print_config_def.get(a.key);
-        REQUIRE(def != nullptr);
+        REQUIRE(print_config_def.get(a.key) != nullptr);
         CHECK(is_filament_option(a.key));
-        const auto base = static_cast<ConfigOptionType>(def->type & ~coVectorType);
+        CHECK(kind_matches_definition(a));
         switch (a.kind) {
         case AllowedKind::Float:
         case AllowedKind::Int:
@@ -686,17 +703,25 @@ TEST_CASE("Spoolman allowlist: every entry has finite limits and matches its opt
             CHECK(std::isfinite(a.hi));
             CHECK(a.lo < a.hi);
             CHECK(a.hi < 1e6);
-            CHECK(base == (a.kind == AllowedKind::Float ? coFloat : coInt));
             CHECK_FALSE(a.native_only);
             break;
-        case AllowedKind::Bool: CHECK(base == coBool); break;
+        case AllowedKind::Bool: break;
         case AllowedKind::Text:
         case AllowedKind::Colour:
-            CHECK(base == coString);
             CHECK(a.native_only); // strings are never reachable from extra/ofd
             break;
         }
     }
+}
+
+TEST_CASE("Spoolman allowlist: the kind-vs-definition check can fail", "[Spoolman]")
+{
+    // filament_cost is a float option, nozzle_temperature an int option, filament_vendor a string option
+    CHECK(kind_matches_definition({"filament_cost", AllowedKind::Float, 0, false, 1000, false}));
+    CHECK_FALSE(kind_matches_definition({"filament_cost", AllowedKind::Int, 0, false, 1000, false}));
+    CHECK_FALSE(kind_matches_definition({"nozzle_temperature", AllowedKind::Float, 0, false, 500, false}));
+    CHECK_FALSE(kind_matches_definition({"filament_vendor", AllowedKind::Bool, 0, false, 0, true}));
+    CHECK_FALSE(kind_matches_definition({"no_such_option_xyz", AllowedKind::Float, 0, false, 1, false}));
 }
 
 TEST_CASE("Spoolman allowlist: string options and loose temperature-like keys are rejected from ofd and extra", "[Spoolman]")
