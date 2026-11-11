@@ -162,9 +162,9 @@ TEST_CASE("Spoolman catalog: extras are JSON-decoded", "[Spoolman]")
     CHECK(f.extras.at("variant").empty());
     CHECK(f.extras.at("variant") != "\"\"");
     CHECK(f.extras.at("s") == "hi");
-    CHECK(f.extras.at("n") == "3"); // valid JSON but not a string: raw kept
+    CHECK(f.extras.at("n") == "3"); // a decoded number is decoded, not flagged
     CHECK(f.extras.at("bad") == "not json {");
-    CHECK(f.extras_undecoded == std::set<std::string>{"bad", "n"});
+    CHECK(f.extras_undecoded == std::set<std::string>{"bad"});
 
     // spool fixture: card_uids "\"\"" decoded to empty text, not a 2-character uid
     auto sp = parse_spools_text(load_spoolman_text("spool.json"));
@@ -337,8 +337,17 @@ TEST_CASE("Spoolman catalog: extras safety", "[Spoolman]")
     CHECK(b.items[0].extras_undecoded.count("big") == 1);
     CHECK(b.items[0].extras.at("big") == big);
 
-    // decodes to something that is not a string: raw text kept and flagged
-    for (const char *raw : {"1E5", "123456789012345678901", "null", "true", "3", "[\"a\",\"b\"]", "{\"k\":1}"}) {
+    // numbers and booleans decode to canonical text (Spoolman stores json.dumps(value)); the exact number text is kept (no double round trip)
+    for (auto [raw, want] : {std::pair<const char *, const char *>{"0.98", "0.98"}, {"6", "6"}, {"true", "true"}, {"false", "false"},
+                             {"1E5", "1E5"}, {"123456789012345678901", "123456789012345678901"}, {" 1e5 ", "1e5"}}) {
+        INFO(raw);
+        auto e = parse_filaments(json::array({json{{"id", 1}, {"extra", json{{"k", raw}}}}}));
+        REQUIRE(e.status == ParseStatus::Ok);
+        CHECK(e.items[0].extras.at("k") == want);
+        CHECK(e.items[0].extras_undecoded.empty());
+    }
+    // decodes to an array, object or null: raw text kept and flagged
+    for (const char *raw : {"null", "[50,60]", "[\"a\",\"b\"]", "{\"k\":1}"}) {
         INFO(raw);
         auto e = parse_filaments(json::array({json{{"id", 1}, {"extra", json{{"k", raw}}}}}));
         REQUIRE(e.status == ParseStatus::Ok);

@@ -448,6 +448,8 @@ set(lisbslic3r_sources
     ShortestPath.hpp
     Spoolman/SpoolmanCatalog.cpp
     Spoolman/SpoolmanCatalog.hpp
+    Spoolman/SpoolmanMapping.cpp
+    Spoolman/SpoolmanMapping.hpp
     SLA/AGGRaster.hpp
     SLA/BoostAdapter.hpp
     SLA/Clustering.cpp

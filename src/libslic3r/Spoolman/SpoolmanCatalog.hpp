@@ -14,6 +14,8 @@
 //    are passed through unchanged. Validation belongs to the mapping step (S2).
 //  - Item ids must be integers in 1..INT_MAX, otherwise the whole list is Malformed (with the item index).
 //  - A field of the wrong JSON type is treated as absent (nullopt/empty) and recorded once in `warnings`. Absent or null is silent.
+//  - A decoded JSON number is stored as its exact trimmed text ("0.98", "6", "1E5", a 21-digit integer unchanged: no double round trip)
+//    and a boolean as "true"/"false"; arrays, objects and null stay raw and are flagged.
 //  - Extra values are only decoded when the raw text is at most kMaxExtraBytes long and nests at most kMaxExtraDepth levels, and only
 //    a decoded JSON string counts as decoded; everything else keeps its raw text and is listed in `extras_undecoded`.
 //  - ParseResult::ok() is true only for Ok; Empty is not ok (it is valid but carries no items).

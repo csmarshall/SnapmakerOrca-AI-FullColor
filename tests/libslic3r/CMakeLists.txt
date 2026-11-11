@@ -63,6 +63,7 @@ add_executable(${_TEST_NAME}_tests
     test_obj.cpp
     test_step.cpp
     test_spoolman.cpp
+    test_spoolman_mapping.cpp
     test_stl.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp

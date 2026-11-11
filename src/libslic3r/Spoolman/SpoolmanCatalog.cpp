@@ -100,6 +100,14 @@ bool structured_within_caps(const json &root)
     return true;
 }
 
+std::string trim_ws(const std::string &s)
+{
+    size_t b = 0, e = s.size();
+    while (b < e && (s[b] == ' ' || (s[b] >= '\t' && s[b] <= '\r'))) ++b;
+    while (e > b && (s[e - 1] == ' ' || (s[e - 1] >= '\t' && s[e - 1] <= '\r'))) --e;
+    return s.substr(b, e - b);
+}
+
 void parse_extras(const json &o, std::map<std::string, std::string> &extras, std::set<std::string> &undecoded, Warnings &w)
 {
     auto it = o.find("extra");
@@ -131,8 +139,14 @@ void parse_extras(const json &o, std::map<std::string, std::string> &extras, std
         json decoded = json::parse(raw, nullptr, /*allow_exceptions*/ false);
         if (decoded.is_string())
             extras[e.key()] = decoded.get<std::string>();
+        else if (decoded.is_number())
+            // Spoolman stores every extra as json.dumps(value): a float arrives as "0.98", an int as "6". The exact (trimmed) text is
+            // kept, so "1e5" and a 21-digit integer are not rounded through a double.
+            extras[e.key()] = trim_ws(raw);
+        else if (decoded.is_boolean())
+            extras[e.key()] = decoded.get<bool>() ? "true" : "false";
         else
-            undecoded.insert(e.key()); // invalid JSON, or valid but not a string (number, array, null ...): keep raw
+            undecoded.insert(e.key()); // invalid JSON, or valid but an array, object or null: keep raw
     }
 }
 
