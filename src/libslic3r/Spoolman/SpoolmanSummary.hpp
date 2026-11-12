@@ -148,6 +148,33 @@ struct SyncOutcome
 
 SummaryModel build_summary(const SyncOutcome &outcome);
 
+// Flat, GUI-neutral lines of the dialog (S8 part 2). The wx dialog renders these 1:1 as PLAIN text (SetLabelText, no markup), so the
+// layout logic is unit-testable without a window. Every string is sanitized: control characters (newline, tab, ESC, ...) become a space,
+// so an untrusted Spoolman name cannot add lines or fake a row.
+struct SummaryLine
+{
+    enum class Kind {
+        notice,       // cells: {text}
+        notice_head,  // cells: Setting | Preset value | Spoolman value | Source (before a notice's rows)
+        notice_row,   // cells: 4
+        slot_header,  // cells: {slot label, spool name, remaining weight text, colour hex}
+        slot_preset,  // cells: {text}: chosen preset and the matching rule
+        slot_note,    // cells: {text}: created note, skip reason, kept presets
+        slot_flag,    // cells: {text}
+        table_head,   // cells: Setting | Preset value | Spoolman value | Source
+        table_row,    // cells: 4
+        ignored,      // cells: {"Ignored key = value (reason)"}
+        footer        // cells: {text}: fetched_text, read-only note
+    };
+    Kind                     kind = Kind::notice;
+    std::vector<std::string> cells;
+};
+
+// Replaces every control character (< 0x20, 0x7F) with a space; other bytes (UTF-8) are kept.
+std::string sanitize_for_display(const std::string &s);
+
+std::vector<SummaryLine> summary_lines(const SummaryModel &model);
+
 }} // namespace Slic3r::Spoolman
 
 #endif

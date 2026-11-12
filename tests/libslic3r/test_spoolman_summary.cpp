@@ -880,3 +880,76 @@ TEST_CASE("Spoolman summary: cards without tray information are never nameless",
     CHECK(m.slots[2].spool_name == "Rejected preset");
     CHECK(m.slots[3].spool_name == "Spoolman filament 4");
 }
+
+TEST_CASE("Spoolman summary lines: normal sync renders header, preset, table, footer in order", "[Spoolman]")
+{
+    SyncOutcome o = normal();
+    o.catalog_size = 20;
+    o.fetched_age_seconds = 0;
+    std::vector<SummaryLine> lines = summary_lines(build_summary(o));
+    using K = SummaryLine::Kind;
+    REQUIRE(lines.size() >= 5);
+    CHECK(lines.front().kind == K::slot_header);
+    CHECK(lines.front().cells == std::vector<std::string>{"Slot 2", "Snapmaker PETG HF Red", "612 g left", "#FF1523"});
+    CHECK(lines[1].kind == K::slot_preset);
+    CHECK(lines[1].cells[0] == "Preset: Snapmaker PETG HF @U1 0.4 nozzle (" + red_result().parent_rule + ")");
+    size_t head = 0, rows = 0;
+    for (const SummaryLine &l : lines) {
+        head += l.kind == K::table_head;
+        if (l.kind == K::table_row) {
+            ++rows;
+            CHECK(l.cells.size() == 4);
+        }
+    }
+    CHECK(head == 1);
+    CHECK(rows == 6);
+    CHECK(lines.back().kind == K::footer);
+    CHECK(lines.back().cells[0].find("Nothing is written to Spoolman") == 0);
+}
+
+TEST_CASE("Spoolman summary lines: control characters from Spoolman cannot add lines", "[Spoolman]")
+{
+    CHECK(sanitize_for_display(std::string("a\nb\tc\x1b[31md\x7f") + "e") == "a b c [31md e");
+    CHECK(sanitize_for_display("caf\xc3\xa9 \xe2\x80\xa6") == "caf\xc3\xa9 \xe2\x80\xa6"); // UTF-8 kept
+
+    SyncOutcome o = normal();
+    o.trays[0].spool_name = "Evil\nSlot 9\r\nName";
+    std::vector<SummaryLine> lines = summary_lines(build_summary(o));
+    REQUIRE_FALSE(lines.empty());
+    CHECK(lines.front().cells[1] == "Evil Slot 9  Name");
+    for (const SummaryLine &l : lines)
+        for (const std::string &c : l.cells)
+            CHECK(c.find_first_of("\n\r\t") == std::string::npos);
+}
+
+TEST_CASE("Spoolman summary lines: ignored value stays capped and is one line; markup is plain text", "[Spoolman]")
+{
+    SyncOutcome o = normal();
+    RejectedValue rv;
+    rv.spoolman_id = 16; rv.preset_name = red_result().preset_name; rv.key_or_field = "filament_start_gcode";
+    rv.reason = "not allowed"; rv.value = "<b>M104</b>\n" + std::string(500, 'x');
+    o.report.rejected.push_back(rv);
+    std::vector<SummaryLine> lines = summary_lines(build_summary(o));
+    size_t n = 0;
+    for (const SummaryLine &l : lines)
+        if (l.kind == SummaryLine::Kind::ignored) {
+            ++n;
+            const std::string &t = l.cells[0];
+            CHECK(t.find("Ignored filament_start_gcode = <b>M104</b> ") == 0); // markup untouched = shown literally
+            CHECK(t.size() < 120 + 80);
+            CHECK(t.rfind(" (not allowed)") == t.size() - std::string(" (not allowed)").size());
+        }
+    CHECK(n == 1);
+}
+
+TEST_CASE("Spoolman summary lines: unreachable state leads with the stale notice", "[Spoolman]")
+{
+    SyncOutcome o;
+    o.catalog_state = CatalogState::unreachable;
+    o.has_previous_sync = true;
+    o.last_good_age_seconds = 2 * 86400;
+    std::vector<SummaryLine> lines = summary_lines(build_summary(o));
+    REQUIRE_FALSE(lines.empty());
+    CHECK(lines.front().kind == SummaryLine::Kind::notice);
+    CHECK(lines.front().cells[0].find("Spoolman") != std::string::npos);
+}

@@ -528,4 +528,60 @@ SummaryModel build_summary(const SyncOutcome &o)
     return m;
 }
 
+
+std::string sanitize_for_display(const std::string &s)
+{
+    std::string out = s;
+    for (char &c : out)
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F)
+            c = ' ';
+    return out;
+}
+
+std::vector<SummaryLine> summary_lines(const SummaryModel &m)
+{
+    using K = SummaryLine::Kind;
+    std::vector<SummaryLine> out;
+    auto add = [&out](K k, std::vector<std::string> cells) {
+        for (std::string &c : cells)
+            c = sanitize_for_display(c);
+        out.push_back({k, std::move(cells)});
+    };
+    const std::vector<std::string> head = {"Setting", "Preset value", "Spoolman value", "Source"};
+    for (const SummaryNotice &n : m.notices) {
+        add(K::notice, {n.text});
+        if (!n.rows.empty()) {
+            add(K::notice_head, head);
+            for (const SummaryRow &r : n.rows)
+                add(K::notice_row, {r.key, r.preset_value, r.spoolman_value, r.source});
+        }
+    }
+    for (const SlotCard &c : m.slots) {
+        add(K::slot_header, {c.on_tray ? "Slot " + c.display_slot : std::string("No tray"), c.spool_name, c.remaining_weight_text, c.colour_hex});
+        if (c.preset_name)
+            add(K::slot_preset, {"Preset: " + *c.preset_name + (c.rule_text.empty() ? "" : " (" + c.rule_text + ")")});
+        if (!c.note.empty())
+            add(K::slot_note, {c.note});
+        if (c.skipped) {
+            add(K::slot_note, {"Skipped: " + c.skip_reason});
+            for (const std::string &p : c.linked_presets)
+                add(K::slot_note, {"Kept: " + p});
+        }
+        for (const std::string &f : c.flags)
+            add(K::slot_flag, {f});
+        if (!c.changes.empty()) {
+            add(K::table_head, head);
+            for (const SummaryRow &r : c.changes)
+                add(K::table_row, {r.key, r.preset_value, r.spoolman_value, r.source});
+        }
+        for (const SummaryIgnored &i : c.ignored)
+            add(K::ignored, {"Ignored " + i.key + " = " + i.value + " (" + i.reason + ")"});
+    }
+    if (!m.fetched_text.empty())
+        add(K::footer, {m.fetched_text});
+    if (!m.read_only_note.empty())
+        add(K::footer, {m.read_only_note});
+    return out;
+}
+
 }} // namespace Slic3r::Spoolman

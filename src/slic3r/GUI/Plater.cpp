@@ -183,6 +183,8 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Spoolman/SpoolmanSummary.hpp"
+#include "SpoolmanSummaryDialog.hpp"
 #include "libslic3r/IMEXHelpers.hpp"
 #include "libslic3r/PublishSettings.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -6425,7 +6427,11 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     std::vector<std::pair<DynamicPrintConfig *,std::string>> unknowns;
     auto enable_append  = wxGetApp().app_config->get_bool("enable_append_color_by_sync_ams");
     auto sync_color_only = wxGetApp().app_config->get("sync_ams_filament_mode") == "1";
-    auto n              = wxGetApp().preset_bundle->sync_ams_list(unknowns, !sync_result.direct_sync, sync_result.sync_maps, enable_append, merge_info, sync_color_only);
+    // Spoolman sync summary (#95 S8): only collected, and only shown, with the preference on (default off).
+    const bool spoolman_summary_on = wxGetApp().app_config->get_bool("spoolman_preset_sync");
+    SpoolmanTierReport spoolman_tiers;
+    auto n              = wxGetApp().preset_bundle->sync_ams_list(unknowns, !sync_result.direct_sync, sync_result.sync_maps, enable_append, merge_info, sync_color_only,
+                                                                  spoolman_summary_on ? &spoolman_tiers : nullptr);
     wxString detail;
     for (auto & uk : unknowns) {
         auto tray_name     = uk.first->opt_string("tray_name", 0u);
@@ -6466,6 +6472,27 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
         c->update();
     // Expand filament list
     update_filaments_area_height(); // ORCA
+
+    // Runs on the GUI thread after the sync completed; the dialog is non-modal. The catalog fetch and preset upsert are not part of this
+    // call path yet, so the outcome carries the tier report and the trays only (report/catalog stay empty).
+    if (spoolman_summary_on) {
+        Spoolman::SyncOutcome outcome;
+        outcome.tiers = spoolman_tiers;
+        int number = 0;
+        for (auto &tray_entry : wxGetApp().preset_bundle->filament_ams_list) {
+            ++number;
+            const DynamicPrintConfig &tray = tray_entry.second;
+            Spoolman::SummaryTray     st;
+            st.key          = tray_entry.first;
+            st.display_slot = std::to_string(number);
+            st.colour_hex   = tray.opt_string("filament_colour", 0u);
+            st.spool_name   = tray.opt_string("tray_name", 0u);
+            if (auto *o = tray.option<ConfigOptionInts>("spoolman_filament_id"); o && !o->values.empty())
+                st.spoolman_filament_id = o->values.front();
+            outcome.trays.push_back(std::move(st));
+        }
+        SpoolmanSummaryDialog::show_if_needed(this, Spoolman::build_summary(outcome), spoolman_summary_on);
+    }
 
     // BBS:Synchronized consumables information
     // auto calculation of flushing volumes
