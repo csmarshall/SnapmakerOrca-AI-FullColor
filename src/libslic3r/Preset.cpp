@@ -1522,7 +1522,7 @@ static std::vector<std::string> s_Preset_print_options{
 };
 
 static std::vector<std::string> s_Preset_filament_options {/*"filament_colour", */ "default_filament_colour", "required_nozzle_HRC", "filament_diameter", "pellet_flow_coefficient", "volumetric_speed_coefficients", "filament_type",
-                                                          "filament_soluble", "filament_is_support", "filament_printable", "filament_extruder_compatibility",
+                                                          "filament_soluble", "filament_is_support", "filament_printable", "filament_extruder_compatibility", "filament_spoolman_link",
     "filament_max_volumetric_speed", "filament_adaptive_volumetric_speed",
     "filament_flow_ratio", "filament_density", "filament_adhesiveness_category", "filament_cost", "filament_minimal_purge_on_wipe_tower",
     "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length", "filament_tower_ironing_area", "filament_tower_interface_purge_volume",
@@ -2200,6 +2200,9 @@ Preset* PresetCollection::get_preset_differed_for_save(Preset& preset)
     return new_preset;
 }
 
+// The Spoolman link names a filament in THIS machine's Spoolman; the id means nothing on another machine, so it never goes to the cloud.
+static const char *const kCloudSyncExcludedKey = "filament_spoolman_link";
+
 //BBS:get the differencen values to update
 int PresetCollection::get_differed_values_to_update(Preset& preset, std::map<std::string, std::string>& key_values)
 {
@@ -2265,6 +2268,9 @@ int PresetCollection::get_differed_values_to_update(Preset& preset, std::map<std
             key_values[iter->first] = iter->second->serialize();
         }
     }
+
+    // Machine-local keys stay out of the sync payload on both paths above (diff vs parent, full config without parent).
+    key_values.erase(kCloudSyncExcludedKey);
 
     //add other values
     key_values[BBL_JSON_KEY_VERSION] = preset.version.to_string();

@@ -1758,6 +1758,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBools,               filament_mixed_gradient_per_part))
     ((ConfigOptionInts,                filament_printable))
     ((ConfigOptionInts,                filament_extruder_compatibility))
+    ((ConfigOptionStrings,             filament_spoolman_link))
     ((ConfigOptionFloats,              filament_change_length))
     ((ConfigOptionFloats,              filament_cost))
     ((ConfigOptionStrings,             default_filament_colour))

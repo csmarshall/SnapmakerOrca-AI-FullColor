@@ -64,6 +64,15 @@ add_executable(${_TEST_NAME}_tests
     test_nozzle_volume_type.cpp
     test_obj.cpp
     test_step.cpp
+    test_spoolman.cpp
+    test_spoolman_link.cpp
+    test_spoolman_mapping.cpp
+    test_spoolman_parent.cpp
+    test_spoolman_presets.cpp
+    test_spoolman_summary.cpp
+    test_spoolman_sync_tier.cpp
+    test_spoolman_cloud_sync.cpp
+    test_spoolman_transport.cpp
     test_stl.cpp
     test_triangle_selector.cpp
     test_meshboolean.cpp

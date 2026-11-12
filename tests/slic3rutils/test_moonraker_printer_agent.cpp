@@ -1428,3 +1428,188 @@ TEST_CASE("A file that is not a 3MF is uploaded as it is, named after the job wh
     CHECK(upload.find("; plain G-code") != std::string::npos);
     CHECK(std::distance(boost::filesystem::directory_iterator(dir.path()), boost::filesystem::directory_iterator()) == 1);
 }
+
+// ---- Spoolman catalog through the Moonraker proxy (#95 S7). No sockets: the agent's request function is replaced by a recorder. ----
+
+namespace {
+class SpoolmanAgent : public MoonrakerPrinterAgent
+{
+public:
+    SpoolmanAgent() : MoonrakerPrinterAgent("")
+    {
+        device_info.dev_id   = "dev1";
+        device_info.base_url = "http://printer.invalid:7125";
+        device_info.api_key  = "k1";
+    }
+    using MoonrakerPrinterAgent::device_info;
+    struct Request { std::string base_url, api_key, path, post_body; };
+    mutable std::vector<Request> requests;
+    bool                         connected = true;
+    int                          proxy_status = 200;
+    std::string                  proxy_reply; // when set, replaces the default empty-list v2 reply
+    std::function<void(size_t)>  on_request;  // called with the 1-based request count, before it is answered
+
+protected:
+    int spoolman_moonraker_request(const std::string& base_url, const std::string& api_key, const std::string& path,
+                                   const std::string& post_body, std::string& response) const override
+    {
+        requests.push_back({base_url, api_key, path, post_body});
+        if (on_request)
+            on_request(requests.size());
+        if (path == "/server/spoolman/status") {
+            response = connected ? R"({"result":{"spoolman_connected":true}})" : R"({"result":{"spoolman_connected":false}})";
+            return 200;
+        }
+        if (proxy_status != 200)
+            return proxy_status;
+        response = !proxy_reply.empty() ? proxy_reply
+                                        : nlohmann::json{{"result", {{"response", nlohmann::json::array()}, {"error", nullptr}}}}.dump();
+        return 200;
+    }
+};
+} // namespace
+
+TEST_CASE("Spoolman: preference off sends no request of any kind", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    const Spoolman::CatalogFetch f = agent.fetch_spoolman_catalog(false);
+    CHECK_FALSE(f.attempted);
+    CHECK(agent.requests.empty());
+}
+
+TEST_CASE("Spoolman: not connected sends only the status probe", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    agent.connected = false;
+    const Spoolman::CatalogFetch f = agent.fetch_spoolman_catalog(true);
+    CHECK_FALSE(f.attempted);
+    REQUIRE(agent.requests.size() == 1);
+    CHECK(agent.requests[0].path == "/server/spoolman/status");
+    CHECK(agent.requests[0].post_body.empty());
+}
+
+TEST_CASE("Spoolman: every proxy request is a GET with the documented shape, and the session caches it", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    Spoolman::CatalogFetch f = agent.fetch_spoolman_catalog(true);
+    CHECK(f.attempted);
+    CHECK(f.good());
+    // status probe + three proxied lists
+    REQUIRE(agent.requests.size() == 4);
+    std::vector<std::string> proxied;
+    for (size_t i = 1; i < agent.requests.size(); ++i) {
+        CHECK(agent.requests[i].path == "/server/spoolman/proxy");
+        const auto j = nlohmann::json::parse(agent.requests[i].post_body);
+        CHECK(j.at("request_method") == "GET");
+        CHECK_FALSE(j.contains("body"));
+        proxied.push_back(j.at("path"));
+    }
+    CHECK(proxied == std::vector<std::string>{"/v1/vendor", "/v1/filament", "/v1/spool"});
+
+    agent.fetch_spoolman_catalog(true); // cached: only the status probe goes out
+    CHECK(agent.requests.size() == 5);
+    agent.invalidate_spoolman_cache();
+    agent.fetch_spoolman_catalog(true);
+    CHECK(agent.requests.size() == 9);
+}
+
+TEST_CASE("Spoolman: a failing proxy gives HttpFailure and is not cached", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    agent.proxy_status = 0;
+    const Spoolman::CatalogFetch f = agent.fetch_spoolman_catalog(true);
+    CHECK(f.attempted);
+    CHECK(f.vendors.status == Spoolman::ParseStatus::HttpFailure);
+    CHECK_FALSE(f.good());
+}
+
+TEST_CASE("Spoolman: request timeouts are 3 s connect and 6 s total", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    // Only the constants are checked here; the values reach Http::timeout_* by reading the code, not by this test.
+    CHECK(MoonrakerPrinterAgent::kSpoolmanConnectTimeoutSeconds == 3);
+    CHECK(MoonrakerPrinterAgent::kSpoolmanMaxTimeoutSeconds == 6);
+}
+
+TEST_CASE("Spoolman: a connect during the fetch cannot mix printers", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    agent.on_request = [&](size_t n) {
+        if (n == 3) { // the second proxied list: the agent is switched to another printer
+            agent.device_info.dev_id   = "dev2";
+            agent.device_info.base_url = "http://other.invalid:7125";
+            agent.device_info.api_key  = "k2";
+        }
+    };
+    const Spoolman::CatalogFetch f = agent.fetch_spoolman_catalog(true);
+    CHECK(f.good());
+    REQUIRE(agent.requests.size() == 4);
+    for (const auto& r : agent.requests) {
+        CHECK(r.base_url == "http://printer.invalid:7125");
+        CHECK(r.api_key == "k1");
+    }
+    // stored under the ORIGINAL printer: the new one has nothing
+    CHECK_FALSE(agent.last_good_spoolman_catalog().has_value());
+    agent.device_info.dev_id   = "dev1";
+    agent.device_info.base_url = "http://printer.invalid:7125";
+    CHECK(agent.last_good_spoolman_catalog().has_value());
+}
+
+TEST_CASE("Spoolman: a failed refresh is reported and the last good catalog stays retrievable", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    agent.proxy_reply = R"({"result":{"response":[{"id":1,"name":"V"}],"error":null}})";
+    const Spoolman::CatalogFetch ok = agent.fetch_spoolman_catalog(true);
+    REQUIRE(ok.good());
+    REQUIRE(ok.vendors.items.size() == 1);
+
+    agent.invalidate_spoolman_cache();
+    agent.proxy_status = 500;
+    const Spoolman::CatalogFetch failed = agent.fetch_spoolman_catalog(true);
+    CHECK_FALSE(failed.good());
+    CHECK(failed.vendors.status == Spoolman::ParseStatus::HttpFailure);
+    CHECK(failed.vendors.http_status == 500);
+
+    auto stale = agent.last_good_spoolman_catalog();
+    REQUIRE(stale.has_value());
+    CHECK(stale->vendors.items.size() == 1);
+    CHECK(stale->vendors.items[0].name == "V");
+}
+
+TEST_CASE("Spoolman: proxy replies that are not usable are diagnosable failures", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    SpoolmanAgent agent;
+    SECTION("v2 error object")
+    {
+        agent.proxy_reply = R"({"result":{"response":null,"error":{"status_code":500,"message":"x"}}})";
+        CHECK(agent.fetch_spoolman_catalog(true).vendors.http_status == 500);
+    }
+    SECTION("v2 error object without status_code")
+    {
+        agent.proxy_reply = R"({"result":{"response":null,"error":{"message":"x"}}})";
+        CHECK(agent.fetch_spoolman_catalog(true).vendors.http_status == 502);
+    }
+    SECTION("older Moonraker without v2 support")
+    {
+        agent.proxy_reply = R"({"result":[{"id":1,"name":"V"}]})";
+        const auto f = agent.fetch_spoolman_catalog(true);
+        CHECK(f.vendors.status == Spoolman::ParseStatus::HttpFailure);
+        CHECK(f.vendors.reason == "proxy reply is not v2 format");
+    }
+    SECTION("garbage")
+    {
+        agent.proxy_reply = "<html>";
+        CHECK(agent.fetch_spoolman_catalog(true).vendors.reason == "proxy reply is not v2 format");
+    }
+    SECTION("moonraker answers with a garbage status")
+    {
+        agent.proxy_status = 7;
+        CHECK(agent.fetch_spoolman_catalog(true).vendors.http_status == 7);
+    }
+}
+
+TEST_CASE("Spoolman: the response size limit is the body cap plus a little slack", "[MoonrakerPrinterAgent][Spoolman]")
+{
+    // Whether Http::size_limit() is called with it needs a socket and is not tested here; the constant is what is asserted.
+    CHECK(MoonrakerPrinterAgent::kSpoolmanMaxResponseBytes > Spoolman::kMaxBodyBytes);
+    CHECK(MoonrakerPrinterAgent::kSpoolmanMaxResponseBytes <= Spoolman::kMaxBodyBytes + 1024 * 1024);
+}

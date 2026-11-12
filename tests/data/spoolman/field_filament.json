@@ -1,0 +1,12 @@
+{
+  "result": [
+    {
+      "name": "Variant",
+      "order": 1,
+      "field_type": "text",
+      "default_value": "\"\"",
+      "key": "variant",
+      "entity_type": "filament"
+    }
+  ]
+}

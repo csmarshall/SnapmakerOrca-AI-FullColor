@@ -3,6 +3,7 @@
 
 #include "IPrinterAgent.hpp"
 #include "bambu_networking.hpp"
+#include "libslic3r/Spoolman/SpoolmanTransport.hpp"
 
 #include <functional>
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -134,6 +136,24 @@ public:
     FilamentSyncMode get_filament_sync_mode() const override { return FilamentSyncMode::pull; }
     bool fetch_filament_info(std::string dev_id, FilamentSyncMode sync_mode = FilamentSyncMode::pull) override;
 
+    // Read-only Spoolman catalog through Moonraker's /server/spoolman/proxy (#95 S7). Spoolman timeouts: 3 s connect, 6 s total.
+    // The proxy is a POST to Moonraker whose payload says request_method "GET": Spoolman is only read and Moonraker's state is unchanged.
+    static constexpr int    kSpoolmanConnectTimeoutSeconds = 3;
+    static constexpr int    kSpoolmanMaxTimeoutSeconds     = 6;
+    // Http's default response size limit is 1 GiB; the Spoolman requests set this instead so curl aborts an oversized transfer
+    // (reported as "response too large"). check_body_limits() is the second layer.
+    static constexpr size_t kSpoolmanMaxResponseBytes      = Spoolman::kMaxBodyBytes + 64 * 1024;
+    // Whether Moonraker is connected to Spoolman; nullopt when it cannot be told (treat as not connected).
+    std::optional<bool>    spoolman_status() const;
+    // Catalog fetch, cached for the session per printer. With `preference_on` false (the app preference spoolman_preset_sync) no request
+    // of any kind is made. The caller reads the preference. It is synchronous and blocks for up to ~4 requests x 6 s, so call it off the
+    // GUI thread, and do not destroy the agent while it runs. The printer address and key are read ONCE under connect_mutex and used for
+    // the cache key and every request, so a connect/disconnect during the fetch cannot mix two printers.
+    Spoolman::CatalogFetch fetch_spoolman_catalog(bool preference_on);
+    // The last good catalog of the current printer, even after invalidate or a failed refresh (show it as stale); nullopt if none.
+    std::optional<Spoolman::CatalogFetch> last_good_spoolman_catalog() const;
+    void                   invalidate_spoolman_cache();
+
     // JSON helper methods
     static std::string safe_json_string(const nlohmann::json& obj, const char* key);
     static int safe_json_int(const nlohmann::json& obj, const char* key);
@@ -211,6 +231,12 @@ protected:
     std::string sanitize_filename(const std::string& filename);
     std::string join_url(const std::string& base_url, const std::string& path) const;
     bool send_gcode_sync(const std::string& dev_id, const std::string& gcode) const;
+    // One Moonraker HTTP request for the Spoolman code. `post_body` empty means GET. Returns the HTTP status, 0 on connection failure or
+    // timeout. Virtual so tests can record requests without a socket.
+    // The printer address and key are passed in (a snapshot), never read from device_info here. Returns Spoolman::kStatusTooLarge when
+    // the size limit aborted the transfer.
+    virtual int spoolman_moonraker_request(const std::string& base_url, const std::string& api_key, const std::string& path,
+                                           const std::string& post_body, std::string& response) const;
     // Posts the request to /printer/print/start
     bool send_jsonrpc_command(const std::string& base_url, const std::string& api_key,
                               const nlohmann::json& request, std::string& response) const;
@@ -222,6 +248,9 @@ protected:
     static std::string map_filament_type_to_generic_id(const std::string& filament_type);
 
 private:
+    struct SpoolmanEndpoint { std::string base_url, api_key, key; };
+    SpoolmanEndpoint spoolman_endpoint() const; // snapshot under connect_mutex
+    std::optional<bool> spoolman_status(const SpoolmanEndpoint& ep) const;
     int handle_request(const std::string& dev_id, const std::string& json_str);
     int send_version_info(const std::string& dev_id);
     int send_access_code(const std::string& dev_id);
@@ -299,6 +328,7 @@ private:
     mutable std::recursive_mutex payload_mutex;
     nlohmann::json     status_cache;
 
+    Spoolman::CatalogCache spoolman_cache;
     std::atomic<int>       next_jsonrpc_id{1};
     std::set<std::string>  available_objects;  // Track for feature detection
     std::atomic<bool>      has_storage{false}; // The gcodes root has free space
@@ -322,7 +352,7 @@ private:
     std::shared_ptr<InFlightGate> m_camera_gate = std::make_shared<InFlightGate>();
     std::shared_ptr<InFlightGate> m_control_gate = std::make_shared<InFlightGate>();
     std::shared_ptr<InFlightGate> m_print_gate = std::make_shared<InFlightGate>();
-    std::recursive_mutex   connect_mutex;
+    mutable std::recursive_mutex connect_mutex; // mutable: spoolman_endpoint() snapshots under it
     mutable std::mutex     connect_error_mutex;
     std::string            connect_error; // see last_connect_error()
     void                   set_connect_error(std::string error);

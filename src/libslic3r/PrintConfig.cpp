@@ -3637,6 +3637,14 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comDevelop;
     def->set_default_value(new ConfigOptionInts{0});
 
+    // Link between a user filament preset and a Spoolman filament (JSON text, see Spoolman/SpoolmanLink.hpp). One string per filament,
+    // empty = no link. Stored in presets and the project 3MF, kept out of the G-code (GCode.cpp banned_keys) and of re-slicing (Print.cpp steps_ignore).
+    def          = this->add("filament_spoolman_link", coStrings);
+    def->label   = L("Spoolman link");
+    def->tooltip = L("Internal link to a Spoolman filament (JSON). Empty means the preset is not linked. Never written to G-code.");
+    def->mode    = comDevelop;
+    def->set_default_value(new ConfigOptionStrings{""});
+
     // BBS
     def = this->add("temperature_vitrification", coInts);
     def->label = L("Softening temperature");

@@ -446,6 +446,21 @@ set(lisbslic3r_sources
     ShortEdgeCollapse.hpp
     ShortestPath.cpp
     ShortestPath.hpp
+    Spoolman/SpoolmanCatalog.cpp
+    Spoolman/SpoolmanCatalog.hpp
+    Spoolman/SpoolmanMapping.cpp
+    Spoolman/SpoolmanMapping.hpp
+    Spoolman/SpoolmanParent.cpp
+    Spoolman/SpoolmanLink.cpp
+    Spoolman/SpoolmanLink.hpp
+    Spoolman/SpoolmanParent.hpp
+    Spoolman/SpoolmanPresets.cpp
+    Spoolman/SpoolmanPresets.hpp
+    Spoolman/SpoolmanTierReport.hpp
+    Spoolman/SpoolmanSummary.cpp
+    Spoolman/SpoolmanSummary.hpp
+    Spoolman/SpoolmanTransport.cpp
+    Spoolman/SpoolmanTransport.hpp
     SLA/AGGRaster.hpp
     SLA/BoostAdapter.hpp
     SLA/Clustering.cpp

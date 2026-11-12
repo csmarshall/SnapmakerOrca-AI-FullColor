@@ -432,7 +432,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "use_3mf"
     };
 
-    static std::unordered_set<std::string> steps_ignore;
+    // filament_spoolman_link never reaches the G-code (GCode.cpp banned_keys). Listing it here keeps it out of the invalidate-everything
+    // fallback below, so no slicing step is invalidated. Print::apply() still invalidates psGCodeExport for ANY full-config difference
+    // (PrintApply.cpp, full_config_diff), so the G-code is re-exported (identically); same behaviour as filament_notes.
+    static std::unordered_set<std::string> steps_ignore = { "filament_spoolman_link" };
     static const std::unordered_set<std::string> steps_exclusion_geometry = {
         "bed_exclude_area",
         "bed_exclude_volumes",
