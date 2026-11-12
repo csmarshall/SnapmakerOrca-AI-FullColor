@@ -28,6 +28,7 @@
 #include <map>
 #include <iterator>
 #include <functional>
+#include <set>
 #include <limits>
 #include <sstream>
 
@@ -89,6 +90,10 @@
 #include <vector>
 #include <utility>
 #include <nlohmann/json.hpp>
+#include <functional>
+#include <optional>
+#include <string_view>
+#include "Spoolman/SpoolmanLink.hpp"
 
 namespace fs = boost::filesystem;
 
@@ -4566,7 +4571,7 @@ void PresetBundle::get_ams_cobox_infos(AMSComboInfo& combox_info)
     }
 }
 
-unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfig *,std::string>> &unknowns, bool use_map, std::map<int, AMSMapInfo> &maps, bool enable_append, MergeFilamentInfo &merge_info, bool color_only)
+unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfig *,std::string>> &unknowns, bool use_map, std::map<int, AMSMapInfo> &maps, bool enable_append, MergeFilamentInfo &merge_info, bool color_only, SpoolmanTierReport *spoolman_report)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "use_map:" << use_map << " enable_append:" << enable_append;
     std::vector<std::string> ams_filament_presets;
@@ -4587,6 +4592,67 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
     };
     auto is_double_extruder = get_printer_extruder_count() == 2;
     std::vector<AmsInfo> ams_infos;
+    // Spoolman tier (before upstream's empty-id handling and filament_id match). A tray carrying a Spoolman join selects its linked user
+    // preset; a tray without one (key absent or 0, strings empty, wrong-typed keys ignored) takes upstream's path unchanged. Rules, first
+    // rule with any candidate wins: spoolman_id (link id == tray id), external_id (link external_id == tray's, non-empty, exact and
+    // case-sensitive), setting_id (preset setting_id == tray's, non-empty; also system presets, never the default one). Link rules look at
+    // compatible user presets whose link parses. Several candidates under the winning rule: nothing is guessed, reported as "ambiguous",
+    // upstream's path runs. Placeholder trays never use the tier.
+    struct TierCandidate { const Preset *preset; int id; std::string external_id; };
+    std::optional<std::vector<TierCandidate>> tier_candidates; // parsed once per call, only if a tray has a join
+    std::set<std::string> tier_picks;                          // names of presets the tier picked, read by synced_preset_name
+    auto tier_match = [&](const DynamicPrintConfig &ams, int slot, SpoolmanTierReport::Entry &out) -> const Preset * {
+        auto get_str = [&ams](const char *key) {
+            auto *o = ams.option<ConfigOptionStrings>(key);
+            return (o && !o->values.empty()) ? o->values.front() : std::string();
+        };
+        int sm_id = 0;
+        if (auto *o = ams.option<ConfigOptionInts>("spoolman_filament_id"); o && !o->values.empty())
+            sm_id = o->values.front();
+        const std::string sm_ext = get_str("spoolman_external_id");
+        const std::string sm_set = get_str("spoolman_setting_id");
+        if (sm_id <= 0 && sm_ext.empty() && sm_set.empty())
+            return nullptr;
+        if (!tier_candidates) {
+            tier_candidates.emplace();
+            for (const Preset &f : filaments) {
+                if (!f.is_compatible || !f.is_user())
+                    continue;
+                if (auto *lo = dynamic_cast<const ConfigOptionStrings *>(f.config.option("filament_spoolman_link")); lo && !lo->values.empty())
+                    if (auto link = Spoolman::parse(lo->values.front()))
+                        tier_candidates->push_back({&f, link->spoolman_id, link->external_id});
+            }
+        }
+        for (int rule = 0; rule < 3; ++rule) {
+            const char *name = rule == 0 ? "spoolman_id" : rule == 1 ? "external_id" : "setting_id";
+            if ((rule == 0 && sm_id <= 0) || (rule == 1 && sm_ext.empty()) || (rule == 2 && sm_set.empty()))
+                continue;
+            std::vector<const Preset *> found;
+            if (rule < 2) {
+                for (const TierCandidate &c : *tier_candidates)
+                    if (rule == 0 ? c.id == sm_id : c.external_id == sm_ext)
+                        found.push_back(c.preset);
+            } else {
+                for (const Preset &f : filaments)
+                    if (f.is_compatible && !f.is_default && f.setting_id == sm_set)
+                        found.push_back(&f);
+            }
+            if (found.empty())
+                continue;
+            if (found.size() == 1) {
+                out = {slot, name, found.front()->name, {}};
+                return found.front();
+            }
+            out = {slot, "ambiguous", "", {}};
+            for (const Preset *p : found)
+                out.candidates.push_back(p->name);
+            if (spoolman_report)
+                spoolman_report->entries.push_back(out);
+            return nullptr;
+        }
+        return nullptr;
+    };
+
     int                  index = 0;
     for (auto &entry : filament_ams_list) {
         auto & ams = entry.second;
@@ -4598,11 +4664,13 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         auto ams_id     = ams.opt_string("ams_id", 0u);
         auto slot_id    = ams.opt_string("slot_id", 0u);
         auto is_placeholder = ams.has("filament_slot_placeholder") && ams.opt_bool("filament_slot_placeholder", 0u);
-        ams_infos.push_back({filament_id.empty() ? false : true, false, is_placeholder, filament_color});
+        SpoolmanTierReport::Entry tier_entry;
+        const Preset *spoolman_pick = is_placeholder ? nullptr : tier_match(ams, entry.first, tier_entry);
+        ams_infos.push_back({(filament_id.empty() && !spoolman_pick) ? false : true, false, is_placeholder, filament_color});
         AMSMapInfo temp = {ams_id, slot_id};
         ams_array_maps.push_back(temp);
         index++;
-        if (filament_id.empty()) {
+        if (filament_id.empty() && !spoolman_pick) {
             if (use_map) {
                 for (int j = maps.size() - 1; j >= 0; j--) {
                     if (maps[j].slot_id == slot_id && maps[j].ams_id == ams_id) {
@@ -4635,10 +4703,17 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         }
         bool has_type = false;
         auto filament_type = ams.opt_string("filament_type", 0u);
-        auto iter = std::find_if(filaments.begin(), filaments.end(), [this, &filament_id, &has_type, filament_type](auto &f) {
+        auto iter = spoolman_pick ? std::find_if(filaments.begin(), filaments.end(), [spoolman_pick](auto &f) { return &f == spoolman_pick; }) : filaments.end();
+        if (spoolman_pick) {
+            tier_picks.insert(spoolman_pick->name);
+            if (spoolman_report)
+                spoolman_report->entries.push_back(std::move(tier_entry));
+        } else {
+        iter = std::find_if(filaments.begin(), filaments.end(), [this, &filament_id, &has_type, filament_type](auto &f) {
             has_type |= f.config.opt_string("filament_type", 0u) == filament_type;
             return f.is_compatible && filaments.get_preset_base(f) == &f && f.filament_id == filament_id; });
         warn_ambiguous_filament_id_match(filaments, iter, filament_id);
+        }
         if (iter == filaments.end()) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": filament_id %1% not found or system or compatible") % filament_id;
             if (!filament_type.empty()) {
@@ -4778,9 +4853,21 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
     // A slot whose current preset is a compatible user preset for the filament the sync picked keeps
     // that preset and its overrides, so the sync updates the tray metadata only. User presets carry
     // their system parent's filament_id.
-    auto synced_preset_name = [this](const std::string &current_name, const std::string &ams_name) -> std::string {
+    // A tier pick (Spoolman-linked preset) is kept only if the slot already holds that preset or another user preset linked to the SAME
+    // Spoolman filament: linked presets inherit their parent's filament_id, so the filament_id comparison below cannot tell them apart.
+    auto link_id_of = [](const Preset *p) {
+        auto *lo = p ? dynamic_cast<const ConfigOptionStrings *>(p->config.option("filament_spoolman_link")) : nullptr;
+        auto link = (lo && !lo->values.empty()) ? Spoolman::parse(lo->values.front()) : std::nullopt;
+        return link ? link->spoolman_id : 0;
+    };
+    auto synced_preset_name = [this, &tier_picks, &link_id_of](const std::string &current_name, const std::string &ams_name) -> std::string {
         const Preset *current = filaments.find_preset(current_name, false);
         const Preset *synced  = filaments.find_preset(ams_name, false);
+        if (tier_picks.count(ams_name)) {
+            const int pick_id = link_id_of(synced);
+            return current_name == ams_name || (current && !current->is_system && current->is_compatible && pick_id > 0 && link_id_of(current) == pick_id)
+                       ? current_name : ams_name;
+        }
         return current && synced && !current->is_system && current->is_compatible &&
                !synced->filament_id.empty() && current->filament_id == synced->filament_id ? current_name : ams_name;
     };
