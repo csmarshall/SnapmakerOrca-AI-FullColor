@@ -97,6 +97,12 @@ SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::S
         case K::notice_row:
             table_cells(l, false);
             break;
+        case K::catalog_note: {
+            wxStaticText *t = plain_text(m_body, l.cells[0], wrap);
+            add_detail(t);
+            body_sizer->Add(t, 0, wxEXPAND | wxALL, FromDIP(6));
+            break;
+        }
         case K::ignored: {
             wxStaticText *t = plain_text(m_body, l.cells[0], wrap);
             add_detail(t);

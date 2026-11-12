@@ -6525,9 +6525,23 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
             // tray_name is the real label ("A1", "HT-A", "Ext"); fall back to the list position
             st.display_slot = tray.opt_string("tray_name", 0u).empty() ? std::to_string(number) : tray.opt_string("tray_name", 0u);
             st.colour_hex   = tray.opt_string("filament_colour", 0u);
-            st.spool_name   = tray.opt_string("tray_name", 0u);
+            // The tray label is not a filament name; build_summary falls back to the catalog/preset name when this stays empty.
             if (auto *o = tray.option<ConfigOptionInts>("spoolman_filament_id"); o && !o->values.empty())
                 st.spoolman_filament_id = o->values.front();
+            // Spoolman's own view of the spool in this slot (joined by RFID card): filament name, colour, remaining weight.
+            if (st.spoolman_filament_id > 0 && !tray.opt_string("ams_id", 0u).empty() && !tray.opt_string("slot_id", 0u).empty()) {
+                const int ams_id = std::stoi(tray.opt_string("ams_id", 0u)), slot_id = std::stoi(tray.opt_string("slot_id", 0u));
+                if (ams_id < 254) {
+                    const SpoolmanSpoolInfo spool = spoolman_cache_slot(obj->get_dev_id(), ams_id * 4 + slot_id);
+                    if (spool.valid() && spool.filament_id == st.spoolman_filament_id) {
+                        st.spool_name = spool.name;
+                        if (!spool.color_hex.empty())
+                            st.colour_hex = spool.color_hex;
+                        if (spool.remaining_weight_g >= 0)
+                            st.remaining_weight_g = spool.remaining_weight_g;
+                    }
+                }
+            }
             outcome.trays.push_back(std::move(st));
         }
         SpoolmanSummaryDialog::show_if_needed(this, Spoolman::build_summary(outcome), spoolman_summary_on);
