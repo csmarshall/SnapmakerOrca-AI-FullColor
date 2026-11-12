@@ -1,6 +1,6 @@
 {
 	"name": "Snapmaker",
-	"version": "02.04.00.23",
+	"version": "02.04.00.24",
 	"force_update": "0",
 	"description": "Snapmaker configurations",
 	"machine_model_list": [
@@ -1241,10 +1241,6 @@
 			"sub_path": "filament/Polymaker/Fiberon PPS-GF20 @Snapmaker U1.json"
 		},
 		{
-			"name": "Snapmaker ABS @U1",
-			"sub_path": "filament/Snapmaker ABS @U1.json"
-		},
-		{
 			"name": "Snapmaker ABS Benchy @U1",
 			"sub_path": "filament/Snapmaker ABS Benchy @U1.json"
 		},
@@ -1291,10 +1287,6 @@
 		{
 			"name": "Fiberon ASA-CF08 @Snapmaker U1",
 			"sub_path": "filament/Polymaker/Fiberon ASA-CF08 @Snapmaker U1.json"
-		},
-		{
-			"name": "Snapmaker ASA @U1",
-			"sub_path": "filament/Snapmaker ASA @U1.json"
 		},
 		{
 			"name": "Snapmaker ASA",
@@ -1479,10 +1471,6 @@
 		{
 			"name": "Snapmaker PETG Translucent @U1 0.8 nozzle",
 			"sub_path": "filament/Snapmaker PETG Translucent @U1 0.8 nozzle.json"
-		},
-		{
-			"name": "Snapmaker PETG-CF @U1",
-			"sub_path": "filament/Snapmaker PETG-CF @U1.json"
 		},
 		{
 			"name": "Snapmaker PETG-CF",
@@ -1851,10 +1839,6 @@
 		{
 			"name": "Snapmaker TPE @U1",
 			"sub_path": "filament/Snapmaker TPE @U1.json"
-		},
-		{
-			"name": "Snapmaker TPU @U1",
-			"sub_path": "filament/Snapmaker TPU @U1.json"
 		},
 		{
 			"name": "Snapmaker TPU High-Flow @U1",

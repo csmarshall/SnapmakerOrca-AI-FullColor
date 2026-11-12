@@ -7973,6 +7973,11 @@ PresetBundle::PresetInstall PresetBundle::resolve_vendor_preset(const CachedPres
     PresetInstall out;
     out.filament_id  = entry.filament_id;
     out.renamed_from = entry.renamed_from;
+    // Snapmaker Orca: some system bundles only provide setting_id for filaments, so a system filament
+    // without a filament_id takes its own setting_id as one, before the inherits chain is consulted.
+    if (out.filament_id.empty() && presets_collection.type() == Preset::TYPE_FILAMENT &&
+        install.flags.has(LoadConfigBundleAttribute::LoadSystem) && !entry.setting_id.empty())
+        out.filament_id = entry.setting_id;
 
     //check whether it inherits other preset or not
     if (! entry.inherits.empty()) {
