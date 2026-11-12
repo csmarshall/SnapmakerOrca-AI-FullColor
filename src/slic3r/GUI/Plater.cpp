@@ -185,6 +185,8 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Spoolman/SpoolmanSummary.hpp"
 #include "SpoolmanSummaryDialog.hpp"
+#include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
+#include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
 #include "libslic3r/IMEXHelpers.hpp"
 #include "libslic3r/PublishSettings.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -879,6 +881,12 @@ struct ExtruderGroup : StaticBox
 struct Sidebar::priv
 {
     Plater *plater;
+
+    // #100: background Spoolman catalog fetch. The runner is destroyed with the sidebar, which drops a pending GUI callback.
+    Spoolman::SyncRunner                  spoolman_runner;
+    std::optional<Spoolman::CatalogFetch> spoolman_fetch;       // set only for the duration of the re-entered sync_ams_list
+    Spoolman::UpsertReport                spoolman_report;
+    bool                                  spoolman_has_last_good = false;
 
     wxPanel *scrolled = nullptr;
     PlaterPresetComboBox *combo_sla_print = nullptr;
@@ -6334,6 +6342,32 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     auto obj = wxGetApp().getDeviceManager()->get_selected_machine();
     if (!obj)
         return;
+    // #100: with the preference on and an agent that can fetch a Spoolman catalog, fetch it on a worker thread and re-enter this function on
+    // the GUI thread with the result (upsert first). Otherwise, or while a fetch is in flight, carry on as before.
+    if (!p->spoolman_fetch && wxGetApp().app_config->get_bool("spoolman_preset_sync")) {
+        auto net   = wxGetApp().getDeviceManager()->get_agent();
+        auto agent = std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net ? net->get_printer_agent() : nullptr);
+        if (agent) {
+            const auto started = p->spoolman_runner.start(
+                true, [agent] { return agent->fetch_spoolman_catalog(true); },
+                [](std::function<void()> f) { wxTheApp->CallAfter(std::move(f)); },
+                [this, agent, is_from_big_sync_btn](Spoolman::CatalogFetch fetch) {
+                    p->spoolman_report = {};
+                    if (fetch.good()) {
+                        auto *bundle = wxGetApp().preset_bundle;
+                        Spoolman::UpsertContext ctx;
+                        ctx.printer = &bundle->printers.get_selected_preset();
+                        p->spoolman_report = Spoolman::upsert_catalog(bundle->filaments, fetch.filaments.items, ctx);
+                    }
+                    p->spoolman_has_last_good = agent->last_good_spoolman_catalog().has_value();
+                    p->spoolman_fetch         = std::move(fetch);
+                    sync_ams_list(is_from_big_sync_btn);
+                    p->spoolman_fetch.reset();
+                });
+            if (started == Spoolman::SyncRunner::Start::started || started == Spoolman::SyncRunner::Start::busy)
+                return; // busy: a fetch is already running and will sync when it finishes
+        }
+    }
     GUI::wxGetApp().sidebar().load_ams_list(obj);
 
     auto & list = wxGetApp().preset_bundle->filament_ams_list;
@@ -6478,13 +6512,18 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     if (spoolman_summary_on) {
         Spoolman::SyncOutcome outcome;
         outcome.tiers = spoolman_tiers;
+        if (p->spoolman_fetch) {
+            outcome.report = p->spoolman_report;
+            Spoolman::apply_fetch_to_outcome(outcome, *p->spoolman_fetch, p->spoolman_has_last_good);
+        }
         int number = 0;
         for (auto &tray_entry : wxGetApp().preset_bundle->filament_ams_list) {
             ++number;
             const DynamicPrintConfig &tray = tray_entry.second;
             Spoolman::SummaryTray     st;
             st.key          = tray_entry.first;
-            st.display_slot = std::to_string(number);
+            // tray_name is the real label ("A1", "HT-A", "Ext"); fall back to the list position
+            st.display_slot = tray.opt_string("tray_name", 0u).empty() ? std::to_string(number) : tray.opt_string("tray_name", 0u);
             st.colour_hex   = tray.opt_string("filament_colour", 0u);
             st.spool_name   = tray.opt_string("tray_name", 0u);
             if (auto *o = tray.option<ConfigOptionInts>("spoolman_filament_id"); o && !o->values.empty())
