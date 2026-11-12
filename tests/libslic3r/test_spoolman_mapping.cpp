@@ -188,6 +188,7 @@ TEST_CASE("Spoolman mapping: invalid values are rejected, never clamped", "[Spoo
         CHECK(r.overrides.empty());
         REQUIRE(r.rejected.size() == 1);
         CHECK_FALSE(r.rejected[0].reason.empty());
+        CHECK(r.rejected[0].value == val); // generic add() path: the offending value travels with the rejection
     }
     auto r = map_filament(with_extra("max_fan_speed", "150"), parent);
     CHECK(r.rejected[0].reason == "value 150 out of range [0, 100]");
@@ -207,6 +208,7 @@ TEST_CASE("Spoolman mapping: colour normalisation", "[Spoolman]")
     CHECK(r.overrides.empty());
     REQUIRE(r.rejected.size() == 1);
     CHECK(r.rejected[0].key_or_field == "color_hex");
+    CHECK(r.rejected[0].value == "ZZZZZZ"); // the offending value travels with the rejection
     f.color_hex = "#ff1523";
     CHECK(find(map_filament(f, make_parent()), "default_filament_colour")->value == "#FF1523");
     f.color_hex = "FF1523";
@@ -500,6 +502,7 @@ TEST_CASE("Spoolman mapping: zero native temperatures mean unset", "[Spoolman]")
     for (auto &rej : r.rejected) {
         CHECK(rej.reason == "zero means unset");
         CHECK(rej.warning);
+        CHECK(rej.value == (rej.key_or_field == "settings_extruder_temp" ? "0" : "-5")); // zero-means-unset path
     }
     f.settings_extruder_temp = 1500;
     CHECK(map_filament(f, make_parent()).overrides.empty());
@@ -525,6 +528,7 @@ TEST_CASE("Spoolman mapping: bed temperature is all or nothing", "[Spoolman]")
     REQUIRE(r.rejected.size() == 1);
     CHECK(r.rejected[0].key_or_field == "settings_bed_temp");
     CHECK(r.rejected[0].reason.find("_plate_temp") != std::string::npos); // names the offending key
+    CHECK(r.rejected[0].value == "150");                                  // settings_bed_temp path
     f.settings_bed_temp = 70;
     CHECK(map_filament(f, make_parent()).overrides.size() == 12);
 }

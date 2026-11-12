@@ -1,6 +1,7 @@
 #ifndef slic3r_PresetBundle_hpp_
 #define slic3r_PresetBundle_hpp_
 
+#include "Spoolman/SpoolmanTierReport.hpp"
 #include "Config.hpp"
 #include "Preset.hpp"
 #include "PresetCacheFormat.hpp"
@@ -74,19 +75,6 @@ struct MergeFilamentInfo {
     bool  is_empty() { return merges.empty();}
 };
 
-
-// Optional read-out of the Spoolman matching tier inside PresetBundle::sync_ams_list (see its comment in PresetBundle.cpp).
-struct SpoolmanTierReport
-{
-    struct Entry
-    {
-        int                      slot = -1;     // key of the tray in filament_ams_list
-        std::string              rule;          // "spoolman_id" | "external_id" | "setting_id" | "ambiguous"
-        std::string              preset;        // chosen preset (empty when ambiguous)
-        std::vector<std::string> candidates;    // ambiguous only: every preset that matched under the rule
-    };
-    std::vector<Entry> entries;
-};
 
 struct FilamentBaseInfo
 {

@@ -225,9 +225,9 @@ struct Collector
     MappingResult &res;
     std::map<std::string, size_t> index;
 
-    void add_rejected(const std::string &what, const std::string &reason, bool warning = false)
+    void add_rejected(const std::string &what, const std::string &reason, bool warning = false, const std::string &value = std::string())
     {
-        res.rejected.push_back({what, reason, warning});
+        res.rejected.push_back({what, reason, warning, value});
     }
 
     // Validate and add; later calls with the same key replace earlier ones (higher precedence). `native` sources may set keys that
@@ -240,7 +240,7 @@ struct Collector
         else
             validate_value(key, value, canon, reason, native);
         if (!reason.empty()) {
-            add_rejected(key + " (" + source + ")", reason);
+            add_rejected(key + " (" + source + ")", reason, false, value);
             return false;
         }
         auto it = index.find(key);
@@ -339,7 +339,7 @@ MappingResult map_filament(const Filament &f, const DynamicPrintConfig &parent)
     auto positive_temp = [&](const std::optional<double> &t, const char *field) {
         if (!t) return false;
         if (*t <= 0) {
-            c.add_rejected(field, "zero means unset", true);
+            c.add_rejected(field, "zero means unset", true, fmt_double(*t));
             return false;
         }
         return true;
@@ -362,7 +362,7 @@ MappingResult map_filament(const Filament &f, const DynamicPrintConfig &parent)
                 targets.push_back(k);
             }
         if (!failure.empty())
-            c.add_rejected("settings_bed_temp", failure);
+            c.add_rejected("settings_bed_temp", failure, false, v);
         else
             for (const auto &k : targets)
                 c.add(k, v, "native:settings_bed_temp", true);
@@ -372,7 +372,7 @@ MappingResult map_filament(const Filament &f, const DynamicPrintConfig &parent)
     if (f.color_hex) {
         std::string col;
         if (!normalise_colour(*f.color_hex, col))
-            c.add_rejected("color_hex", "expected a colour #RRGGBB, got '" + *f.color_hex + "'");
+            c.add_rejected("color_hex", "expected a colour #RRGGBB, got '" + *f.color_hex + "'", false, *f.color_hex);
         else
             c.add("default_filament_colour", col, "native:color_hex", true);
     }

@@ -210,6 +210,25 @@ TEST_CASE("Spoolman presets: create inherits the parent, applies overrides and t
     CHECK(nozzle(*f.get("Generic PETG @T")) == 200);
 }
 
+TEST_CASE("Spoolman presets: changes are reported in the mapping's order, not alphabetically", "[Spoolman]")
+{
+    Fixture f;
+    Filament x = fil(5, "PETG Red", "Acme", "PETG", 250, 70);
+    x.density = 1.3;
+    auto r = f.run({x});
+    REQUIRE(r.created.size() == 1);
+    std::vector<std::string> keys;
+    for (const auto &c : r.created[0].changes)
+        keys.push_back(c.key);
+    auto pos = [&](const std::string &k) { return std::find(keys.begin(), keys.end(), k) - keys.begin(); };
+    REQUIRE(pos("nozzle_temperature") < (long) keys.size());
+    REQUIRE(pos("filament_density") < (long) keys.size());
+    // alphabetical would put filament_density first
+    CHECK(pos("nozzle_temperature") < pos("nozzle_temperature_initial_layer"));
+    CHECK(pos("nozzle_temperature_initial_layer") < pos("hot_plate_temp"));
+    CHECK(pos("hot_plate_temp") < pos("filament_density"));
+}
+
 TEST_CASE("Spoolman presets: a same-name preset that is not linked to the same id is never overwritten (known-bad a)", "[Spoolman]")
 {
     for (int variant = 0; variant < 2; ++variant) {
@@ -279,6 +298,34 @@ TEST_CASE("Spoolman presets: refresh follows Spoolman, a removed value resets to
     CHECK(l.sources.count("nozzle_temperature") == 0);
     CHECK(l.sources.count("hot_plate_temp") == 1);
     CHECK(ival(*f.get(kName), "hot_plate_temp") == 70);
+}
+
+TEST_CASE("Spoolman presets: an update reports applied keys in mapping order, then reset keys alphabetically", "[Spoolman]")
+{
+    Fixture f;
+    Filament x = fil(5, "PETG Red", "Acme", "PETG", 250, 70);
+    x.density   = 1.3;
+    x.color_hex = "#FF1523";
+    f.run({x});
+    // Spoolman changes the nozzle temperature and drops density and colour (they reset to the parent, the keys no longer in the link)
+    Filament y = fil(5, "PETG Red", "Acme", "PETG", 255, 75);
+    auto r = f.run({y});
+    REQUIRE(r.updated.size() == 1);
+    std::vector<std::string> keys, sources;
+    for (const auto &c : r.updated[0].changes) {
+        keys.push_back(c.key);
+        sources.push_back(c.source);
+    }
+    auto pos = [&](const std::string &k) { return std::find(keys.begin(), keys.end(), k) - keys.begin(); };
+    REQUIRE(pos("nozzle_temperature") < (long) keys.size());
+    REQUIRE(pos("hot_plate_temp") < (long) keys.size());
+    REQUIRE(pos("default_filament_colour") < (long) keys.size());
+    REQUIRE(pos("filament_density") < (long) keys.size());
+    CHECK(pos("nozzle_temperature") < pos("hot_plate_temp"));                   // applied keys: mapping order
+    CHECK(pos("hot_plate_temp") < pos("default_filament_colour"));              // applied keys before reset keys
+    CHECK(pos("default_filament_colour") < pos("filament_density"));            // reset keys: alphabetical
+    CHECK(r.updated[0].changes[pos("filament_density")].source == "parent");
+    CHECK(r.updated[0].changes[pos("default_filament_colour")].source == "parent");
 }
 
 TEST_CASE("Spoolman presets: a rename keeps the preset name and link", "[Spoolman]")
@@ -358,7 +405,7 @@ TEST_CASE("Spoolman presets: printer limits reject only the offending keys", "[S
             CHECK(x.reason == "exceeds printer limit");
             CHECK(x.spoolman_id == 5);
             CHECK(x.preset_name == kName);
-            keys.push_back(x.key_or_field);
+            keys.push_back(x.key_or_field + "=" + x.value); // key and value are separate fields
         }
         CHECK(std::count(keys.begin(), keys.end(), "nozzle_temperature=450") == 1);
         CHECK(std::count(keys.begin(), keys.end(), "hot_plate_temp=105") == 1);
@@ -709,7 +756,7 @@ TEST_CASE("Spoolman presets: printer limits apply to groups", "[Spoolman]")
         CHECK(nozzle(*f.get(kName)) == 200);
         CHECK(ival(*f.get(kName), "nozzle_temperature_initial_layer") == 205);
         std::map<std::string, std::string> why;
-        for (const auto &j : r.rejected) why[j.key_or_field] = j.reason;
+        for (const auto &j : r.rejected) why[j.key_or_field + "=" + j.value] = j.reason;
         CHECK(why.at("nozzle_temperature=250").find("group") != std::string::npos);
         CHECK(why.at("nozzle_temperature_initial_layer=320") == "exceeds printer limit");
         CHECK(ival(*f.get(kName), "hot_plate_temp") == 70); // bed untouched by the nozzle problem
@@ -737,6 +784,7 @@ TEST_CASE("Spoolman presets: printer limits apply to groups", "[Spoolman]")
         CHECK(r.rejected[0].key_or_field == "nozzle_temperature");
         CHECK(r.rejected[0].warning);
         CHECK(r.rejected[0].reason.find("parent's own value 350") != std::string::npos);
+        CHECK(r.rejected[0].value == "350"); // an int: no decimals, no locale
     }
 }
 

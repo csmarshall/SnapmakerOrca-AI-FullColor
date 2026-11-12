@@ -145,6 +145,7 @@ struct RejectedValue
     std::string key_or_field;
     std::string reason;
     bool        warning = false;
+    std::string value; // the offending value, "" when there is none
 };
 
 struct UpsertReport

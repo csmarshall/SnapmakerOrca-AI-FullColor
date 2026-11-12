@@ -351,26 +351,28 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
                 const auto &limit = is_nozzle_key(o.key) ? ctx.limits.max_nozzle_temp : ctx.limits.max_bed_temp;
                 double v = 0;
                 const bool self_bad = !parse_number(o.value, v) || v > *limit;
-                rejected.push_back({f.id, std::string(), o.key + "=" + o.value,
-                                    self_bad ? bad->second : "rejected with its group: " + bad->second, false});
+                rejected.push_back({f.id, std::string(), o.key,
+                                    self_bad ? bad->second : "rejected with its group: " + bad->second, false, o.value});
             } else
                 applied.push_back(std::move(o));
         }
         for (const Rejected &r : mapping.rejected)
-            rejected.push_back({f.id, std::string(), r.key_or_field, r.reason, r.warning});
+            rejected.push_back({f.id, std::string(), r.key_or_field, r.reason, r.warning, r.value});
         // a parent value that already exceeds a limit is kept; say so
         for (const std::string &k : plate_temperature_keys())
             if (ctx.limits.max_bed_temp)
                 if (const auto *po = dynamic_cast<const ConfigOptionInts *>(parent_cfg.option(k)))
                     if (!po->values.empty() && po->values.front() > *ctx.limits.max_bed_temp &&
                         std::none_of(applied.begin(), applied.end(), [&](const Override &o) { return o.key == k; }))
-                        rejected.push_back({f.id, std::string(), k, "parent's own value " + std::to_string(po->values.front()) + " exceeds printer limit (kept)", true});
+                        rejected.push_back({f.id, std::string(), k, "parent's own value " + std::to_string(po->values.front()) + " exceeds printer limit (kept)", true,
+                                            std::to_string(po->values.front())}); // ConfigOptionInts: an int, so no locale or decimals
         for (const char *k : {"nozzle_temperature", "nozzle_temperature_initial_layer"})
             if (ctx.limits.max_nozzle_temp)
                 if (const auto *po = dynamic_cast<const ConfigOptionInts *>(parent_cfg.option(k)))
                     if (!po->values.empty() && po->values.front() > *ctx.limits.max_nozzle_temp &&
                         std::none_of(applied.begin(), applied.end(), [&](const Override &o) { return o.key == k; }))
-                        rejected.push_back({f.id, std::string(), k, "parent's own value " + std::to_string(po->values.front()) + " exceeds printer limit (kept)", true});
+                        rejected.push_back({f.id, std::string(), k, "parent's own value " + std::to_string(po->values.front()) + " exceeds printer limit (kept)", true,
+                                            std::to_string(po->values.front())}); // ConfigOptionInts: an int, so no locale or decimals
 
         Link new_link;
         new_link.spoolman_id = f.id;
@@ -414,7 +416,7 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
         }
         for (const Override &o : applied)
             if (!apply_value(cfg, o.key, o.value)) {
-                rejected.push_back({f.id, name, o.key, "cannot be applied to the preset", false});
+                rejected.push_back({f.id, name, o.key, "cannot be applied to the preset", false, o.value});
                 auto old = old_sources.find(o.key);
                 if (old != old_sources.end())
                     new_link.sources[o.key] = old->second; // fail closed: the old value stays listed
@@ -448,6 +450,15 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
             auto s      = new_link.sources.find(key);
             c.source    = s != new_link.sources.end() ? s->second : "parent";
             res.changes.push_back(std::move(c));
+        }
+        // diff() lists keys alphabetically; report them in the mapping's own order (nozzle, plate, density, colour ...), then the rest
+        // (reset to the parent) by key, so the order is deterministic and reads like the Spoolman fields.
+        {
+            std::map<std::string, size_t> pos;
+            for (size_t i = 0; i < applied.size(); ++i)
+                pos.emplace(applied[i].key, i);
+            auto rank = [&](const ValueChange &c) { auto it = pos.find(c.key); return it == pos.end() ? pos.size() : it->second; };
+            std::stable_sort(res.changes.begin(), res.changes.end(), [&](const ValueChange &a, const ValueChange &b) { return rank(a) < rank(b); });
         }
 
         if (!target) {

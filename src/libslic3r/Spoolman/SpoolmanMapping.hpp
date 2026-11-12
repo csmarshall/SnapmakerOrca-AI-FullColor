@@ -47,6 +47,7 @@ struct Rejected
     std::string key_or_field;
     std::string reason;
     bool        warning = false; // informational, not an error (e.g. min/max_bed_temperature)
+    std::string value;           // the offending value as received/derived, "" when there is none (shown by the sync summary)
 };
 
 struct MappingResult
