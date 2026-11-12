@@ -124,6 +124,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PluginStatus.hpp
     GUI/PluginPickerDialog.cpp
     GUI/PluginPickerDialog.hpp
+    GUI/PluginPermissionValidation.cpp
+    GUI/PluginPermissionValidation.hpp
     GUI/PluginsDialog.cpp
     GUI/PluginsDialog.hpp
     GUI/Shortcuts.cpp
@@ -764,6 +766,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/CloudDeleteQueue.hpp
     Utils/ColorSpaceConvert.cpp
     Utils/ColorSpaceConvert.hpp
+    Utils/CrealityCfs.cpp
+    Utils/CrealityCfs.hpp
     Utils/CrealityPrint.cpp
     Utils/CrealityPrint.hpp
     Utils/CrealityPrintAgent.cpp

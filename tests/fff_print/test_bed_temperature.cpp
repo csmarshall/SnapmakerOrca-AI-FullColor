@@ -66,6 +66,10 @@ TEST_CASE("Mixed print uses the highest bed temperature", "[BedTemperature]")
         // Wall printed by extruder 1 (0-based 0, low bed temp 35C), infill by extruder 2 (0-based 1, 65C).
         { "wall_filament", 1 },
         { "sparse_infill_filament", 2 },
+        // v2.5.0 no longer copies solid_infill_filament to the top and bottom surface filaments (PrintConfig.cpp normalize_fdm),
+        // so the first layer's bottom surface needs its own filament to count towards the bed temperature.
+        { "bottom_solid_infill_filament", 2 },
+        { "top_solid_infill_filament", 2 },
         { "solid_infill_filament", 2 }
     });
     std::string gcode = Slic3r::Test::slice({make_cube(20, 20, 20)}, config);
@@ -120,6 +124,10 @@ TEST_CASE("bed_temperature_initial_layer_single expands to the max", "[BedTemper
         { "hot_plate_temp_initial_layer", "35,65" },
         { "wall_filament", 1 },
         { "sparse_infill_filament", 2 },
+        // v2.5.0 no longer copies solid_infill_filament to the top and bottom surface filaments (PrintConfig.cpp normalize_fdm),
+        // so the first layer's bottom surface needs its own filament to count towards the bed temperature.
+        { "bottom_solid_infill_filament", 2 },
+        { "top_solid_infill_filament", 2 },
         { "solid_infill_filament", 2 },
         { "machine_start_gcode", "M190 S{bed_temperature_initial_layer_single}" }
     });

@@ -134,6 +134,12 @@ public:
     FilamentSyncMode get_filament_sync_mode() const override { return FilamentSyncMode::pull; }
     bool fetch_filament_info(std::string dev_id, FilamentSyncMode sync_mode = FilamentSyncMode::pull) override;
 
+    // JSON helper methods
+    static std::string safe_json_string(const nlohmann::json& obj, const char* key);
+    static int safe_json_int(const nlohmann::json& obj, const char* key);
+    static std::string safe_array_string(const nlohmann::json& arr, int idx);
+    static int safe_array_int(const nlohmann::json& arr, int idx);
+
 protected:
     struct MoonrakerDeviceInfo
     {
@@ -149,7 +155,8 @@ protected:
         bool        use_ssl = false;
     } device_info;
 
-    // Copied when the stream starts, so changes apply to the next start_status_stream()
+    // Copied when the stream starts, so changes apply to the next start_status_stream(). A connection's retries read
+    // reconnect_delay directly.
     struct StatusStreamTimings
     {
         std::chrono::milliseconds handshake{std::chrono::seconds(10)};      // Opening and closing handshakes
@@ -177,6 +184,8 @@ protected:
 
     // Build ams JSON and call parser
     void build_ams_payload(int ams_count, int max_lane_index, const std::vector<AmsTrayData>& trays);
+    // Name shown for a filament unit, or empty for the AMS Lite name
+    virtual std::string ams_unit_name(int /*ams_id*/) const { return {}; }
 
     // Methods that derived classes may need to override or access
     virtual bool init_device_info(const std::string& dev_id, const std::string& dev_ip, const std::string& username, const std::string& password, bool use_ssl, const std::string& port);
@@ -186,6 +195,10 @@ protected:
                                    MoonrakerDeviceInfo&         info,
                                    std::string&                 error,
                                    const std::function<bool()>& cancelled) const;
+    // Starts the print of a file already uploaded to the gcodes root
+    virtual bool print_uploaded_file(const PrintParams& params, const std::string& filename);
+    // Whether the printer prints a .gcode.3mf bundle as is (its use_3mf option)
+    virtual bool accepts_3mf() const;
     void start_status_stream(const std::string& dev_id, const std::string& base_url, const std::string& api_key);
     void stop_status_stream();
 
@@ -197,6 +210,10 @@ protected:
     std::string normalize_base_url(bool use_ssl, const std::string& host, const std::string& port);
     std::string sanitize_filename(const std::string& filename);
     std::string join_url(const std::string& base_url, const std::string& path) const;
+    bool send_gcode_sync(const std::string& dev_id, const std::string& gcode) const;
+    // Posts the request to /printer/print/start
+    bool send_jsonrpc_command(const std::string& base_url, const std::string& api_key,
+                              const nlohmann::json& request, std::string& response) const;
 
     // Trim whitespace and convert to uppercase
     static std::string trim_and_upper(const std::string& input);
@@ -223,7 +240,6 @@ private:
                               std::string&                 error,
                               const std::function<bool()>& cancelled) const;
     bool gcode_command_known(const std::string& base_url, const std::string& api_key, const std::string& command, bool& missing) const;
-    bool send_gcode_sync(const std::string& dev_id, const std::string& gcode) const;
     void send_gcode_async(const std::string& dev_id, const std::string& gcode,
                           std::function<void(bool)> on_result = {}) const;
 
@@ -252,10 +268,6 @@ private:
                       const std::string& base_url, const std::string& api_key,
                       OnUpdateStatusFn update_fn, WasCancelledFn cancel_fn);
 
-    // JSON-RPC helper
-    bool send_jsonrpc_command(const std::string& base_url, const std::string& api_key,
-                              const nlohmann::json& request, std::string& response) const;
-
     // Connection thread management
     void perform_connection_async(const std::string& dev_id,
                                    const std::string& base_url,
@@ -265,12 +277,8 @@ private:
     // System-specific filament fetch methods
     bool fetch_hh_filament_info(std::vector<AmsTrayData>& trays, int& max_lane_index);
     bool fetch_moonraker_filament_data(std::vector<AmsTrayData>& trays, int& max_lane_index);
+    bool fetch_creality_cfs_data(std::vector<AmsTrayData>& trays, int& max_lane_index);
 
-    // JSON helper methods
-    static std::string safe_json_string(const nlohmann::json& obj, const char* key);
-    static int safe_json_int(const nlohmann::json& obj, const char* key);
-    static std::string safe_array_string(const nlohmann::json& arr, int idx);
-    static int safe_array_int(const nlohmann::json& arr, int idx);
     static std::string normalize_color_value(const std::string& color);
 
     std::string                        ssdp_announced_host;

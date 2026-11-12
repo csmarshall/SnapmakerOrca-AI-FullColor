@@ -1544,6 +1544,16 @@ TEST_CASE("handle_legacy migrates the adaptive TPMS keys", "[Config]") {
     CHECK(ctxt.substitutions.empty());
 }
 
+TEST_CASE("normalize_fdm leaves feature filaments on Default", "[Config]") {
+    DynamicPrintConfig config;
+    config.set_key_value("sparse_infill_filament_id", new ConfigOptionInt(2));
+    config.set_key_value("internal_solid_filament_id", new ConfigOptionInt(0));
+    config.set_key_value("top_surface_filament_id", new ConfigOptionInt(3));
+    config.normalize_fdm();
+    CHECK(config.opt_int("internal_solid_filament_id") == 0);
+    CHECK_FALSE(config.has("bottom_surface_filament_id"));
+}
+
 TEST_CASE("silent_mode is no longer saved and is dropped on load", "[Config]") {
     DynamicPrintConfig full;
     full.apply(FullPrintConfig::defaults());
@@ -1859,4 +1869,31 @@ TEST_CASE("Every listed filament override is nullable", "[Config]")
         if (overrides.count(key) == 1)
             CHECK(def.nullable);
     }
+}
+
+TEST_CASE("Entries of a list applied by index onto an empty list are copied", "[Config][Regression]")
+{
+    const std::vector<std::string> ids = GENERATE(std::vector<std::string>{"GFA00"}, std::vector<std::string>{"GFA00", "GFA01"});
+    DynamicPrintConfig edited;
+    edited.set_key_value("filament_ids", new ConfigOptionStrings(ids));
+    std::vector<std::string> keys;
+    for (size_t i = 0; i < ids.size(); ++i)
+        keys.push_back("filament_ids#" + std::to_string(i));
+
+    DynamicPrintConfig saved;
+    saved.set_key_value("filament_ids", new ConfigOptionStrings());
+    saved.apply_only(edited, keys);
+    CHECK(saved.option<ConfigOptionStrings>("filament_ids")->values == ids);
+}
+
+TEST_CASE("An empty list applied by index replaces the target list", "[Config][Regression]")
+{
+    DynamicPrintConfig saved;
+    saved.set_key_value("filament_ids", new ConfigOptionStrings());
+    DynamicPrintConfig edited;
+    SECTION("target has entries") { edited.set_key_value("filament_ids", new ConfigOptionStrings({"GFA00"})); }
+    SECTION("target lacks the option") {}
+
+    edited.apply_only(saved, {"filament_ids#0"});
+    CHECK(edited.option<ConfigOptionStrings>("filament_ids")->values.empty());
 }
