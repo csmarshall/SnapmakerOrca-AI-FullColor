@@ -888,6 +888,7 @@ struct Sidebar::priv
     std::optional<Spoolman::CatalogFetch> spoolman_fetch;       // set only for the duration of the sync_ams_list run started by sync_spoolman_filaments
     Spoolman::UpsertReport                spoolman_report;
     bool                                  spoolman_has_last_good = false;
+    std::optional<long long>              spoolman_last_good_age;
 
     wxPanel *scrolled = nullptr;
     PlaterPresetComboBox *combo_sla_print = nullptr;
@@ -6412,6 +6413,7 @@ void Sidebar::sync_spoolman_filaments()
                 p->spoolman_report = Spoolman::upsert_catalog(bundle->filaments, fetch.filaments.items, ctx);
             }
             p->spoolman_has_last_good = agent->last_good_spoolman_catalog().has_value();
+            p->spoolman_last_good_age = agent->last_good_spoolman_age_seconds();
             p->spoolman_fetch         = std::move(fetch);
             sync_ams_list(false);
             p->spoolman_fetch.reset();
@@ -6590,7 +6592,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
         outcome.tiers = spoolman_tiers;
         if (p->spoolman_fetch) {
             outcome.report = p->spoolman_report;
-            Spoolman::apply_fetch_to_outcome(outcome, *p->spoolman_fetch, p->spoolman_has_last_good);
+            Spoolman::apply_fetch_to_outcome(outcome, *p->spoolman_fetch, p->spoolman_has_last_good, p->spoolman_last_good_age);
         }
         int number = 0;
         for (auto &tray_entry : wxGetApp().preset_bundle->filament_ams_list) {

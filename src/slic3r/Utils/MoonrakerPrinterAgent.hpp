@@ -152,6 +152,8 @@ public:
     Spoolman::CatalogFetch fetch_spoolman_catalog(bool preference_on);
     // The last good catalog of the current printer, even after invalidate or a failed refresh (show it as stale); nullopt if none.
     std::optional<Spoolman::CatalogFetch> last_good_spoolman_catalog() const;
+    // Age in seconds of that last good fetch; nullopt if none.
+    std::optional<long long> last_good_spoolman_age_seconds() const;
     void                   invalidate_spoolman_cache();
 
     // #105: whether this agent may ask the printer to re-read its spool RFID tags (the Spoolman button only). Off by default; the

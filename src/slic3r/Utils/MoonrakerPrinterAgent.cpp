@@ -1375,6 +1375,11 @@ std::optional<Spoolman::CatalogFetch> MoonrakerPrinterAgent::last_good_spoolman_
     return spoolman_cache.last_good(spoolman_endpoint().key);
 }
 
+std::optional<long long> MoonrakerPrinterAgent::last_good_spoolman_age_seconds() const
+{
+    return spoolman_cache.last_good_age_seconds(spoolman_endpoint().key);
+}
+
 void MoonrakerPrinterAgent::invalidate_spoolman_cache() { spoolman_cache.invalidate_all(); }
 
 MoonrakerPrinterAgent::RfidReread MoonrakerPrinterAgent::reread_spool_tags(std::chrono::milliseconds timeout, std::chrono::milliseconds interval)
