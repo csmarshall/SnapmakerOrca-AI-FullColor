@@ -956,6 +956,67 @@ std::string MoonrakerPrinterAgent::normalize_color_value(const std::string& colo
     return normalized;
 }
 
+int MoonrakerPrinterAgent::spoolman_moonraker_request(const std::string& base_url, const std::string& api_key, const std::string& path,
+                                                      const std::string& post_body, std::string& response) const
+{
+    int result = 0;
+    response.clear();
+    auto http = post_body.empty() ? Http::get(join_url(base_url, path)) : Http::post(join_url(base_url, path));
+    if (!api_key.empty())
+        http.header("X-Api-Key", api_key);
+    if (!post_body.empty())
+        http.header("Content-Type", "application/json").set_post_body(post_body);
+    http.timeout_connect(kSpoolmanConnectTimeoutSeconds)
+        .timeout_max(kSpoolmanMaxTimeoutSeconds)
+        .size_limit(kSpoolmanMaxResponseBytes)
+        .on_complete([&](std::string body, unsigned status) {
+            response = std::move(body);
+            result   = int(status);
+        })
+        .on_error([&](std::string body, std::string err, unsigned status) {
+            BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: Spoolman request " << path << " failed: " << err;
+            response.clear();
+            // Http reports an aborted oversize transfer with this text and no HTTP status
+            result = (status == 0 && err.find("size exceeded limit") != std::string::npos) ? Spoolman::kStatusTooLarge : int(status);
+        })
+        .perform_sync();
+    return result;
+}
+
+MoonrakerPrinterAgent::SpoolmanEndpoint MoonrakerPrinterAgent::spoolman_endpoint() const
+{
+    std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+    return {device_info.base_url, device_info.api_key, device_info.dev_id + "@" + device_info.base_url};
+}
+
+std::optional<bool> MoonrakerPrinterAgent::spoolman_status(const SpoolmanEndpoint& ep) const
+{
+    std::string reply;
+    const int   status = spoolman_moonraker_request(ep.base_url, ep.api_key, "/server/spoolman/status", {}, reply);
+    return Spoolman::moonraker_spoolman_connected(status, reply);
+}
+
+std::optional<bool> MoonrakerPrinterAgent::spoolman_status() const { return spoolman_status(spoolman_endpoint()); }
+
+Spoolman::CatalogFetch MoonrakerPrinterAgent::fetch_spoolman_catalog(bool preference_on)
+{
+    const SpoolmanEndpoint ep = spoolman_endpoint(); // once; the lambdas below use only this copy (and `this` for the synchronous call)
+    Spoolman::HttpGet get = [this, ep](const std::string& path, const std::string& query, std::string& body) {
+        std::string reply;
+        const int   status = spoolman_moonraker_request(ep.base_url, ep.api_key, "/server/spoolman/proxy",
+                                                        Spoolman::moonraker_proxy_request_body(path, query), reply);
+        return Spoolman::moonraker_proxy_unwrap(status, reply, body);
+    };
+    return Spoolman::fetch_catalog_if_enabled(preference_on, [this, ep] { return spoolman_status(ep); }, spoolman_cache, ep.key, get);
+}
+
+std::optional<Spoolman::CatalogFetch> MoonrakerPrinterAgent::last_good_spoolman_catalog() const
+{
+    return spoolman_cache.last_good(spoolman_endpoint().key);
+}
+
+void MoonrakerPrinterAgent::invalidate_spoolman_cache() { spoolman_cache.invalidate_all(); }
+
 // Fetch filament info from moonraker database
 bool MoonrakerPrinterAgent::fetch_moonraker_filament_data(std::vector<AmsTrayData>& trays, int& max_lane_index)
 {

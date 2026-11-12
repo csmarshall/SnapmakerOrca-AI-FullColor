@@ -456,6 +456,8 @@ set(lisbslic3r_sources
     Spoolman/SpoolmanParent.hpp
     Spoolman/SpoolmanPresets.cpp
     Spoolman/SpoolmanPresets.hpp
+    Spoolman/SpoolmanTransport.cpp
+    Spoolman/SpoolmanTransport.hpp
     SLA/AGGRaster.hpp
     SLA/BoostAdapter.hpp
     SLA/Clustering.cpp
