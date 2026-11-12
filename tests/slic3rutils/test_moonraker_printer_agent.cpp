@@ -424,12 +424,17 @@ private:
         http::response<http::string_body> response{http::status::not_found, request.version()};
         if (request.target() == "/server/files/upload") {
             record_upload(request);
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_upload = request.body();
+            }
             response.result(http::status::ok);
             response.body() = "{}";
         } else if (request.target() == "/printer/gcode/script") {
             std::lock_guard<std::mutex> lock(m_mutex);
             const std::string script = nlohmann::json::parse(request.body()).at("script").get<std::string>();
             m_scripts.push_back(script);
+            m_script = script;
             const bool rejected = !m_rejected_script_prefix.empty() && script.rfind(m_rejected_script_prefix, 0) == 0;
             response.result(rejected ? http::status::internal_server_error : http::status::ok);
             response.body() = "{}";
@@ -451,17 +456,6 @@ private:
             }
             response.result(http::status::ok);
             response.body() = nlohmann::json{{"result", result}}.dump();
-        } else if (request.target() == "/server/files/upload") {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_upload = request.body();
-            response.result(http::status::created);
-            response.body() = "{}";
-        } else if (request.target() == "/printer/gcode/script") {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            const nlohmann::json body = nlohmann::json::parse(request.body(), nullptr, false);
-            m_script                  = body.is_object() ? body.value("script", "") : "";
-            response.result(http::status::ok);
-            response.body() = R"({"result": "ok"})";
         }
         response.prepare_payload();
         beast::error_code ec;
