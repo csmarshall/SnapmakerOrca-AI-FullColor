@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
 
+#include <atomic>
 #include <condition_variable>
+#include <stdexcept>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -310,4 +312,40 @@ TEST_CASE("apply_fetch_to_outcome: the last good age reaches the unreachable not
     SyncOutcome n;
     apply_fetch_to_outcome(n, failed, false, 99);
     CHECK_FALSE(n.last_good_age_seconds.has_value());
+}
+
+TEST_CASE("SyncRunner: a poster that drops the callback does not leave the runner busy", "[Spoolman][SyncRun]")
+{
+    SyncRunner      r;
+    std::atomic<bool> posted{false};
+    int             done_calls = 0;
+    auto s = r.start(true, [] { return good_fetch(); }, [&](std::function<void()>) { posted = true; /* dropped */ },
+                     [&](CatalogFetch) { ++done_calls; });
+    REQUIRE(s == SyncRunner::Start::started);
+    for (int i = 0; i < 1000 && r.in_flight(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(posted);
+    CHECK_FALSE(r.in_flight());
+    CHECK(done_calls == 0);
+    FakeGui gui;
+    CHECK(r.start(true, [] { return good_fetch(); }, gui.poster(), [](CatalogFetch) {}) == SyncRunner::Start::started);
+    gui.run_one();
+}
+
+TEST_CASE("fetch_after_reread: a throwing re-read is reported and the fetch still runs", "[Spoolman][SyncRun][RfidReread]")
+{
+    int  errors = 0, fetches = 0;
+    auto f = fetch_after_reread([] { throw std::runtime_error("boom"); }, [&] { ++errors; }, [&] { ++fetches; return good_fetch(); });
+    CHECK(errors == 1);
+    CHECK(fetches == 1);
+    CHECK(f.good());
+}
+
+TEST_CASE("fetch_after_reread: a clean re-read reports no error", "[Spoolman][SyncRun][RfidReread]")
+{
+    int errors = 0, rereads = 0;
+    auto f = fetch_after_reread([&] { ++rereads; }, [&] { ++errors; }, [] { return good_fetch(); });
+    CHECK(rereads == 1);
+    CHECK(errors == 0);
+    CHECK(f.good());
 }

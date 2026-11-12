@@ -41,6 +41,11 @@ private:
     std::shared_ptr<State> m_state;
 };
 
+// Worker-thread body for the re-read button: runs `reread`; if it throws, calls `on_reread_error` (the caller records the result as
+// unconfirmed and logs it) and STILL runs `fetch`. Exceptions from `fetch` propagate (SyncRunner turns them into an unreachable result).
+CatalogFetch fetch_after_reread(const std::function<void()> &reread, const std::function<void()> &on_reread_error,
+                                const SyncRunner::FetchFn &fetch);
+
 // Fills the catalog-related fields of `outcome` from a fetch. A good fetch is "fresh"; otherwise the outcome is unreachable (a catalog that
 // was reached but unusable is bad_response) and `last_good` (cache) says whether an earlier sync exists. `last_good_age_seconds` (from
 // CatalogCache::last_good_age_seconds) is the age of that earlier sync; nullopt leaves it unknown (the dialog then says so).

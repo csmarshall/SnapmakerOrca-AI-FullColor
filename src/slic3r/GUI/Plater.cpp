@@ -6389,11 +6389,23 @@ void Sidebar::sync_spoolman_filaments()
     const auto started = p->spoolman_runner.start(
         true,
         [agent, reread, reread_result] {
-            if (reread)
-                *reread_result = agent->reread_spool_tags(); // worker thread; read before `done` runs, ordered by the post
-            return agent->fetch_spoolman_catalog(true);
+            return Spoolman::fetch_after_reread(
+                [&] {
+                    if (reread)
+                        *reread_result = agent->reread_spool_tags(); // worker thread; read before `done` runs, ordered by the post
+                },
+                [&] {
+                    // The script may already have been sent; the outcome is unknown, and the catalog fetch must still run.
+                    *reread_result = MoonrakerPrinterAgent::RfidReread::unconfirmed;
+                    BOOST_LOG_TRIVIAL(warning) << "sync_spoolman_filaments: spool tag re-read threw; result recorded as unconfirmed";
+                },
+                [&] { return agent->fetch_spoolman_catalog(true); });
         },
-        [](std::function<void()> f) { wxTheApp->CallAfter(std::move(f)); },
+        [](std::function<void()> f) {
+            // Worker thread: the app may be torn down if the user quit during the re-read window. Drop the callback then.
+            if (wxTheApp)
+                wxTheApp->CallAfter(std::move(f));
+        },
         [this, agent, reread, reread_result](Spoolman::CatalogFetch fetch) {
             if (reread) {
                 using R = MoonrakerPrinterAgent::RfidReread;
@@ -6405,6 +6417,11 @@ void Sidebar::sync_spoolman_filaments()
                     MessageDialog(this, why + " " + _L("Continuing with the tags it already has."), _L("Spoolman"), wxOK | wxICON_INFORMATION).ShowModal();
                 }
             }
+            // Reset on every exit path, including an exception out of sync_ams_list, so a later plain sync shows no Spoolman summary.
+            struct ResetOnExit {
+                Sidebar::priv *p;
+                ~ResetOnExit() { p->spoolman_fetch.reset(); p->spoolman_report = {}; }
+            } reset_on_exit{p.get()};
             p->spoolman_report = {};
             if (fetch.good()) {
                 auto *bundle = wxGetApp().preset_bundle;
@@ -6416,8 +6433,6 @@ void Sidebar::sync_spoolman_filaments()
             p->spoolman_last_good_age = agent->last_good_spoolman_age_seconds();
             p->spoolman_fetch         = std::move(fetch);
             sync_ams_list(false);
-            p->spoolman_fetch.reset();
-            p->spoolman_report = {};
         });
     (void) started; // busy: a fetch is already running and will sync when it finishes
 }

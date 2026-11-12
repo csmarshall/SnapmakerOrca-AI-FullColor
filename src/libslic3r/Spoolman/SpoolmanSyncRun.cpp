@@ -33,7 +33,14 @@ SyncRunner::Start SyncRunner::start(bool preference_on, FetchFn fetch, PostFn po
             } catch (...) {
                 result = CatalogFetch{}; // attempted == false: reported as unreachable
             }
-            post([st, done = std::move(done), result = std::move(result)]() mutable {
+            // If the poster drops the callback without running it (e.g. the app is shutting down), the last copy's destruction
+            // still clears `busy`, so the runner is never left in flight forever.
+            struct BusyReset {
+                std::shared_ptr<State> st;
+                ~BusyReset() { st->busy = false; }
+            };
+            auto reset = std::make_shared<BusyReset>(BusyReset{st});
+            post([reset, st, done = std::move(done), result = std::move(result)]() mutable {
                 st->busy = false;
                 if (st->alive)
                     done(std::move(result));
@@ -44,6 +51,17 @@ SyncRunner::Start SyncRunner::start(bool preference_on, FetchFn fetch, PostFn po
         throw;
     }
     return Start::started;
+}
+
+CatalogFetch fetch_after_reread(const std::function<void()> &reread, const std::function<void()> &on_reread_error, const SyncRunner::FetchFn &fetch)
+{
+    // The re-read may already have told the printer to clear its tags, so a failure here must not stop the catalog fetch.
+    try {
+        reread();
+    } catch (...) {
+        on_reread_error();
+    }
+    return fetch();
 }
 
 void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good, std::optional<long long> last_good_age_seconds)
