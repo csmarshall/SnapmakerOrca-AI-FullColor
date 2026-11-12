@@ -1,5 +1,8 @@
 #include "MoonrakerPrinterAgent.hpp"
 #include "SnapmakerPrintPreference.hpp"
+#include "SpoolmanJoin.hpp"
+#include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
+#include <thread>
 #include <cstring>
 #include "AsioUtils.hpp"
 #include "CrealityCfs.hpp"
@@ -1372,6 +1375,69 @@ std::optional<Spoolman::CatalogFetch> MoonrakerPrinterAgent::last_good_spoolman_
 }
 
 void MoonrakerPrinterAgent::invalidate_spoolman_cache() { spoolman_cache.invalidate_all(); }
+
+MoonrakerPrinterAgent::RfidReread MoonrakerPrinterAgent::reread_spool_tags(std::chrono::milliseconds timeout, std::chrono::milliseconds interval)
+{
+    if (!supports_rfid_reread())
+        return RfidReread::unsupported;
+    const SpoolmanEndpoint ep = spoolman_endpoint(); // one snapshot for every request below
+
+    auto query = [this, ep](const std::string &object) -> std::optional<nlohmann::json> {
+        std::string reply;
+        if (spoolman_moonraker_request(ep.base_url, ep.api_key, "/printer/objects/query?" + object, {}, reply) != 200)
+            return std::nullopt;
+        auto json = nlohmann::json::parse(reply, nullptr, false, true);
+        if (json.is_discarded() || !json.contains("result") || !json["result"].contains("status") ||
+            !json["result"]["status"].contains(object))
+            return std::nullopt;
+        return json["result"]["status"][object];
+    };
+
+    // Joined slot UIDs; nullopt while every slot is empty (a cleared state) and on a failed read.
+    bool cleared_seen = false;
+    auto uid_signature = [&]() -> std::optional<std::string> {
+        const auto fd = query("filament_detect");
+        if (!fd || !fd->is_object() || !fd->contains("info"))
+            return std::nullopt;
+        std::string sig;
+        bool        any = false;
+        for (const std::string &uid : spoolman_slot_uids((*fd)["info"])) {
+            any = any || !uid.empty();
+            sig += uid + ",";
+        }
+        if (!any) {
+            cleared_seen = true;
+            return std::nullopt;
+        }
+        return cleared_seen ? sig + "|reread" : sig; // tags cleared and read back: a re-read even if the UIDs are unchanged
+    };
+    const std::string baseline = uid_signature().value_or(std::string());
+    cleared_seen               = false;
+
+    Spoolman::RereadTransport transport;
+    transport.read_state = [&]() -> std::optional<std::string> {
+        const auto ps = query("print_stats");
+        if (!ps || !ps->is_object() || !ps->contains("state") || !(*ps)["state"].is_string())
+            return std::nullopt;
+        return (*ps)["state"].get<std::string>();
+    };
+    transport.send_script = [&](const std::string &script) {
+        std::string reply;
+        const int   status = spoolman_moonraker_request(ep.base_url, ep.api_key, "/printer/gcode/script",
+                                                        nlohmann::json{{"script", script}}.dump(), reply);
+        return status == 200;
+    };
+    switch (Spoolman::send_rfid_reread(transport)) {
+    case Spoolman::RereadSend::busy: return RfidReread::busy;
+    case Spoolman::RereadSend::state_unknown: return RfidReread::state_unknown;
+    case Spoolman::RereadSend::send_failed: return RfidReread::send_failed;
+    case Spoolman::RereadSend::sent: break;
+    }
+    const auto t0    = std::chrono::steady_clock::now();
+    auto       now   = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0); };
+    auto       sleep = [](std::chrono::milliseconds d) { std::this_thread::sleep_for(d); };
+    return Spoolman::poll_until_changed(uid_signature, baseline, now, sleep, timeout, interval) ? RfidReread::done : RfidReread::unconfirmed;
+}
 
 // Fetch filament info from moonraker database
 bool MoonrakerPrinterAgent::fetch_moonraker_filament_data(std::vector<AmsTrayData>& trays, int& max_lane_index)

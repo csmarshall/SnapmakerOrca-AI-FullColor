@@ -154,6 +154,16 @@ public:
     std::optional<Spoolman::CatalogFetch> last_good_spoolman_catalog() const;
     void                   invalidate_spoolman_cache();
 
+    // #105: whether this agent may ask the printer to re-read its spool RFID tags (the Spoolman button only). Off by default; the
+    // Snapmaker agent turns it on.
+    virtual bool supports_rfid_reread() const { return false; }
+    enum class RfidReread { unsupported, busy, state_unknown, send_failed, done, unconfirmed };
+    // Sends the approved re-read script (Spoolman::rfid_reread_script) through Spoolman::send_rfid_reread, which re-checks
+    // print_stats.state immediately before sending, then polls filament_detect (read-only) until a slot UID changed or `timeout` passed.
+    // `unconfirmed` = sent but no change was seen in time. Blocking: call it off the GUI thread.
+    RfidReread reread_spool_tags(std::chrono::milliseconds timeout = std::chrono::seconds(10),
+                                 std::chrono::milliseconds interval = std::chrono::seconds(1));
+
     // JSON helper methods
     static std::string safe_json_string(const nlohmann::json& obj, const char* key);
     static int safe_json_int(const nlohmann::json& obj, const char* key);

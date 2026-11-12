@@ -48,6 +48,7 @@
 #include <nlohmann/json.hpp>
 
 #include "libslic3r/miniz_extension.hpp"
+#include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
 #include "slic3r/GUI/DeviceCore/DevStorage.h"
 #include "slic3r/Utils/IPrinterAgent.hpp"
 #include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
@@ -1612,4 +1613,101 @@ TEST_CASE("Spoolman: the response size limit is the body cap plus a little slack
     // Whether Http::size_limit() is called with it needs a socket and is not tested here; the constant is what is asserted.
     CHECK(MoonrakerPrinterAgent::kSpoolmanMaxResponseBytes > Spoolman::kMaxBodyBytes);
     CHECK(MoonrakerPrinterAgent::kSpoolmanMaxResponseBytes <= Spoolman::kMaxBodyBytes + 1024 * 1024);
+}
+
+// ---- #105: RFID re-read through the agent (fake transport, no socket) ----
+namespace {
+class RereadAgent : public MoonrakerPrinterAgent
+{
+public:
+    explicit RereadAgent(bool supported) : MoonrakerPrinterAgent(""), m_supported(supported)
+    {
+        device_info.dev_id   = "dev1";
+        device_info.base_url = "http://printer.invalid:7125";
+    }
+    bool supports_rfid_reread() const override { return m_supported; }
+    struct Request { std::string path, post_body; };
+    mutable std::vector<Request> requests;
+    std::string                  state = "standby"; // "" = state unreadable (HTTP 500)
+    // filament_detect info JSON before and after the script was posted
+    std::string before = R"([{"CARD_UID":[1,2,3,4]},{},{},{}])";
+    std::string after  = R"([{"CARD_UID":[9,9,9,9]},{},{},{}])";
+    bool        posted = false;
+    int         post_status = 200;
+
+    size_t posts() const { size_t n = 0; for (auto &r : requests) n += r.post_body.empty() ? 0 : 1; return n; }
+
+protected:
+    int spoolman_moonraker_request(const std::string &, const std::string &, const std::string &path, const std::string &post_body,
+                                   std::string &response) const override
+    {
+        requests.push_back({path, post_body});
+        if (!post_body.empty()) {
+            const_cast<RereadAgent *>(this)->posted = true;
+            return post_status;
+        }
+        if (path == "/printer/objects/query?print_stats") {
+            if (state.empty())
+                return 500;
+            response = nlohmann::json{{"result", {{"status", {{"print_stats", {{"state", state}}}}}}}}.dump();
+            return 200;
+        }
+        if (path == "/printer/objects/query?filament_detect") {
+            response = R"({"result":{"status":{"filament_detect":{"info":)" + (posted ? after : before) + "}}}}";
+            return 200;
+        }
+        return 404;
+    }
+
+private:
+    bool m_supported;
+};
+} // namespace
+
+TEST_CASE("RFID re-read: an agent that does not support it sends nothing at all", "[MoonrakerPrinterAgent][RfidReread]")
+{
+    RereadAgent agent(false);
+    CHECK(agent.reread_spool_tags() == MoonrakerPrinterAgent::RfidReread::unsupported);
+    CHECK(agent.requests.empty());
+    // the base class default and the Snapmaker agent
+    CHECK_FALSE(MoonrakerPrinterAgent("").supports_rfid_reread());
+    CHECK(SnapmakerPrinterAgent("").supports_rfid_reread());
+}
+
+TEST_CASE("RFID re-read: busy or unreadable state posts nothing", "[MoonrakerPrinterAgent][RfidReread]")
+{
+    for (const char *s : {"printing", "paused", "Printing", "garbage"}) {
+        RereadAgent agent(true);
+        agent.state = s;
+        CHECK(agent.reread_spool_tags() == MoonrakerPrinterAgent::RfidReread::busy);
+        CHECK(agent.posts() == 0);
+    }
+    RereadAgent agent(true);
+    agent.state = ""; // HTTP 500
+    CHECK(agent.reread_spool_tags() == MoonrakerPrinterAgent::RfidReread::state_unknown);
+    CHECK(agent.posts() == 0);
+}
+
+TEST_CASE("RFID re-read: idle posts exactly one script and sees the changed UID", "[MoonrakerPrinterAgent][RfidReread]")
+{
+    RereadAgent agent(true);
+    CHECK(agent.reread_spool_tags(std::chrono::milliseconds(500), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::done);
+    REQUIRE(agent.posts() == 1);
+    for (auto &r : agent.requests)
+        if (!r.post_body.empty()) {
+            CHECK(r.path == "/printer/gcode/script");
+            CHECK(nlohmann::json::parse(r.post_body)["script"].get<std::string>() == Spoolman::rfid_reread_script());
+        }
+}
+
+TEST_CASE("RFID re-read: sent but no UID change times out as unconfirmed; a failed post is reported", "[MoonrakerPrinterAgent][RfidReread]")
+{
+    RereadAgent same(true);
+    same.after = same.before;
+    CHECK(same.reread_spool_tags(std::chrono::milliseconds(50), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::unconfirmed);
+    CHECK(same.posts() == 1);
+    RereadAgent failing(true);
+    failing.post_status = 500;
+    CHECK(failing.reread_spool_tags(std::chrono::milliseconds(50), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::send_failed);
+    CHECK(failing.posts() == 1);
 }
