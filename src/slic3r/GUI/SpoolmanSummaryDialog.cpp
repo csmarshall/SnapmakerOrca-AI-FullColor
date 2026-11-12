@@ -124,6 +124,9 @@ SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::S
     buttons->Add(close, 0);
     main_sizer->Add(buttons, 0, wxEXPAND | wxALL, FromDIP(10));
     SetSizerAndFit(main_sizer);
+    // The scrolled body's virtual size is only set by FitInside(); without it the last (wrapped) line can be cut off at the bottom.
+    m_body->Layout();
+    m_body->FitInside();
 
     details->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { set_details_visible(!m_details_visible); });
     close->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { Close(); });
