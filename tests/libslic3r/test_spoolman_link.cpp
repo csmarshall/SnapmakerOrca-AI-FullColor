@@ -27,6 +27,14 @@ using namespace Slic3r::Spoolman;
 
 namespace {
 
+// serialize() gives nullopt when too large; every use below expects a link that fits.
+std::string ser(const Link &l)
+{
+    auto s = serialize(l);
+    REQUIRE(s.has_value());
+    return *s;
+}
+
 Link sample_link()
 {
     Link l;
@@ -42,9 +50,9 @@ std::string max_size_link_text()
     Link l;
     l.spoolman_id = 7;
     l.external_id = "x";
-    std::string t = serialize(l);
+    std::string t = ser(l);
     l.external_id = std::string(kMaxLinkBytes - t.size() + 1, 'x');
-    return serialize(l);
+    return ser(l);
 }
 
 } // namespace
@@ -52,16 +60,16 @@ std::string max_size_link_text()
 TEST_CASE("Link round trips through serialize and parse", "[Spoolman]")
 {
     const Link l = sample_link();
-    auto       p = parse(serialize(l));
+    auto       p = parse(ser(l));
     REQUIRE(p.has_value());
     CHECK(*p == l);
-    CHECK(serialize(*p) == serialize(l));
+    CHECK(ser(*p) == ser(l));
 
     Link u;
     u.spoolman_id = INT_MAX;
     u.external_id = "caf\xC3\xA9 \xE2\x9C\x93 \xF0\x9F\x98\x80";
     u.sources     = {{"k\xC3\xA9y", "v\xC3\xA4l"}};
-    auto q = parse(serialize(u));
+    auto q = parse(ser(u));
     REQUIRE(q.has_value());
     CHECK(*q == u);
 }
@@ -113,7 +121,7 @@ TEST_CASE("Link size and depth caps", "[Spoolman]")
     Link l;
     l.spoolman_id = 7;
     l.external_id = std::string(kMaxLinkBytes, 'x');
-    CHECK_FALSE(parse(serialize(l)).has_value());
+    CHECK_FALSE(serialize(l).has_value());
 
     // depth: unknown keys count too. 8 levels of nesting pass, 9 do not.
     auto nested = [](int levels) {
@@ -130,19 +138,19 @@ TEST_CASE("Link size and depth caps", "[Spoolman]")
     CHECK_FALSE(parse(deep).has_value());
 }
 
-TEST_CASE("serialize enforces the size cap with an empty string", "[Spoolman]")
+TEST_CASE("serialize enforces the size cap with nullopt", "[Spoolman]")
 {
     Link l;
     l.spoolman_id = 3;
     for (int i = 0; i < 200; ++i)
         l.sources["filament_key_number_" + std::to_string(i)] = "spoolman";
-    CHECK(serialize(l).empty());          // would be > 4096 bytes
+    CHECK_FALSE(serialize(l).has_value());   // would be > 4096 bytes: nullopt, never ""
     l.sources.clear();
     l.sources["a"] = "b";
-    CHECK_FALSE(serialize(l).empty());
+    CHECK(serialize(l).has_value());
     CHECK(max_size_link_text().size() == kMaxLinkBytes);   // exactly at the cap is still written and parses
     l.external_id = std::string(kMaxLinkBytes, 'x');
-    CHECK(serialize(l).empty());
+    CHECK_FALSE(serialize(l).has_value());
 }
 
 TEST_CASE("filament_spoolman_link is a registered filament string option with an empty default", "[Spoolman]")
@@ -164,7 +172,7 @@ TEST_CASE("filament_spoolman_link survives config, ini and preset JSON round tri
 {
     Link big = sample_link();
     big.external_id = "q\"uote \\ back\xC3\xA9";
-    const std::vector<std::string> values = {serialize(sample_link()), serialize(big), max_size_link_text(), ""};
+    const std::vector<std::string> values = {ser(sample_link()), ser(big), max_size_link_text(), ""};
 
     for (const std::string &v : values) {
         INFO(v.size());
@@ -235,7 +243,7 @@ bool store_and_load_3mf(const DynamicPrintConfig &source, DynamicPrintConfig &re
 
 TEST_CASE("filament_spoolman_link survives a project 3MF round trip", "[Spoolman][3mf]")
 {
-    for (const std::string &v : {serialize(sample_link()), max_size_link_text()}) {
+    for (const std::string &v : {ser(sample_link()), max_size_link_text()}) {
         DynamicPrintConfig source;
         source.set_key_value("filament_spoolman_link", new ConfigOptionStrings{v, ""});
         DynamicPrintConfig         reloaded;

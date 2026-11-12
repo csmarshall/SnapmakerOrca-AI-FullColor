@@ -31,7 +31,7 @@ bool depth_ok(const json &root)
 
 } // namespace
 
-std::string serialize(const Link &link)
+std::optional<std::string> serialize(const Link &link)
 {
     json j = json::object();
     j["id"]          = link.spoolman_id;
@@ -41,7 +41,9 @@ std::string serialize(const Link &link)
         s[k] = v;
     j["sources"] = std::move(s);
     std::string out = j.dump(-1, ' ', false, json::error_handler_t::replace);
-    return out.size() > kMaxLinkBytes ? std::string() : out;
+    if (out.size() > kMaxLinkBytes)
+        return std::nullopt;
+    return out;
 }
 
 std::optional<Link> parse(std::string_view text)

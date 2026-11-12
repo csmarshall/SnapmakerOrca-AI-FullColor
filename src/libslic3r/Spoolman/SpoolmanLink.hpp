@@ -13,8 +13,8 @@
 //  - "sources" optional, an object whose values are all strings; missing or null => empty; any other shape => nullopt;
 //  - unknown top-level keys are ignored (forward compatibility; they are NOT written back by serialize).
 // serialize() writes keys in a fixed order (nlohmann sorted), so serialize(parse(serialize(l))) == serialize(l).
-// serialize() enforces the same 4096-byte cap: a link whose text would be longer gives the EMPTY string (= "no link"), so a written link
-// can never silently stop loading. The caller must treat "" from a non-empty Link as "too large" and keep the old value.
+// serialize() enforces the same 4096-byte cap: a link whose text would be longer gives std::nullopt ("too large"), so a written link
+// can never silently stop loading and "too large" can never be mistaken for "no link" (the empty string). The caller keeps the old value.
 //
 // VERIFIED: by tests/libslic3r/test_spoolman_link.cpp. ASSUMED: the field names and "id required" are this project's choice, not a
 // Spoolman format.
@@ -37,7 +37,8 @@ struct Link
     bool operator==(const Link &o) const { return spoolman_id == o.spoolman_id && external_id == o.external_id && sources == o.sources; }
 };
 
-std::string          serialize(const Link &link);
+// nullopt = the text would exceed kMaxLinkBytes (too large); the empty string is never returned.
+std::optional<std::string> serialize(const Link &link);
 std::optional<Link>  parse(std::string_view text);
 
 }} // namespace Slic3r::Spoolman

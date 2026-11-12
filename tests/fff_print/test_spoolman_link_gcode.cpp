@@ -33,7 +33,7 @@ std::string some_link()
     l.spoolman_id = 42;
     l.external_id = "polymaker_pla_red";
     l.sources     = {{"filament_density", "spoolman"}};
-    return Spoolman::serialize(l);
+    return Spoolman::serialize(l).value();
 }
 
 } // namespace
