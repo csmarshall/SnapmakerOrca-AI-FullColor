@@ -143,3 +143,100 @@ TEST_CASE("SyncRunner: done after the owner is destroyed does nothing", "[Spoolm
     gui.run_one();
     CHECK_FALSE(called);
 }
+
+// ---- #105: RFID re-read (pure parts; no printer, fakes only) ----
+
+TEST_CASE("RFID re-read: the script is exactly the 8 approved lines", "[Spoolman][RfidReread]")
+{
+    CHECK(rfid_reread_script() == "FILAMENT_DT_CLEAR CHANNEL=0\nFILAMENT_DT_CLEAR CHANNEL=1\nFILAMENT_DT_CLEAR CHANNEL=2\nFILAMENT_DT_CLEAR CHANNEL=3\n"
+                                  "FILAMENT_DT_UPDATE CHANNEL=0\nFILAMENT_DT_UPDATE CHANNEL=1\nFILAMENT_DT_UPDATE CHANNEL=2\nFILAMENT_DT_UPDATE CHANNEL=3");
+}
+
+TEST_CASE("RFID re-read: only the four idle Klipper states are allowed", "[Spoolman][RfidReread]")
+{
+    for (const char *s : {"standby", "complete", "cancelled", "error"})
+        CHECK(rfid_reread_allowed(s));
+    for (const char *s : {"printing", "paused", "", "Printing", "STANDBY", "Standby", " standby", "standby ", "garbage", "standby\n", "idle"})
+        CHECK_FALSE(rfid_reread_allowed(s));
+}
+
+namespace {
+struct FakeReread
+{
+    std::optional<std::string> state;     // what the state read returns
+    int                        state_reads = 0;
+    std::vector<std::string>   sent;
+    bool                       send_ok = true;
+    RereadTransport transport()
+    {
+        RereadTransport t;
+        t.read_state  = [this] { ++state_reads; return state; };
+        t.send_script = [this](const std::string &s) { sent.push_back(s); return send_ok; };
+        return t;
+    }
+};
+} // namespace
+
+TEST_CASE("RFID re-read: send refuses when the printer is busy or the state is unknown, and sends nothing", "[Spoolman][RfidReread]")
+{
+    for (const char *busy : {"printing", "paused", "", "Printing", "garbage"}) {
+        FakeReread f;
+        f.state = busy;
+        CHECK(send_rfid_reread(f.transport()) == RereadSend::busy);
+        CHECK(f.sent.empty());
+    }
+    FakeReread unknown; // state read failed
+    CHECK(send_rfid_reread(unknown.transport()) == RereadSend::state_unknown);
+    CHECK(unknown.sent.empty());
+    RereadTransport no_reader; // no way to read the state at all
+    int sends = 0;
+    no_reader.send_script = [&](const std::string &) { ++sends; return true; };
+    CHECK(send_rfid_reread(no_reader) == RereadSend::state_unknown);
+    CHECK(sends == 0);
+}
+
+TEST_CASE("RFID re-read: idle state sends exactly one script after re-checking the state", "[Spoolman][RfidReread]")
+{
+    for (const char *idle : {"standby", "complete", "cancelled", "error"}) {
+        FakeReread f;
+        f.state = idle;
+        CHECK(send_rfid_reread(f.transport()) == RereadSend::sent);
+        REQUIRE(f.sent.size() == 1);
+        CHECK(f.sent[0] == rfid_reread_script());
+        CHECK(f.state_reads == 1);
+    }
+    FakeReread failing;
+    failing.state   = "standby";
+    failing.send_ok = false;
+    CHECK(send_rfid_reread(failing.transport()) == RereadSend::send_failed);
+    CHECK(failing.sent.size() == 1);
+}
+
+TEST_CASE("RFID re-read: poll returns when the value changes, and times out otherwise", "[Spoolman][RfidReread]")
+{
+    using ms = std::chrono::milliseconds;
+    ms   clock{0};
+    auto now   = [&] { return clock; };
+    auto sleep = [&](ms d) { clock += d; };
+    SECTION("changes on the third read")
+    {
+        int  n = 0;
+        auto fetch = [&]() -> std::optional<std::string> { return ++n >= 3 ? "new" : "old"; };
+        CHECK(poll_until_changed(fetch, std::string("old"), now, sleep, ms(10000), ms(1000)));
+        CHECK(n == 3);
+        CHECK(clock < ms(10000));
+    }
+    SECTION("never changes: times out and stops reading")
+    {
+        int  n = 0;
+        auto fetch = [&]() -> std::optional<std::string> { ++n; return "old"; };
+        CHECK_FALSE(poll_until_changed(fetch, std::string("old"), now, sleep, ms(10000), ms(1000)));
+        CHECK(clock >= ms(10000));
+        CHECK(n <= 12);
+    }
+    SECTION("failed reads do not count as a change")
+    {
+        auto fetch = []() -> std::optional<std::string> { return std::nullopt; };
+        CHECK_FALSE(poll_until_changed(fetch, std::string("old"), now, sleep, ms(3000), ms(1000)));
+    }
+}

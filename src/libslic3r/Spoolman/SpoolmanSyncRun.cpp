@@ -62,4 +62,48 @@ void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, boo
     outcome.has_previous_sync = has_last_good;
 }
 
+std::string rfid_reread_script()
+{
+    std::string script;
+    for (const char *verb : {"FILAMENT_DT_CLEAR", "FILAMENT_DT_UPDATE"})
+        for (int channel = 0; channel < 4; ++channel) {
+            if (!script.empty())
+                script += '\n';
+            script += std::string(verb) + " CHANNEL=" + std::to_string(channel);
+        }
+    return script;
+}
+
+bool rfid_reread_allowed(const std::string &state)
+{
+    return state == "standby" || state == "complete" || state == "cancelled" || state == "error";
+}
+
+RereadSend send_rfid_reread(const RereadTransport &transport)
+{
+    if (!transport.read_state || !transport.send_script)
+        return RereadSend::state_unknown;
+    const std::optional<std::string> state = transport.read_state(); // read immediately before sending, never a cached value
+    if (!state)
+        return RereadSend::state_unknown;
+    if (!rfid_reread_allowed(*state))
+        return RereadSend::busy;
+    return transport.send_script(rfid_reread_script()) ? RereadSend::sent : RereadSend::send_failed;
+}
+
+bool poll_until_changed(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
+                        const std::function<std::chrono::milliseconds()> &now, const std::function<void(std::chrono::milliseconds)> &sleep,
+                        std::chrono::milliseconds timeout, std::chrono::milliseconds interval)
+{
+    const auto start = now();
+    for (;;) {
+        sleep(interval);
+        const std::optional<std::string> value = fetch();
+        if (value && *value != baseline)
+            return true;
+        if (now() - start >= timeout)
+            return false;
+    }
+}
+
 }} // namespace Slic3r::Spoolman

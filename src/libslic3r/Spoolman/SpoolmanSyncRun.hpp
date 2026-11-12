@@ -10,9 +10,11 @@
 #include "SpoolmanSummary.hpp"
 #include "SpoolmanTransport.hpp"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace Slic3r { namespace Spoolman {
 
@@ -43,6 +45,33 @@ private:
 // was reached but unusable is bad_response) and `last_good` (cache) says whether an earlier sync exists. The cache stores no timestamp,
 // so the stale age stays unknown (the dialog then says so).
 void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good);
+
+// ---- #105: RFID tag re-read, offered only by the Spoolman button ----
+// The only printer commands this adds: FILAMENT_DT_CLEAR / FILAMENT_DT_UPDATE for channels 0..3, sent as ONE script, and only when the
+// printer reports an idle print_stats.state. Everything here is pure or injected so tests never touch a printer.
+
+// Exactly 8 lines joined by '\n': CLEAR CHANNEL=0..3 then UPDATE CHANNEL=0..3. Built from fixed literals and the ints 0..3 only.
+std::string rfid_reread_script();
+
+// True only for Klipper's idle print_stats.state values: standby, complete, cancelled, error (case-sensitive, exact). Printing, paused,
+// empty and anything unrecognised are refused.
+bool rfid_reread_allowed(const std::string &print_stats_state);
+
+struct RereadTransport
+{
+    std::function<std::optional<std::string>()> read_state;  // read-only GET of print_stats.state; nullopt = could not be read
+    std::function<bool(const std::string &)>     send_script; // POST of the script; true on success
+};
+enum class RereadSend { sent, busy, state_unknown, send_failed };
+
+// The single place the script is sent. Reads the state right now; sends nothing unless it was read and is idle.
+RereadSend send_rfid_reread(const RereadTransport &transport);
+
+// Polls `fetch` every `interval` (via the injected clock and sleep) until it returns a value different from `baseline`, or `timeout`
+// elapses. A failed read (nullopt) is not a change. Returns whether a change was seen.
+bool poll_until_changed(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
+                        const std::function<std::chrono::milliseconds()> &now, const std::function<void(std::chrono::milliseconds)> &sleep,
+                        std::chrono::milliseconds timeout, std::chrono::milliseconds interval);
 
 }} // namespace Slic3r::Spoolman
 
