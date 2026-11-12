@@ -363,7 +363,7 @@ TEST_CASE("Moonraker spoolman status parsing", "[Spoolman][SpoolmanTransport]")
 
 TEST_CASE("Spoolman transport: the cache records the time of the last good fetch", "[Spoolman][SpoolmanTransport]")
 {
-    auto now = std::chrono::system_clock::time_point(std::chrono::hours(1000));
+    auto now = std::chrono::steady_clock::time_point(std::chrono::hours(1000));
     CatalogCache cache([&now] { return now; });
     CHECK_FALSE(cache.last_good_age_seconds("printer-a").has_value());
 

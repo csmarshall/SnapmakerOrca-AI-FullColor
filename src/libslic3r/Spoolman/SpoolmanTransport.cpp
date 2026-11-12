@@ -110,8 +110,8 @@ CatalogFetch fetch_catalog(const HttpGet &get)
     return f;
 }
 
-CatalogCache::CatalogCache() : m_clock([] { return std::chrono::system_clock::now(); }) {}
-CatalogCache::CatalogCache(Clock clock) : m_clock(clock ? std::move(clock) : Clock([] { return std::chrono::system_clock::now(); })) {}
+CatalogCache::CatalogCache() : m_clock([] { return std::chrono::steady_clock::now(); }) {}
+CatalogCache::CatalogCache(Clock clock) : m_clock(clock ? std::move(clock) : Clock([] { return std::chrono::steady_clock::now(); })) {}
 
 CatalogFetch CatalogCache::get(const std::string &key, const HttpGet &http)
 {

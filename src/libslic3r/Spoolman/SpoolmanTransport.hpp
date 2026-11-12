@@ -72,8 +72,8 @@ CatalogFetch fetch_catalog(const HttpGet &get);
 class CatalogCache
 {
 public:
-    // Injectable clock (default: std::chrono::system_clock) so the fetch age is testable.
-    using Clock = std::function<std::chrono::system_clock::time_point()>;
+    // Injectable clock (default: std::chrono::steady_clock) so the fetch age is testable.
+    using Clock = std::function<std::chrono::steady_clock::time_point()>;
     CatalogCache();
     explicit CatalogCache(Clock clock);
 
@@ -86,7 +86,7 @@ public:
     std::optional<long long> last_good_age_seconds(const std::string &key) const;
 
 private:
-    struct Entry { CatalogFetch value; bool fresh = false; std::chrono::system_clock::time_point fetched_at; };
+    struct Entry { CatalogFetch value; bool fresh = false; std::chrono::steady_clock::time_point fetched_at; };
     Clock                        m_clock;
     mutable std::mutex           m_mutex;
     unsigned long                m_generation = 0;
