@@ -97,6 +97,7 @@ parent in the OFL map. filament_vendor / filament_type resolve the same way.
 
 import argparse
 import difflib
+import hashlib
 import functools
 import html
 import json
@@ -124,6 +125,16 @@ FILAMENT_ID_LENGTH = 6  # base62 digits after the "OF" prefix -> 8 chars total
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR = os.path.normpath(os.path.join(SCRIPTS_DIR, "..", "resources", "profiles"))
+# Snapmaker's own profile files, copied verbatim into our tree (ADR 0004 amendment, points
+# 6-8; #109). Snapmaker's loader and CI (their check_profiles.yml: orca_extra_profile_check.py
+# and the stock validator) never ran this tool's normalize / setting_id / filament_id /
+# variant-width rules over them, and ADR 0004 forbids "repairing" the files, so the checks
+# below tolerate exactly the files listed here. The manifest pins each file's sha256 as
+# shipped: a file whose bytes differ (an edit, a corruption) is no longer a forklifted file
+# and is held to every rule like any other. Changing a forklifted file therefore means
+# changing the manifest in the same commit, which is the review point.
+# Regenerate an entry with: shasum -a 256 "resources/profiles/<path>".
+FORKLIFT_MANIFEST_PATH = os.path.join(SCRIPTS_DIR, "snapmaker_forklift.json")
 # The single source of truth for the map path; update_bambu_filament_ids.py
 # imports this rather than recomputing it.
 BAMBU_MAP_PATH = os.path.normpath(
@@ -408,6 +419,37 @@ def _no_duplicates_hook(pairs):
     return seen
 
 
+_FORKLIFT_MANIFEST = {}   # manifest path -> {profiles-relative path: sha256}
+
+
+def _forklift_manifest():
+    path = FORKLIFT_MANIFEST_PATH
+    if path not in _FORKLIFT_MANIFEST:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                _FORKLIFT_MANIFEST[path] = json.load(f).get("files", {})
+        except OSError:
+            _FORKLIFT_MANIFEST[path] = {}
+    return _FORKLIFT_MANIFEST[path]
+
+
+def is_forklift(profiles_dir, path):
+    """True when path (absolute, or relative to profiles_dir) is a forklifted Snapmaker
+    file whose bytes are exactly the ones pinned in the manifest."""
+    profiles_dir = str(profiles_dir)
+    path = str(path)
+    full = path if os.path.isabs(path) else os.path.join(profiles_dir, path)
+    rel = os.path.relpath(full, profiles_dir).replace(os.sep, "/")
+    want = _forklift_manifest().get(rel)
+    if want is None:
+        return False
+    try:
+        with open(full, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest() == want
+    except OSError:
+        return False
+
+
 def load_json(path, detect_duplicates=False):
     """Parse a profile file. BOM-tolerant, because some vendors ship one.
 
@@ -625,6 +667,8 @@ def analyze_tree(profiles_dir):
         for rec in filaments.values():
             triple = resolve_triple(rec["name"], filaments, ofl_filaments)
             rec["triple"] = triple
+            if is_forklift(profiles_dir, rec["file"]):
+                continue  # Snapmaker's own ids stand as shipped (ADR 0004 point 7)
             if rec.get("filament_id") or rec["instantiation"]:
                 mints.setdefault(generate_filament_id(*triple), set()).add(triple)
             if rec.get("filament_id"):
@@ -891,6 +935,10 @@ def check_setting_id_uniqueness(profiles_dir):
             if not isinstance(data, dict):
                 continue
             rel = os.path.relpath(path, profiles_dir).replace(os.sep, "/")
+            if is_forklift(profiles_dir, path):
+                # Snapmaker's ids stand as shipped, shared across nozzle variants and
+                # with BBL's: none of rules 1-4 apply (rule 5 below still would not).
+                continue
             # Rule 5: catch the misspelled "settings_id" key.
             if "settings_id" in data:
                 errors += 1
@@ -1288,6 +1336,8 @@ def check_filament_id_length(profiles_dir, vendor):
 
     for file_path in _vendor_json_files(vendor_path):
         rel = file_path.relative_to(profiles_path)
+        if is_forklift(profiles_dir, file_path):
+            continue
         try:
             data = load_json(file_path, detect_duplicates=True)
         except DuplicateKeyError as e:
@@ -1316,6 +1366,8 @@ def check_obsolete_keys(profiles_dir, vendor):
 
     for file_path in _vendor_json_files(vendor_path):
         rel = file_path.relative_to(profiles_path)
+        if is_forklift(profiles_dir, file_path):
+            continue
         try:
             data = load_json(file_path)
         except (ValueError, OSError) as e:
@@ -1793,7 +1845,7 @@ def check_variant_arrays(profiles_dir, vendor, strict=False):
     errors = warnings = 0
     for ptype, rel, data, config, variant_length, reason in _variant_presets(profiles_dir,
                                                                              vendor):
-        if data.get("instantiation") != "true":
+        if data.get("instantiation") != "true" or is_forklift(profiles_dir, rel):
             continue
         list_key, strides = _variant_scheme()[ptype]
         listed = list_key in config
@@ -1869,6 +1921,29 @@ def check_conflict_keys(profiles_dir, vendor):
     return error_count, 0
 
 
+def _index_section_matches(profiles_dir, vendor, current, built):
+    """An index section is what update-index builds, or differs from it only in where
+    forklifted Snapmaker entries sit: the same entries, and the same order for every
+    other one. Snapmaker's index order is theirs to keep."""
+    if current == built:
+        return True
+    if not (isinstance(current, list) and isinstance(built, list)):
+        return False
+
+    def key(entry):
+        return json.dumps(entry, sort_keys=True)
+
+    if sorted(map(key, current)) != sorted(map(key, built)):
+        return False
+
+    def ours(entries):
+        return [key(e) for e in entries
+                if not (isinstance(e, dict) and e.get("sub_path")
+                        and is_forklift(profiles_dir, f"{vendor}/{e['sub_path']}"))]
+
+    return ours(current) == ours(built)
+
+
 def check_normalized(profiles_dir, vendor):
     """A bundle must already be what normalize and update-index write.
 
@@ -1898,6 +1973,8 @@ def check_normalized(profiles_dir, vendor):
     for path, sub in iter_profile_files(vendor_dir):
         if os.path.basename(path) in NON_PROFILE_FILES:
             continue  # data files carry no name or type; normalize skips them too
+        if is_forklift(profiles_dir, path):
+            continue  # verbatim Snapmaker file: never rewritten, so never "would change"
         try:
             data = load_json(path)
         except (ValueError, OSError):
@@ -1922,7 +1999,8 @@ def check_normalized(profiles_dir, vendor):
     sections, problems = build_index_sections(profiles_dir, vendor)
     if sections is None or problems:
         return errors, gaps
-    stale = sorted(s for s, entries in sections.items() if library.get(s) != entries)
+    stale = sorted(s for s, entries in sections.items()
+                   if not _index_section_matches(profiles_dir, vendor, library.get(s), entries))
     if stale:
         print_error(f"{vendor}.json: update-index would rebuild {', '.join(stale)}")
         errors += 1
@@ -2386,6 +2464,8 @@ def generate_setting_ids(profiles_dir=PROFILES_DIR, vendors=None, dry_run=False,
     counts = {"typos": 0, "stripped": 0, "assigned": 0}
     for vendor in names:
         for path, type_name in iter_profile_files(os.path.join(profiles_dir, vendor)):
+            if is_forklift(profiles_dir, path):
+                continue  # verbatim Snapmaker file (ADR 0004 point 7): ids stand as shipped
             try:
                 with open(path, "rb") as f:
                     data = json.loads(f.read().decode("utf-8-sig"))
@@ -2644,6 +2724,8 @@ def normalize_profiles(profiles_dir=PROFILES_DIR, vendors=None, profile_types=No
             for path in _walk_json(os.path.join(profiles_dir, vendor, sub)):
                 if os.path.basename(path) in NON_PROFILE_FILES:
                     continue
+                if is_forklift(profiles_dir, path):
+                    continue  # verbatim Snapmaker file (ADR 0004 point 7): never rewritten
                 rel = _rel(path, profiles_dir)
                 try:
                     data = load_json(path)
@@ -2940,7 +3022,8 @@ def update_profile_indexes(profiles_dir=PROFILES_DIR, vendors=None, profile_type
             print_error(f"{vendor}.json: left unchanged, it would have dropped a profile")
             continue
 
-        if all(library.get(section) == entries for section, entries in sections.items()):
+        if all(_index_section_matches(profiles_dir, vendor, library.get(section), entries)
+               for section, entries in sections.items()):
             continue
         changed += 1
         if dry_run:
