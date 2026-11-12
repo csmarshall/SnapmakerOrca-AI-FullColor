@@ -148,3 +148,42 @@ if (ORCA_BUNDLED_UV_EXECUTABLE)
 endif()
 
 orcaslicer_discover_tests(${_TEST_NAME}_tests)
+
+set(_FILAMENT_SORT_TEST_NAME filament_sort)
+# Adaptation for this tree: wxWidgets is found by src/CMakeLists.txt in CONFIG mode (3.3), whose imported
+# targets are directory-scoped, so wxWidgets_INCLUDE_DIRS / wxWidgets_LIBRARIES are empty here. Find it
+# again (same call shapes as src/CMakeLists.txt, base component only, all FilamentSort needs).
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(wxWidgets 3.3 REQUIRED COMPONENTS base)
+    include(${wxWidgets_USE_FILE})
+else ()
+    find_package(wxWidgets 3.3 CONFIG REQUIRED COMPONENTS base)
+endif ()
+# The shipped allow-list is a data contract with PresetUpdater (which deploys it) and with the
+# loader under test, so the suite reads the real file instead of a copy that could drift from it.
+set(_FILAMENT_ALLOW_LIST_FILE ${PROJECT_SOURCE_DIR}/resources/profiles/Snapmaker/filament/filament_allow_list.json)
+file(TO_CMAKE_PATH "${_FILAMENT_ALLOW_LIST_FILE}" _FILAMENT_ALLOW_LIST_FILE)
+add_executable(${_FILAMENT_SORT_TEST_NAME}_tests
+    FilamentSort_test.cpp
+    ${PROJECT_SOURCE_DIR}/src/slic3r/GUI/FilamentSort.cpp)
+target_compile_definitions(${_FILAMENT_SORT_TEST_NAME}_tests PRIVATE
+    wxDEBUG_LEVEL=0
+    "FILAMENT_ALLOW_LIST_FILE=R\"(${_FILAMENT_ALLOW_LIST_FILE})\"")
+# Adaptation: deps_src is SYSTEM here because the vendored nlohmann/json.hpp trips -Werror
+# (-Wdeprecated-literal-operator) on this tree's compiler; libslic3r's own targets reach it as a system include.
+target_include_directories(${_FILAMENT_SORT_TEST_NAME}_tests SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/deps_src)
+target_include_directories(${_FILAMENT_SORT_TEST_NAME}_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/src/libslic3r
+    ${Boost_INCLUDE_DIR}
+    ${wxWidgets_INCLUDE_DIRS})
+if (WIN32 AND wxWidgets_LIB_DIR AND wxWidgets_CONFIGURATION)
+    target_include_directories(${_FILAMENT_SORT_TEST_NAME}_tests PRIVATE
+        "${wxWidgets_LIB_DIR}/${wxWidgets_CONFIGURATION}")
+endif ()
+target_link_libraries(${_FILAMENT_SORT_TEST_NAME}_tests PRIVATE
+    Catch2::Catch2WithMain
+    ${wxWidgets_LIBRARIES})
+set_property(TARGET ${_FILAMENT_SORT_TEST_NAME}_tests PROPERTY FOLDER "tests")
+catch_discover_tests(${_FILAMENT_SORT_TEST_NAME}_tests TEST_PREFIX "${_FILAMENT_SORT_TEST_NAME}: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
