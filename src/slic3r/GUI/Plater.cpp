@@ -884,7 +884,7 @@ struct Sidebar::priv
 
     // #100: background Spoolman catalog fetch. The runner is destroyed with the sidebar, which drops a pending GUI callback.
     Spoolman::SyncRunner                  spoolman_runner;
-    std::optional<Spoolman::CatalogFetch> spoolman_fetch;       // set only for the duration of the re-entered sync_ams_list
+    std::optional<Spoolman::CatalogFetch> spoolman_fetch;       // set only for the duration of the sync_ams_list run started by sync_spoolman_filaments
     Spoolman::UpsertReport                spoolman_report;
     bool                                  spoolman_has_last_good = false;
 
@@ -2775,11 +2775,22 @@ void Sidebar::priv::update_sync_status(const MachineObject *obj)
 
 void Sidebar::update_sync_ams_btn_enable(wxUpdateUIEvent &e)
  {
+     if (spoolman_btn) {
+         const bool want = spoolman_capable_agent() != nullptr;
+         if (want != spoolman_btn->IsShown()) {
+             spoolman_btn->Show(want);
+             if (spoolman_btn->GetContainingSizer())
+                 spoolman_btn->GetContainingSizer()->Layout();
+             Layout();
+         }
+     }
      if (m_last_slice_state != p->plater->is_background_process_slicing()) {
          m_last_slice_state = p->plater->is_background_process_slicing();
          //btn_sync->Enable(!m_last_slice_state);
          p->m_printer_bbl_sync->Enable(!m_last_slice_state);
          ams_btn->Enable(!m_last_slice_state);
+         if (spoolman_btn)
+             spoolman_btn->Enable(!m_last_slice_state);
          Refresh();
      }
  }
@@ -3388,7 +3399,16 @@ Sidebar::Sidebar(Plater *parent)
     ams_btn->Bind(wxEVT_UPDATE_UI, &Sidebar::update_sync_ams_btn_enable, this);
     p->m_bpButton_ams_filament = ams_btn;
 
+    // #104: separate Spoolman sync button; shown only with the preference on and a Spoolman-capable printer agent (update_sync_ams_btn_enable).
+    spoolman_btn = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "spool", wxEmptyString, wxDefaultSize, wxDefaultPosition,
+                                      wxBU_EXACTFIT | wxNO_BORDER, false, 16);
+    spoolman_btn->SetToolTip(_L("Synchronize filament presets from Spoolman"));
+    spoolman_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) { sync_spoolman_filaments(); });
+    spoolman_btn->Bind(wxEVT_UPDATE_UI, &Sidebar::update_sync_ams_btn_enable, this);
+    spoolman_btn->Hide();
+
     bSizer39->Add(ams_btn, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::WideSpacing()));
+    bSizer39->Add(spoolman_btn, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
     //bSizer39->Add(FromDIP(10), 0, 0, 0, 0 );
 
     ScalableButton* set_btn = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "settings");
@@ -6335,6 +6355,45 @@ void Sidebar::load_ams_list(MachineObject* obj)
     p->combo_printer->update();
 }
 
+std::shared_ptr<MoonrakerPrinterAgent> Sidebar::spoolman_capable_agent() const
+{
+    if (!wxGetApp().app_config->get_bool("spoolman_preset_sync"))
+        return nullptr;
+    auto *dev = wxGetApp().getDeviceManager();
+    if (!dev || !dev->get_selected_machine())
+        return nullptr;
+    auto net = dev->get_agent();
+    return std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net ? net->get_printer_agent() : nullptr);
+}
+
+// #104: the separate Spoolman button. Fetches the catalog on a worker thread, upserts it on the GUI thread, then runs the normal
+// sync_ams_list flow with p->spoolman_fetch set so that flow (and only this one) shows the Spoolman summary. sync_ams_list itself
+// never starts a fetch, so the default button and the native command keep the upstream behaviour.
+void Sidebar::sync_spoolman_filaments()
+{
+    auto agent = spoolman_capable_agent();
+    if (!agent)
+        return;
+    const auto started = p->spoolman_runner.start(
+        true, [agent] { return agent->fetch_spoolman_catalog(true); },
+        [](std::function<void()> f) { wxTheApp->CallAfter(std::move(f)); },
+        [this, agent](Spoolman::CatalogFetch fetch) {
+            p->spoolman_report = {};
+            if (fetch.good()) {
+                auto *bundle = wxGetApp().preset_bundle;
+                Spoolman::UpsertContext ctx;
+                ctx.printer = &bundle->printers.get_selected_preset();
+                p->spoolman_report = Spoolman::upsert_catalog(bundle->filaments, fetch.filaments.items, ctx);
+            }
+            p->spoolman_has_last_good = agent->last_good_spoolman_catalog().has_value();
+            p->spoolman_fetch         = std::move(fetch);
+            sync_ams_list(false);
+            p->spoolman_fetch.reset();
+            p->spoolman_report = {};
+        });
+    (void) started; // busy: a fetch is already running and will sync when it finishes
+}
+
 void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
 {
     wxBusyCursor cursor;
@@ -6342,32 +6401,6 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     auto obj = wxGetApp().getDeviceManager()->get_selected_machine();
     if (!obj)
         return;
-    // #100: with the preference on and an agent that can fetch a Spoolman catalog, fetch it on a worker thread and re-enter this function on
-    // the GUI thread with the result (upsert first). Otherwise, or while a fetch is in flight, carry on as before.
-    if (!p->spoolman_fetch && wxGetApp().app_config->get_bool("spoolman_preset_sync")) {
-        auto net   = wxGetApp().getDeviceManager()->get_agent();
-        auto agent = std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net ? net->get_printer_agent() : nullptr);
-        if (agent) {
-            const auto started = p->spoolman_runner.start(
-                true, [agent] { return agent->fetch_spoolman_catalog(true); },
-                [](std::function<void()> f) { wxTheApp->CallAfter(std::move(f)); },
-                [this, agent, is_from_big_sync_btn](Spoolman::CatalogFetch fetch) {
-                    p->spoolman_report = {};
-                    if (fetch.good()) {
-                        auto *bundle = wxGetApp().preset_bundle;
-                        Spoolman::UpsertContext ctx;
-                        ctx.printer = &bundle->printers.get_selected_preset();
-                        p->spoolman_report = Spoolman::upsert_catalog(bundle->filaments, fetch.filaments.items, ctx);
-                    }
-                    p->spoolman_has_last_good = agent->last_good_spoolman_catalog().has_value();
-                    p->spoolman_fetch         = std::move(fetch);
-                    sync_ams_list(is_from_big_sync_btn);
-                    p->spoolman_fetch.reset();
-                });
-            if (started == Spoolman::SyncRunner::Start::started || started == Spoolman::SyncRunner::Start::busy)
-                return; // busy: a fetch is already running and will sync when it finishes
-        }
-    }
     GUI::wxGetApp().sidebar().load_ams_list(obj);
 
     auto & list = wxGetApp().preset_bundle->filament_ams_list;
@@ -6461,8 +6494,8 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     std::vector<std::pair<DynamicPrintConfig *,std::string>> unknowns;
     auto enable_append  = wxGetApp().app_config->get_bool("enable_append_color_by_sync_ams");
     auto sync_color_only = wxGetApp().app_config->get("sync_ams_filament_mode") == "1";
-    // Spoolman sync summary (#95 S8): only collected, and only shown, with the preference on (default off).
-    const bool spoolman_summary_on = wxGetApp().app_config->get_bool("spoolman_preset_sync");
+    // Spoolman sync summary (#95 S8): only collected and shown for a sync started by sync_spoolman_filaments() (#104).
+    const bool spoolman_summary_on = p->spoolman_fetch.has_value() && wxGetApp().app_config->get_bool("spoolman_preset_sync"); // #104: only when started by the Spoolman button
     SpoolmanTierReport spoolman_tiers;
     auto n              = wxGetApp().preset_bundle->sync_ams_list(unknowns, !sync_result.direct_sync, sync_result.sync_maps, enable_append, merge_info, sync_color_only,
                                                                   spoolman_summary_on ? &spoolman_tiers : nullptr);

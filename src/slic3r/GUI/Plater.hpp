@@ -61,6 +61,7 @@ class TextInput;
 namespace Slic3r {
 
 class PresetBundle;
+class MoonrakerPrinterAgent;
 struct PlateData;
 typedef std::vector<PlateData*> PlateDataPtrs;
 struct PublishedMaterialEntry;
@@ -166,6 +167,7 @@ class Sidebar : public wxPanel
     ConfigOptionMode    m_mode;
     //Button *         btn_sync{nullptr};
     ScalableButton *  ams_btn{nullptr};
+    ScalableButton *  spoolman_btn{nullptr}; // #104
     bool                                    m_last_slice_state = false;
     SyncNozzleAndAmsDialog*                 m_sna_dialog{nullptr};
     FinishSyncAmsDialog*                    m_fna_dialog{nullptr};
@@ -176,6 +178,7 @@ class Sidebar : public wxPanel
     SyncAmsInfoDialog*                      m_sync_dlg{nullptr};
 
     void update_sync_ams_btn_enable(wxUpdateUIEvent &e);
+    std::shared_ptr<MoonrakerPrinterAgent> spoolman_capable_agent() const;
 
 public:
     enum DockingState
@@ -232,6 +235,7 @@ public:
     void load_ams_list(MachineObject* obj);
     std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list(bool is_from_big_sync_btn = false);
+    void sync_spoolman_filaments(); // #104
     bool sync_extruder_list();
     bool is_fila_switch_ready();
     void reset_fila_switch();
