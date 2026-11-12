@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker ASA @U1 0.4 nozzle",
+  "renamed_from": "Snapmaker ASA @U1",
   "setting_id": "25418661980",
   "inherits": "Snapmaker ASA @U1 base",
   "compatible_printers": [

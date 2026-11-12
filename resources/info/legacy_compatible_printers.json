@@ -757,6 +757,10 @@
         "QIDI PETG Translucent @0.2 nozzle": [
             "Qidi Q1 Pro 0.2 nozzle"
         ],
+        "Snapmaker TPU @U1": [
+            "Snapmaker U1 (0.6 nozzle)",
+            "Snapmaker U1 (0.8 nozzle)"
+        ],
         "Sovol Zero PETG HS Nozzle": [
             "Sovol Zero 0.4 nozzle"
         ],

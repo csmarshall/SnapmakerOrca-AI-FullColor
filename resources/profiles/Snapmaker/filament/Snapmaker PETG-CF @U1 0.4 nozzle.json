@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PETG-CF @U1 0.4 nozzle",
+  "renamed_from": "Snapmaker PETG-CF @U1",
   "setting_id": "9504590820",
   "inherits": "Snapmaker PETG-CF @U1 base",
   "compatible_printers": [
