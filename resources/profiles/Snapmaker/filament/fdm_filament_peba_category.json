@@ -1,0 +1,13 @@
+{
+	"type": "filament",
+	"name": "fdm_filament_peba_category",
+	"inherits": "fdm_filament_common",
+	"from": "system",
+	"instantiation": "false",
+	"filament_adhesiveness_category": [
+		"600"
+	],
+	"filament_type": [
+		"PEBA"
+	]
+}

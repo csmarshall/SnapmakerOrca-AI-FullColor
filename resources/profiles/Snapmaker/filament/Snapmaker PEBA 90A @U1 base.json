@@ -1,0 +1,10 @@
+{
+	"type": "filament",
+	"name": "Snapmaker PEBA 90A @U1 base",
+	"inherits": "fdm_filament_peba_category",
+	"from": "system",
+	"instantiation": "false",
+	"filament_vendor": [
+		"Snapmaker"
+	]
+}

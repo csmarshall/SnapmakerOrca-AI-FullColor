@@ -1,0 +1,8 @@
+{
+	"type": "filament",
+	"name": "Generic PETG-GF @U1 base",
+	"inherits": "fdm_filament_petg_gf_category",
+	"from": "system",
+	"filament_id": "OFDe2LVX",
+	"instantiation": "false"
+}

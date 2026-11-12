@@ -1,0 +1,8 @@
+{
+	"type": "filament",
+	"name": "Generic Support For PLA @U1 base",
+	"inherits": "fdm_filament_support_pla_category",
+	"from": "system",
+	"filament_id": "OF7FxvvU",
+	"instantiation": "false"
+}
