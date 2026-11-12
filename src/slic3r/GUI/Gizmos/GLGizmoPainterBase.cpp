@@ -1335,7 +1335,7 @@ void GLGizmoPainterBase::apply_projection_mask(EnforcerBlockerType new_state,
         m_triangle_selectors[mesh_idx]->set_precision_factor(m_precision_factor);
         m_triangle_selectors[mesh_idx]->select_patch(0, std::move(cursor), new_state, transformations_no_offset[mesh_idx],
                                                      m_triangle_splitting_enabled,
-                                                     m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f,
+                                                     m_paint_on_overhangs_only ? get_highlight_angle_limit_deg() : 0.f,
                                                      get_tilt_up_direction());
         m_triangle_selectors[mesh_idx]->request_update_render_data(true);
     }
