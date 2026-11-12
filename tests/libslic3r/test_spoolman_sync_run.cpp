@@ -282,3 +282,32 @@ TEST_CASE("RFID re-read: poll settles only after the snapshot changed and then s
         CHECK(allfail.last.empty());
     }
 }
+
+TEST_CASE("apply_fetch_to_outcome: the last good age reaches the unreachable notice", "[Spoolman][SyncRun]")
+{
+    CatalogFetch failed;
+    failed.attempted = true;
+    failed.vendors   = ParseResult<Vendor>::http_failure(0, "timeout");
+
+    SyncOutcome o;
+    o.tiers = {};
+    apply_fetch_to_outcome(o, failed, true, 3 * 3600 + 5);
+    CHECK(o.last_good_age_seconds == 3 * 3600 + 5);
+    const SummaryModel with_age = build_summary(o);
+    bool found = false;
+    for (const auto &n : with_age.notices)
+        if (n.text.find("3 hours ago") != std::string::npos)
+            found = true;
+    CHECK(found);
+
+    // Without an age the previous sync is still reported, as unknown.
+    SyncOutcome u;
+    apply_fetch_to_outcome(u, failed, true);
+    CHECK(u.has_previous_sync);
+    CHECK_FALSE(u.last_good_age_seconds.has_value());
+
+    // No earlier sync: an age is ignored.
+    SyncOutcome n;
+    apply_fetch_to_outcome(n, failed, false, 99);
+    CHECK_FALSE(n.last_good_age_seconds.has_value());
+}

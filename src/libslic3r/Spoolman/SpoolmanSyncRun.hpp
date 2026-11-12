@@ -42,9 +42,10 @@ private:
 };
 
 // Fills the catalog-related fields of `outcome` from a fetch. A good fetch is "fresh"; otherwise the outcome is unreachable (a catalog that
-// was reached but unusable is bad_response) and `last_good` (cache) says whether an earlier sync exists. The cache stores no timestamp,
-// so the stale age stays unknown (the dialog then says so).
-void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good);
+// was reached but unusable is bad_response) and `last_good` (cache) says whether an earlier sync exists. `last_good_age_seconds` (from
+// CatalogCache::last_good_age_seconds) is the age of that earlier sync; nullopt leaves it unknown (the dialog then says so).
+void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good,
+                            std::optional<long long> last_good_age_seconds = std::nullopt);
 
 // ---- #105: RFID tag re-read, offered only by the Spoolman button ----
 // The only printer commands this adds: FILAMENT_DT_CLEAR / FILAMENT_DT_UPDATE for channels 0..3, sent as ONE script, and only when the

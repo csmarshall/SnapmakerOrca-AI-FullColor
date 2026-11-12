@@ -25,6 +25,7 @@
 
 #include "SpoolmanCatalog.hpp"
 
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -71,14 +72,22 @@ CatalogFetch fetch_catalog(const HttpGet &get);
 class CatalogCache
 {
 public:
+    // Injectable clock (default: std::chrono::system_clock) so the fetch age is testable.
+    using Clock = std::function<std::chrono::system_clock::time_point()>;
+    CatalogCache();
+    explicit CatalogCache(Clock clock);
+
     CatalogFetch get(const std::string &key, const HttpGet &http);
     void         invalidate(const std::string &key);
     void         invalidate_all();
     // The most recent good fetch for the key, even if stale; nullopt if there never was one.
     std::optional<CatalogFetch> last_good(const std::string &key) const;
+    // Seconds since the last good fetch for the key was stored (clamped to >= 0); nullopt if there never was one.
+    std::optional<long long> last_good_age_seconds(const std::string &key) const;
 
 private:
-    struct Entry { CatalogFetch value; bool fresh = false; };
+    struct Entry { CatalogFetch value; bool fresh = false; std::chrono::system_clock::time_point fetched_at; };
+    Clock                        m_clock;
     mutable std::mutex           m_mutex;
     unsigned long                m_generation = 0;
     std::map<std::string, Entry> m_entries;

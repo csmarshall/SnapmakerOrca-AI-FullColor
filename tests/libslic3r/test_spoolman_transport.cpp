@@ -360,3 +360,33 @@ TEST_CASE("Moonraker spoolman status parsing", "[Spoolman][SpoolmanTransport]")
     CHECK_FALSE(moonraker_spoolman_connected(500, R"({"spoolman_connected":true})").has_value());
     CHECK_FALSE(moonraker_spoolman_connected(0, "").has_value());
 }
+
+TEST_CASE("Spoolman transport: the cache records the time of the last good fetch", "[Spoolman][SpoolmanTransport]")
+{
+    auto now = std::chrono::system_clock::time_point(std::chrono::hours(1000));
+    CatalogCache cache([&now] { return now; });
+    CHECK_FALSE(cache.last_good_age_seconds("printer-a").has_value());
+
+    MockHttp good = MockHttp::fixtures();
+    REQUIRE(cache.get("printer-a", good.fn()).good());
+    CHECK(cache.last_good_age_seconds("printer-a") == 0);
+    CHECK_FALSE(cache.last_good_age_seconds("printer-b").has_value());
+
+    now += std::chrono::minutes(90);
+    CHECK(cache.last_good_age_seconds("printer-a") == 5400);
+
+    // A failed refresh keeps the old timestamp ...
+    cache.invalidate("printer-a");
+    MockHttp bad = MockHttp::fixtures();
+    bad.routes["/v1/filament"] = {500, ""};
+    CHECK_FALSE(cache.get("printer-a", bad.fn()).good());
+    CHECK(cache.last_good_age_seconds("printer-a") == 5400);
+
+    // ... and a good one resets it.
+    REQUIRE(cache.get("printer-a", good.fn()).good());
+    CHECK(cache.last_good_age_seconds("printer-a") == 0);
+
+    // A clock that steps backwards never gives a negative age.
+    now -= std::chrono::hours(2);
+    CHECK(cache.last_good_age_seconds("printer-a") == 0);
+}

@@ -46,7 +46,7 @@ SyncRunner::Start SyncRunner::start(bool preference_on, FetchFn fetch, PostFn po
     return Start::started;
 }
 
-void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good)
+void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good, std::optional<long long> last_good_age_seconds)
 {
     if (fetch.good()) {
         outcome.catalog_state       = CatalogState::fresh;
@@ -60,6 +60,8 @@ void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, boo
     const bool reached = fetch.attempted && !transport_failed;
     outcome.catalog_state    = reached ? CatalogState::bad_response : CatalogState::unreachable;
     outcome.has_previous_sync = has_last_good;
+    if (has_last_good)
+        outcome.last_good_age_seconds = last_good_age_seconds;
 }
 
 std::string rfid_reread_script()

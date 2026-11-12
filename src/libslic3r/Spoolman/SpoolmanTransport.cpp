@@ -110,6 +110,9 @@ CatalogFetch fetch_catalog(const HttpGet &get)
     return f;
 }
 
+CatalogCache::CatalogCache() : m_clock([] { return std::chrono::system_clock::now(); }) {}
+CatalogCache::CatalogCache(Clock clock) : m_clock(clock ? std::move(clock) : Clock([] { return std::chrono::system_clock::now(); })) {}
+
 CatalogFetch CatalogCache::get(const std::string &key, const HttpGet &http)
 {
     {
@@ -127,7 +130,7 @@ CatalogFetch CatalogCache::get(const std::string &key, const HttpGet &http)
     if (fetched.good()) {
         std::lock_guard<std::mutex> lock(m_mutex);
         // An invalidate() during the fetch keeps the new value but leaves it stale.
-        m_entries[key] = Entry{fetched, generation == m_generation};
+        m_entries[key] = Entry{fetched, generation == m_generation, m_clock()};
     }
     return fetched;
 }
@@ -154,6 +157,16 @@ std::optional<CatalogFetch> CatalogCache::last_good(const std::string &key) cons
     if (auto it = m_entries.find(key); it != m_entries.end())
         return it->second.value;
     return std::nullopt;
+}
+
+std::optional<long long> CatalogCache::last_good_age_seconds(const std::string &key) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_entries.find(key);
+    if (it == m_entries.end())
+        return std::nullopt;
+    const auto age = std::chrono::duration_cast<std::chrono::seconds>(m_clock() - it->second.fetched_at).count();
+    return age < 0 ? 0 : age;
 }
 
 CatalogFetch fetch_catalog_if_enabled(bool preference_on, const StatusFn &status, CatalogCache &cache, const std::string &key,
