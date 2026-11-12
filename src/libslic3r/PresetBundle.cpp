@@ -5519,7 +5519,9 @@ std::vector<std::vector<std::vector<float>>> PresetBundle::get_full_flush_matrix
 
 const std::set<std::string> ignore_settings_list ={
     "inherits",
-    "print_settings_id", "filament_settings_id", "printer_settings_id"
+    "print_settings_id", "filament_settings_id", "printer_settings_id",
+    // Spoolman link: bookkeeping, never a "difference to the system preset" (that list ends up in full_fff_config, the 3MF and the G-code header).
+    "filament_spoolman_link"
 };
 
 std::set<std::string> PresetBundle::project_different_keys(const std::string &different_settings)

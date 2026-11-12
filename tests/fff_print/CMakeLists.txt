@@ -33,6 +33,7 @@ add_executable(${_TEST_NAME}_tests
 	test_skirt_brim.cpp
 	test_slicing_pipeline_hook.cpp
 	test_spiral_vase.cpp
+	test_spoolman_link_gcode.cpp
 	test_support_material.cpp
 	test_texture_displacement.cpp
 	test_tree_support.cpp
