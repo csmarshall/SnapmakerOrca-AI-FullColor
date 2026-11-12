@@ -164,6 +164,7 @@ struct SummaryLine
         table_head,   // cells: Setting | Preset value | Spoolman value | Source
         table_row,    // cells: 4
         ignored,      // cells: {"Ignored key = value (reason)"}
+        catalog_note, // cells: {text}: catalog filaments that match no preset and sit on no tray, collapsed into one line (a detail)
         footer        // cells: {text}: fetched_text, read-only note
     };
     Kind                     kind = Kind::notice;

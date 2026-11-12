@@ -953,3 +953,74 @@ TEST_CASE("Spoolman summary lines: unreachable state leads with the stale notice
     CHECK(lines.front().kind == SummaryLine::Kind::notice);
     CHECK(lines.front().cells[0].find("Spoolman") != std::string::npos);
 }
+
+// #103: first real run of the dialog.
+TEST_CASE("Spoolman summary #103: tray colour in any printer format becomes #RRGGBB for the swatch", "[Spoolman]")
+{
+    const std::pair<const char *, const char *> cases[] = {
+        {"#FF1523", "#FF1523"}, {"FF1523", "#FF1523"}, {"ff1523", "#FF1523"}, {"FF1523FF", "#FF1523"}, {"#ff152380", "#FF1523"},
+        {"", ""}, {"red", ""}, {"#12345", ""}, {"#GG1523", ""}};
+    for (const auto &[in, want] : cases) {
+        SyncOutcome o = normal();
+        o.trays[0].colour_hex = in;
+        INFO("input '" << in << "'");
+        CHECK(build_summary(o).slots[0].colour_hex == want);
+    }
+}
+
+TEST_CASE("Spoolman summary #103: slot title is the filament name, never the tray label twice", "[Spoolman]")
+{
+    SyncOutcome o = normal();
+    o.trays[0].display_slot = "A1";
+    o.trays[0].spool_name   = "A1"; // what the Plater hook used to pass
+    SummaryModel m = build_summary(o);
+    CHECK(m.slots[0].spool_name != "A1");
+    CHECK(m.slots[0].spool_name == "Snapmaker PETG HF @U1 0.4 nozzle"); // falls back to the preset name
+    o.trays[0].spool_name.clear();
+    CHECK(build_summary(o).slots[0].spool_name != "A1");
+    o.trays[0].spool_name = "Snapmaker PETG HF Red";
+    CHECK(build_summary(o).slots[0].spool_name == "Snapmaker PETG HF Red");
+}
+
+TEST_CASE("Spoolman summary #103: filaments on no tray collapse into one capped note", "[Spoolman]")
+{
+    SyncOutcome o = normal();
+    for (int i = 0; i < 7; ++i) {
+        SkippedFilament s;
+        s.spoolman_id = 100 + i; s.filament_name = "Glow PLA " + std::to_string(i);
+        s.reason = "no compatible candidate for material PLA with flags glow";
+        o.report.skipped.push_back(s);
+    }
+    std::vector<SummaryLine> lines = summary_lines(build_summary(o));
+    size_t headers = 0, notes = 0;
+    std::string note;
+    for (const SummaryLine &l : lines) {
+        if (l.kind == SummaryLine::Kind::slot_header) {
+            ++headers;
+            CHECK(l.cells[0] != "No tray");
+        }
+        if (l.kind == SummaryLine::Kind::catalog_note) { ++notes; note = l.cells[0]; }
+    }
+    CHECK(headers == 1);
+    REQUIRE(notes == 1);
+    CHECK(note.find("7 ") != std::string::npos);
+    CHECK(note.find("Glow PLA 0") != std::string::npos);
+    CHECK(note.find("Glow PLA 4") != std::string::npos);
+    CHECK(note.find("Glow PLA 5") == std::string::npos);
+    CHECK(note.find("and 2 more") != std::string::npos);
+    size_t first = note.find("no compatible candidate"), last = note.rfind("no compatible candidate");
+    CHECK(first != std::string::npos);
+    CHECK(first == last); // the reason appears once
+}
+
+TEST_CASE("Spoolman summary #103: a slot with a preset and no differing values says so", "[Spoolman]")
+{
+    SyncOutcome o;
+    o.report.unchanged.push_back(unchanged_result(16, "Same preset"));
+    o.trays.push_back(red_tray());
+    std::vector<SummaryLine> lines = summary_lines(build_summary(o));
+    bool found = false;
+    for (const SummaryLine &l : lines)
+        found = found || (l.kind == SummaryLine::Kind::slot_note && l.cells[0] == "No values differ from the preset.");
+    CHECK(found);
+}

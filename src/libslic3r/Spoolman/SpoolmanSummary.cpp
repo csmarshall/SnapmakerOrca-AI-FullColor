@@ -1,6 +1,7 @@
 #include "SpoolmanSummary.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <locale>
 #include <map>
@@ -203,6 +204,20 @@ struct IdData
     std::vector<SummaryIgnored>       ignored;
     std::vector<std::pair<int, std::string>> flags; // (rank, text)
 };
+
+// Swatch colour as "#RRGGBB": printers report RRGGBB, #RRGGBB or RRGGBBAA (alpha dropped); anything else is "" (grey swatch).
+std::string normalize_colour_hex(const std::string &in)
+{
+    std::string h = (!in.empty() && in[0] == '#') ? in.substr(1) : in;
+    if (h.size() != 6 && h.size() != 8)
+        return std::string();
+    for (char &ch : h) {
+        if (!std::isxdigit(static_cast<unsigned char>(ch)))
+            return std::string();
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return "#" + h.substr(0, 6);
+}
 
 // Display order of slots: numbers first (numerically), then labels.
 std::pair<std::pair<int, long long>, std::string> display_key(const std::string &d)
@@ -421,8 +436,9 @@ SummaryModel build_summary(const SyncOutcome &o)
         c.raw_key      = t.key;
         c.display_slot = t.display_slot;
         c.on_tray      = true;
-        c.colour_hex   = t.colour_hex;
-        if (!t.spool_name.empty())
+        c.colour_hex   = normalize_colour_hex(t.colour_hex);
+        // the tray label is not a filament name: keep the catalog/preset name make_card chose when that is all the tray gives
+        if (!t.spool_name.empty() && t.spool_name != t.display_slot)
             c.spool_name = t.spool_name;
         if (c.spool_name.empty())
             c.spool_name = t.spoolman_filament_id ? kFilamentName + std::to_string(t.spoolman_filament_id) : t.display_slot;
@@ -556,7 +572,17 @@ std::vector<SummaryLine> summary_lines(const SummaryModel &m)
                 add(K::notice_row, {r.key, r.preset_value, r.spoolman_value, r.source});
         }
     }
+    // Catalog filaments that match no preset and sit on no tray are not slots: one note instead of a card each.
+    auto is_catalog_only = [](const SlotCard &c) {
+        return !c.on_tray && c.raw_key < 0 && c.skipped && c.flags.empty() && c.changes.empty() && c.ignored.empty() && !c.preset_name &&
+               c.linked_presets.empty();
+    };
+    std::vector<const SlotCard *> catalog_only;
     for (const SlotCard &c : m.slots) {
+        if (is_catalog_only(c)) {
+            catalog_only.push_back(&c);
+            continue;
+        }
         add(K::slot_header, {c.on_tray ? "Slot " + c.display_slot : std::string("No tray"), c.spool_name, c.remaining_weight_text, c.colour_hex});
         if (c.preset_name)
             add(K::slot_preset, {"Preset: " + *c.preset_name + (c.rule_text.empty() ? "" : " (" + c.rule_text + ")")});
@@ -573,9 +599,25 @@ std::vector<SummaryLine> summary_lines(const SummaryModel &m)
             add(K::table_head, head);
             for (const SummaryRow &r : c.changes)
                 add(K::table_row, {r.key, r.preset_value, r.spoolman_value, r.source});
-        }
+        } else if (c.on_tray && c.preset_name && !c.skipped && c.note.empty())
+            add(K::slot_note, {"No values differ from the preset."});
         for (const SummaryIgnored &i : c.ignored)
             add(K::ignored, {"Ignored " + i.key + " = " + i.value + " (" + i.reason + ")"});
+    }
+    if (!catalog_only.empty()) {
+        constexpr size_t kMaxNames = 5;
+        std::string      names, reasons;
+        std::set<std::string> seen_reasons;
+        for (size_t i = 0; i < catalog_only.size(); ++i) {
+            if (i < kMaxNames)
+                names += (i ? ", " : "") + catalog_only[i]->spool_name;
+            if (seen_reasons.insert(catalog_only[i]->skip_reason).second)
+                reasons += (reasons.empty() ? "" : "; ") + catalog_only[i]->skip_reason;
+        }
+        if (catalog_only.size() > kMaxNames)
+            names += " and " + std::to_string(catalog_only.size() - kMaxNames) + " more";
+        add(K::catalog_note, {std::to_string(catalog_only.size()) + " catalog filament" + (catalog_only.size() == 1 ? "" : "s") +
+                              " on no tray and without a matching preset (" + names + "). Skipped: " + reasons});
     }
     if (!m.fetched_text.empty())
         add(K::footer, {m.fetched_text});
