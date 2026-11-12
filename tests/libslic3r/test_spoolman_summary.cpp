@@ -892,7 +892,7 @@ TEST_CASE("Spoolman summary lines: normal sync renders header, preset, table, fo
     CHECK(lines.front().kind == K::slot_header);
     CHECK(lines.front().cells == std::vector<std::string>{"Slot 2", "Snapmaker PETG HF Red", "612 g left", "#FF1523"});
     CHECK(lines[1].kind == K::slot_preset);
-    CHECK(lines[1].cells[0] == "Preset: Snapmaker PETG HF @U1 0.4 nozzle (" + red_result().parent_rule + ")");
+    CHECK(lines[1].cells[0] == "Preset: Snapmaker PETG HF @U1 0.4 nozzle (matched by vendor + name + material)");
     size_t head = 0, rows = 0;
     for (const SummaryLine &l : lines) {
         head += l.kind == K::table_head;
@@ -935,7 +935,7 @@ TEST_CASE("Spoolman summary lines: ignored value stays capped and is one line; m
         if (l.kind == SummaryLine::Kind::ignored) {
             ++n;
             const std::string &t = l.cells[0];
-            CHECK(t.find("Ignored filament_start_gcode = <b>M104</b> ") == 0); // markup untouched = shown literally
+            CHECK(t.find("Ignored filament_start_gcode = <b>M104</b>\\x0a") == 0); // markup literal, the model already shows the newline as \\x0a
             CHECK(t.size() < 120 + 80);
             CHECK(t.rfind(" (not allowed)") == t.size() - std::string(" (not allowed)").size());
         }
