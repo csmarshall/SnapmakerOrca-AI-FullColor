@@ -187,6 +187,7 @@
 #include "libslic3r/Spoolman/SpoolmanSummary.hpp"
 #include "SpoolmanSummaryDialog.hpp"
 #include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
+#include "slic3r/Utils/SpoolmanDirect.hpp"
 #include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
 #include "libslic3r/IMEXHelpers.hpp"
 #include "libslic3r/PublishSettings.hpp"
@@ -2775,10 +2776,20 @@ void Sidebar::priv::update_sync_status(const MachineObject *obj)
     }
  }
 
+// #107: the optional direct Spoolman server (app config spoolman_server_url). Only when the Spoolman preference is on and the stored URL
+// validates; otherwise direct=false and the Moonraker proxy path is used as before.
+static Spoolman::TransportChoice spoolman_direct_choice()
+{
+    if (!wxGetApp().app_config->get_bool("spoolman_preset_sync"))
+        return {};
+    return Spoolman::select_spoolman_transport(wxGetApp().app_config->get("spoolman_server_url"));
+}
+
 void Sidebar::update_sync_ams_btn_enable(wxUpdateUIEvent &e)
  {
      if (spoolman_btn) {
-         const bool want = spoolman_capable_agent() != nullptr;
+         // Spoolman button rule: preference on AND (a valid direct URL OR an agent that can fetch through Moonraker)
+         const bool want = spoolman_direct_choice().direct || spoolman_capable_agent() != nullptr;
          if (want != spoolman_btn->IsShown()) {
              spoolman_btn->Show(want);
              if (spoolman_btn->GetContainingSizer())
@@ -6373,25 +6384,26 @@ std::shared_ptr<MoonrakerPrinterAgent> Sidebar::spoolman_capable_agent() const
 // never starts a fetch, so the default button and the native command keep the upstream behaviour.
 void Sidebar::sync_spoolman_filaments()
 {
-    auto agent = spoolman_capable_agent();
-    if (!agent)
+    const Spoolman::TransportChoice direct = spoolman_direct_choice(); // copied: the worker lambdas must not read the config
+    auto agent = spoolman_capable_agent(); // may be null when a direct URL is set; then there is no spool tag re-read
+    if (!agent && !direct.direct)
         return;
     if (p->spoolman_runner.in_flight())
         return; // a sync is already running: no second dialog, no second re-read
     // #105: optionally ask the printer to re-read its spool tags first. Only this button, only after an explicit Yes, and only for an
     // agent that supports it; the worker thread re-checks that the printer is idle right before sending (Spoolman::send_rfid_reread).
     bool reread = false;
-    if (agent->supports_rfid_reread()) {
+    if (agent && agent->supports_rfid_reread()) {
         MessageDialog dlg(this, _L("Re-read spool tags on the printer first?"), _L("Spoolman"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
         reread = dlg.ShowModal() == wxID_YES;
     }
     auto reread_result = std::make_shared<MoonrakerPrinterAgent::RfidReread>(MoonrakerPrinterAgent::RfidReread::unsupported);
     const auto started = p->spoolman_runner.start(
         true,
-        [agent, reread, reread_result] {
+        [agent, direct, reread, reread_result] {
             return Spoolman::fetch_after_reread(
                 [&] {
-                    if (reread)
+                    if (reread && agent)
                         *reread_result = agent->reread_spool_tags(); // worker thread; read before `done` runs, ordered by the post
                 },
                 [&] {
@@ -6399,14 +6411,14 @@ void Sidebar::sync_spoolman_filaments()
                     *reread_result = MoonrakerPrinterAgent::RfidReread::unconfirmed;
                     BOOST_LOG_TRIVIAL(warning) << "sync_spoolman_filaments: spool tag re-read threw; result recorded as unconfirmed";
                 },
-                [&] { return agent->fetch_spoolman_catalog(true); });
+                [&] { return direct.direct ? Spoolman::fetch_direct_catalog(direct.url, true) : agent->fetch_spoolman_catalog(true); });
         },
         [](std::function<void()> f) {
             // Worker thread: the app may be torn down if the user quit during the re-read window. Drop the callback then.
             if (wxTheApp)
                 wxTheApp->CallAfter(std::move(f));
         },
-        [this, agent, reread, reread_result](Spoolman::CatalogFetch fetch) {
+        [this, agent, direct, reread, reread_result](Spoolman::CatalogFetch fetch) {
             if (reread) {
                 using R = MoonrakerPrinterAgent::RfidReread;
                 BOOST_LOG_TRIVIAL(info) << "sync_spoolman_filaments: spool tag re-read result " << int(*reread_result);
@@ -6427,10 +6439,16 @@ void Sidebar::sync_spoolman_filaments()
                 auto *bundle = wxGetApp().preset_bundle;
                 Spoolman::UpsertContext ctx;
                 ctx.printer = &bundle->printers.get_selected_preset();
+                ctx.limits  = Spoolman::printer_limits_from_config(ctx.printer->config);
                 p->spoolman_report = Spoolman::upsert_catalog(bundle->filaments, fetch.filaments.items, ctx);
             }
-            p->spoolman_has_last_good = agent->last_good_spoolman_catalog().has_value();
-            p->spoolman_last_good_age = agent->last_good_spoolman_age_seconds();
+            if (direct.direct) {
+                p->spoolman_has_last_good = Spoolman::last_good_direct_catalog(direct.url).has_value();
+                p->spoolman_last_good_age = Spoolman::last_good_direct_age_seconds(direct.url);
+            } else {
+                p->spoolman_has_last_good = agent->last_good_spoolman_catalog().has_value();
+                p->spoolman_last_good_age = agent->last_good_spoolman_age_seconds();
+            }
             p->spoolman_fetch         = std::move(fetch);
             sync_ams_list(false);
         });

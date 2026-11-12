@@ -3256,6 +3256,24 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("By Highest Temp"));
     def->set_default_value(new ConfigOptionEnum<BedTempFormula>(BedTempFormula::btfHighestTemp));
 
+    def = this->add("machine_max_bed_temperature", coInt);
+    def->label = L("Maximum bed temperature");
+    def->tooltip = L("The highest bed temperature this printer accepts. Bed temperatures above it are limited to this value when slicing, with a warning. 0 means no limit.");
+    def->sidetext = L(u8"\u2103" /* °C */);
+    def->min = 0;
+    def->max = max_temp;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("machine_max_nozzle_temperature", coInt);
+    def->label = L("Maximum nozzle temperature");
+    def->tooltip = L("The highest nozzle temperature this printer accepts. Nozzle temperatures above it are limited to this value when slicing, with a warning. 0 means no limit.");
+    def->sidetext = L(u8"\u2103" /* °C */);
+    def->min = 0;
+    def->max = max_temp;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("nozzle_flush_dataset", coInts);
     def->nullable = true;
     def->set_default_value(new ConfigOptionIntsNullable{0});

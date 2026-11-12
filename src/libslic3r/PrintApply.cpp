@@ -1346,6 +1346,34 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
 
+    // Printer-level temperature ceilings (0 = none). Clamped here, once, so every consumer (G-code, placeholders, config block) sees the same value.
+    m_temperature_clamps.clear();
+    {
+        const int max_bed    = new_full_config.opt_int("machine_max_bed_temperature");
+        const int max_nozzle = new_full_config.opt_int("machine_max_nozzle_temperature");
+        auto clamp_key = [&](const std::string &key, int limit, bool bed) {
+            if (limit <= 0 || key.empty())
+                return;
+            auto *opt = new_full_config.option<ConfigOptionInts>(key);
+            if (opt == nullptr)
+                return;
+            for (size_t i = 0; i < opt->values.size(); ++i)
+                if (opt->values[i] > limit) {
+                    m_temperature_clamps.push_back({ key, bed, int(i), opt->values[i], limit });
+                    opt->values[i] = limit;
+                }
+        };
+        if (max_bed > 0) {
+            // Only the active plate: the others are not printed on, and their values stay as the user wrote them.
+            const auto *bt = new_full_config.option<ConfigOptionEnum<BedType>>("curr_bed_type");
+            const BedType bed_type = bt ? bt->value : btPC;
+            clamp_key(get_bed_temp_key(bed_type), max_bed, true);
+            clamp_key(get_bed_temp_1st_layer_key(bed_type), max_bed, true);
+        }
+        clamp_key("nozzle_temperature", max_nozzle, false);
+        clamp_key("nozzle_temperature_initial_layer", max_nozzle, false);
+    }
+
     // BBS
     std::vector <unsigned int> used_filaments = this->extruders(true);
     std::unordered_set <unsigned int> used_filament_set(used_filaments.begin(), used_filaments.end());

@@ -15,6 +15,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Spoolman/SpoolmanPresets.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/I18N.hpp"
@@ -2741,6 +2742,14 @@ nlohmann::json MoonrakerPrinterAgent::build_print_payload_locked() const
     // Moonraker doesn't provide temperature ranges via API - use hardcoded defaults
     payload["print"]["nozzle_temp_range"] = {100, 370}; // Typical Klipper range
     payload["print"]["bed_temp_range"]    = {0, 120};   // Typical bed range
+    // The printer preset's own maximums (machine_max_*_temperature, 0 = unset) replace the placeholders above when set.
+    if (const PresetBundle* bundle = GUI::wxGetApp().preset_bundle) {
+        const Spoolman::PrinterLimits limits = Spoolman::printer_limits_from_config(bundle->printers.get_selected_preset().config);
+        if (limits.max_bed_temp)
+            payload["print"]["bed_temp_range"] = {0, *limits.max_bed_temp};
+        if (limits.max_nozzle_temp)
+            payload["print"]["nozzle_temp_range"] = {100, *limits.max_nozzle_temp};
+    }
 
     payload["print"]["support_send_to_sd"] = true;
     // Detect bed_leveling support from available objects (bed_mesh or probe)

@@ -998,3 +998,25 @@ TEST_CASE("Spoolman presets: fixture filament 16 against the system set built fr
     CHECK(r2.unchanged.size() == r.created.size());
     CHECK(snapshot(bundle.filaments) == before);
 }
+
+TEST_CASE("Spoolman presets: printer limits come from the printer preset's machine_max_* options", "[Spoolman]")
+{
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    {   // unset (0) = no limit, so nothing is rejected on a printer that has none
+        PrinterLimits l = printer_limits_from_config(cfg);
+        CHECK_FALSE(l.max_nozzle_temp.has_value());
+        CHECK_FALSE(l.max_bed_temp.has_value());
+    }
+    cfg.set_deserialize_strict({ { "machine_max_bed_temperature", "100" }, { "machine_max_nozzle_temperature", "300" } });
+    PrinterLimits l = printer_limits_from_config(cfg);
+    REQUIRE(l.max_bed_temp.has_value());
+    REQUIRE(l.max_nozzle_temp.has_value());
+    CHECK(*l.max_bed_temp == 100);
+    CHECK(*l.max_nozzle_temp == 300);
+
+    // End to end: an override of 105 on a 100 C printer is rejected with the printer's limit.
+    Filament hot = fil(5, "PETG Red", "Acme", "PETG", 230, 105);
+    Fixture  f;
+    auto     r = f.run({hot}, l);
+    CHECK(std::any_of(r.rejected.begin(), r.rejected.end(), [](const auto &x) { return x.key_or_field == "hot_plate_temp" && x.value == "105"; }));
+}

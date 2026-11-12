@@ -60,6 +60,7 @@
 #include <vector>
 
 namespace Slic3r {
+class ConfigBase;
 class Preset;
 class PresetCollection;
 namespace Spoolman {
@@ -72,6 +73,9 @@ struct PrinterLimits
     std::optional<double> max_nozzle_temp; // degrees C; nullopt = no check
     std::optional<double> max_bed_temp;
 };
+
+// The limits a printer preset states through machine_max_nozzle_temperature / machine_max_bed_temperature; 0 or absent = no limit (nullopt).
+PrinterLimits printer_limits_from_config(const ConfigBase &printer_config);
 
 struct UpsertContext
 {

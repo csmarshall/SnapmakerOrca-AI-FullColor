@@ -3003,6 +3003,18 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         if (!motion_warning.string.empty())
             add_warning(motion_warning);
     }
+    {
+        // Temperatures lowered to the printer's maximum when the config was applied: name the filament and both values.
+        const std::vector<unsigned int> used = this->extruders();
+        for (const TemperatureClamp &c : m_temperature_clamps) {
+            if (std::find(used.begin(), used.end(), (unsigned int) c.filament) == used.end())
+                continue;
+            const auto *ids = m_full_print_config.option<ConfigOptionStrings>("filament_settings_id");
+            const std::string name = (ids && c.filament < int(ids->values.size())) ? ids->values[c.filament] : std::string();
+            warn((boost::format(L("%1% of filament %2% (%3%) is %4%\u2103, above this printer's maximum of %5%\u2103; it was limited to %5%\u2103.")) %
+                  c.key % (c.filament + 1) % name % c.from % c.to).str(), c.key);
+        }
+    }
     if (!this->has_same_shrinkage_compensations())
         warn(L("Filament shrinkage will not be used because filament shrinkage for the used filaments does not match."));
     return {};

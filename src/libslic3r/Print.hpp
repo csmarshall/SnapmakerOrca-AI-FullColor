@@ -1408,6 +1408,17 @@ public:
     // Both are decided by apply() from the filaments the model uses, before the PrintObject transformations are built.
     // Returns if all used filaments have same shrinkage compensations.
     bool has_same_shrinkage_compensations() const { return m_same_shrinkage_compensations; }
+    // A temperature clamped to the printer's machine_max_bed_temperature / machine_max_nozzle_temperature when the config was applied.
+    // Print::validate() reports the ones belonging to filaments that are in use.
+    struct TemperatureClamp
+    {
+        std::string key;           // the config key that was lowered, e.g. "hot_plate_temp_initial_layer"
+        bool        bed      = false;
+        int         filament = 0;  // 0-based filament slot
+        int         from     = 0;
+        int         to       = 0;
+    };
+    const std::vector<TemperatureClamp>& temperature_clamps() const { return m_temperature_clamps; }
     // Returns scaling for each axis representing shrinkage compensations in each axis.
     Vec3d shrinkage_compensation() const { return m_shrinkage_compensation; }
 
@@ -1517,6 +1528,7 @@ private:
     PrintObjectPtrs                         m_objects;
     PrintRegionPtrs                         m_print_regions;
     bool                                    m_same_shrinkage_compensations { false };
+    std::vector<TemperatureClamp>           m_temperature_clamps;
     Vec3d                                   m_shrinkage_compensation { Vec3d::Ones() };
     
     //SoftFever

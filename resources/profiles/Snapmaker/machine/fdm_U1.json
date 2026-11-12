@@ -10,6 +10,8 @@
 	"wipe_tower_type": "type1",
 	"bed_model": "Snapmaker U1_bed.stl",
 	"bed_texture": "Snapmaker U1_bed.svg",
+	"machine_max_bed_temperature": "100",
+	"machine_max_nozzle_temperature": "300",
 	"max_layer_height": [
 		"0.32",
 		"0.32",

@@ -12,6 +12,16 @@
 
 namespace Slic3r { namespace Spoolman {
 
+PrinterLimits printer_limits_from_config(const ConfigBase &printer_config)
+{
+    PrinterLimits limits;
+    if (const auto *n = printer_config.option<ConfigOptionInt>("machine_max_nozzle_temperature"); n && n->value > 0)
+        limits.max_nozzle_temp = n->value;
+    if (const auto *b = printer_config.option<ConfigOptionInt>("machine_max_bed_temperature"); b && b->value > 0)
+        limits.max_bed_temp = b->value;
+    return limits;
+}
+
 namespace {
 
 const char *const kLinkKey = "filament_spoolman_link";
