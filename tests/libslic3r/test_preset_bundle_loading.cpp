@@ -9334,3 +9334,101 @@ TEST_CASE("The Fiberon PPS-GF20 U1 profile is typed PPS so it does not win ABS l
     REQUIRE(j.at("filament_id") == "OFeVzkSU");
     CHECK(j.at("filament_type").at(0) == "PPS");
 }
+
+namespace {
+
+// One vendor "Acme" whose filament_list is given as {name, json body} pairs (each written to filament/<n>.json).
+// Every filament carries "from":"system" and the stated instantiation; bodies are the extra JSON members.
+struct AcmeFilament { std::string name, instantiation, members; };
+
+void write_acme_filament_vendor(const fs::path &root, const std::vector<AcmeFilament> &filaments)
+{
+    fs::create_directories(root / "Acme" / "filament");
+    std::ofstream list((root / "Acme.json").string());
+    list << R"({"version":"1.0.0","name":"Acme","filament_list":[)";
+    for (size_t i = 0; i < filaments.size(); ++i) {
+        list << (i ? "," : "") << R"({"name":")" << filaments[i].name << R"(","sub_path":"filament/f)" << i << R"(.json"})";
+        std::ofstream((root / "Acme" / "filament" / ("f" + std::to_string(i) + ".json")).string())
+            << R"({"type":"filament","name":")" << filaments[i].name << R"(","from":"system","instantiation":")"
+            << filaments[i].instantiation << R"(")" << filaments[i].members << "}";
+    }
+    list << "]}";
+}
+
+std::string loaded_filament_id(PresetBundle &bundle, const std::string &name)
+{
+    const Preset *preset = bundle.filaments.find_preset(name, false);
+    REQUIRE(preset != nullptr);
+    return preset->filament_id;
+}
+
+} // namespace
+
+// Snapmaker-Orca 2.4 PresetBundle.cpp parse_subfile ~3507-3515 (Snapmaker/OrcaSlicer main): a system filament with no filament_id takes
+// its own setting_id, before the inherits chain is consulted. Applies to every vendor, deliberately (ticket #109).
+TEST_CASE("A system filament with a setting_id and no filament_id takes the setting_id even when its parent has a filament_id", "[Preset][Bundle][Regression]")
+{
+    ScopedTemporaryDir temp_dir;
+    // Bambu-shaped: leaf setting_id GFSG03_09, parent @base filament_id OFdyfQvU.
+    write_acme_filament_vendor(temp_dir.path(), {
+        {"Acme PETG @base", "false", R"(,"filament_id":"OFdyfQvU")"},
+        {"Acme PETG Matte", "true", R"(,"inherits":"Acme PETG @base","setting_id":"GFSG03_09")"}});
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(temp_dir.path().string(), "Acme", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+    CHECK(loaded_filament_id(bundle, "Acme PETG Matte") == "GFSG03_09");
+}
+
+TEST_CASE("A system filament with its own filament_id keeps it over its setting_id", "[Preset][Bundle][Regression]")
+{
+    ScopedTemporaryDir temp_dir;
+    write_acme_filament_vendor(temp_dir.path(), {
+        {"Acme PETG @base", "false", R"(,"filament_id":"OFdyfQvU")"},
+        {"Acme PETG Matte", "true", R"(,"inherits":"Acme PETG @base","setting_id":"GFSG03_09","filament_id":"GFA77")"}});
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(temp_dir.path().string(), "Acme", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+    CHECK(loaded_filament_id(bundle, "Acme PETG Matte") == "GFA77");
+}
+
+TEST_CASE("A system filament with neither id still inherits the parent's filament_id", "[Preset][Bundle][Regression]")
+{
+    ScopedTemporaryDir temp_dir;
+    write_acme_filament_vendor(temp_dir.path(), {
+        {"Acme PETG @base", "false", R"(,"filament_id":"OFdyfQvU")"},
+        {"Acme PETG Matte", "true", R"(,"inherits":"Acme PETG @base")"}});
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(temp_dir.path().string(), "Acme", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+    CHECK(loaded_filament_id(bundle, "Acme PETG Matte") == "OFdyfQvU");
+}
+
+// Snapmaker parse_subfile ~3507-3515: "instead of aborting the entire vendor import". A leaf that has only a setting_id and inherits a base
+// carrying no ids at all used to fail the load.
+TEST_CASE("A Snapmaker-shaped filament chain with only a leaf setting_id loads", "[Preset][Bundle][Regression]")
+{
+    ScopedTemporaryDir temp_dir;
+    write_acme_filament_vendor(temp_dir.path(), {
+        {"Acme Base", "false", ""},
+        {"Acme PLA", "true", R"(,"inherits":"Acme Base","setting_id":"SM_PLA_1")"}});
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(temp_dir.path().string(), "Acme", PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+    CHECK(bundle.error_count() == 0);
+    CHECK(loaded_filament_id(bundle, "Acme PLA") == "SM_PLA_1");
+}
+
+// Snapmaker's rule is gated on LoadSystem and on the filament collection (parse_subfile ~3507-3511), so a non-system load of the same
+// files keeps filament_id empty.
+TEST_CASE("The setting_id fallback does not apply to a load that is not a system load", "[Preset][Bundle][Regression]")
+{
+    ScopedTemporaryDir temp_dir;
+    write_acme_filament_vendor(temp_dir.path(), {
+        {"Acme PLA", "true", R"(,"setting_id":"SM_PLA_1")"}});
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(temp_dir.path().string(), "Acme", PresetBundle::LoadConfigBundleAttributes(),
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+    const Preset *preset = bundle.filaments.find_preset("Acme PLA", false);
+    REQUIRE(preset != nullptr);
+    CHECK(preset->filament_id.empty());
+}
