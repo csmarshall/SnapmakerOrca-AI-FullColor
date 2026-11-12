@@ -13,7 +13,6 @@
 	],
 	"enable_arc_fitting": "0",
 	"ooze_prevention": "1",
-	"precise_outer_wall": "1",
 	"preheat_time": "31",
 	"prime_tower_brim_width": "6",
 	"prime_tower_width": "28",

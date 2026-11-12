@@ -35,7 +35,6 @@
 	"enable_arc_fitting": "0",
 	"min_width_top_surface": "200%",
 	"ooze_prevention": "1",
-	"precise_outer_wall": "1",
 	"slowdown_for_curled_perimeters": [
 		"0",
 		"0",

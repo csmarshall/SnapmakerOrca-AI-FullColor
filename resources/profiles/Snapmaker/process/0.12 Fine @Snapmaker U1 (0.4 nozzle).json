@@ -29,7 +29,6 @@
 	"wipe_tower_cone_angle": "15",
 	"wipe_tower_extra_spacing": "120%",
 	"enable_arc_fitting": "0",
-	"precise_outer_wall": "1",
 	"support_threshold_angle": "25",
 	"support_type": "tree(auto)",
 	"wipe_tower_extra_rib_length": "8",
