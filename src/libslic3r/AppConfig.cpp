@@ -487,6 +487,10 @@ void AppConfig::set_defaults()
     if (get("allow_abnormal_storage").empty()) {
         set_bool("allow_abnormal_storage", false);
     }
+    // Read-only Spoolman catalog sync (#95): off unless the user turns it on; while off no Spoolman request of any kind is made.
+    if (get("spoolman_preset_sync").empty()) {
+        set_bool("spoolman_preset_sync", false);
+    }
 
     if (get("preset_bundle_auto_update").empty()) {
         set_bool("preset_bundle_auto_update", false);
