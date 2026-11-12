@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "slic3r/Utils/SpoolmanJoin.hpp"
 #include "../Utils/NetworkAgent.hpp"
 #include "IPrinterAgent.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
@@ -6121,7 +6122,7 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
         }
     }
 
-    auto build_tray_config = [](DevAmsTray const &tray, std::string const &name, std::string ams_id, std::string slot_id) {
+    auto build_tray_config = [obj](DevAmsTray const &tray, std::string const &name, std::string ams_id, std::string slot_id) {
         BOOST_LOG_TRIVIAL(info) << boost::format("build_filament_ams_list: name %1% setting_id %2% type %3% color %4%")
                     % name % tray.setting_id % tray.m_fila_type % tray.color;
         DynamicPrintConfig tray_config;
@@ -6136,6 +6137,10 @@ std::map<int, DynamicPrintConfig> Sidebar::build_filament_ams_list(MachineObject
         tray_config.set_key_value("filament_colour_type", new ConfigOptionStrings{std::to_string(tray.ctype)});
         tray_config.set_key_value("filament_exist", new ConfigOptionBools{tray.is_exists});
         tray_config.set_key_value("filament_slot_placeholder", new ConfigOptionBools{tray.is_slot_placeholder});
+        // S9: Spoolman join for this slot. The cache is written only by the agent that can resolve a slot to a spool
+        // (SnapmakerPrinterAgent, through the slot's RFID card UID); other agents leave it empty, so no printer-name check here.
+        if (!tray.is_slot_placeholder && !ams_id.empty() && !slot_id.empty() && std::stoi(ams_id) < 254 /* not the 254/255 virtual trays */)
+            spoolman_fill_tray_config(tray_config, spoolman_cache_slot(obj->get_dev_id(), std::stoi(ams_id) * 4 + std::stoi(slot_id)));
         std::optional<FilamentBaseInfo> info;
         if (wxGetApp().preset_bundle) {
             info = wxGetApp().preset_bundle->get_filament_by_filament_id(tray.setting_id);

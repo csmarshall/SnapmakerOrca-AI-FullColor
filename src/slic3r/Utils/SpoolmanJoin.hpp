@@ -10,11 +10,16 @@
 
 #include <nlohmann/json_fwd.hpp>
 
+#include "libslic3r/PrintConfig.hpp"
+
 namespace Slic3r {
 
 struct SpoolmanSpoolInfo
 {
     int         spool_id = 0; // 0 = no spool joined to this slot
+    int         filament_id = 0;          // Spoolman filament id (the tray join key spoolman_filament_id), 0 = unknown
+    std::string filament_external_id;     // filament.external_id (survives a rebuilt Spoolman)
+    std::string filament_setting_id;      // filament.extra.setting_id (decoded)
     std::string name;         // Spoolman filament name
     std::string material;
     std::string vendor;
@@ -47,6 +52,13 @@ std::vector<SpoolmanSpoolInfo> spoolman_join_slots(const std::vector<std::string
 
 // Slot CARD_UIDs from the body of GET /printer/objects/query?filament_detect ("" for a slot without a tag).
 std::vector<std::string> spoolman_slot_uids(const nlohmann::json& filament_detect_info);
+
+// Last joined slot of a printer (invalid when the printer, the slot or a join is unknown).
+SpoolmanSpoolInfo spoolman_cache_slot(const std::string& dev_id, int slot);
+
+// S9: write the tray's Spoolman join keys (spoolman_filament_id / _external_id / _setting_id) from a joined spool.
+// Writes nothing for an unjoined slot, so the sync tier falls through to the next rule and then upstream's path.
+void spoolman_fill_tray_config(DynamicPrintConfig& tray_config, const SpoolmanSpoolInfo& spool);
 
 // Read-only JSON view (spoolman_* names) used by the sync payload and the Remote API.
 nlohmann::json spoolman_to_json(const SpoolmanSpoolInfo& s);

@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <mutex>
+#include <set>
 
 #include <nlohmann/json.hpp>
 
@@ -74,11 +75,21 @@ std::vector<std::string> card_uids_of(const nlohmann::json& extra)
     return uids;
 }
 
+std::string spoolman_normalize_raw_text(const std::string& raw)
+{
+    std::string s;
+    for (char c : raw)
+        if (c != '"')
+            s += c;
+    return s;
+}
+
 } // namespace
 
 std::map<std::string, SpoolmanSpoolInfo> spoolman_parse_spools(const std::string& body)
 {
     std::map<std::string, SpoolmanSpoolInfo> out;
+    std::set<std::string>                    ambiguous;
     auto                                     json = nlohmann::json::parse(body, nullptr, false);
     if (json.is_discarded())
         return out;
@@ -110,6 +121,14 @@ std::map<std::string, SpoolmanSpoolInfo> spoolman_parse_spools(const std::string
         auto fit                = sp.find("filament");
         if (fit != sp.end() && fit->is_object()) {
             const auto& f = *fit;
+            info.filament_id          = static_cast<int>(num_or(f, "id", 0));
+            info.filament_external_id = str_or_empty(f, "external_id");
+            if (auto ex = f.find("extra"); ex != f.end() && ex->is_object()) {
+                // extras are JSON-encoded strings: "\"GFL99\""
+                const std::string raw = str_or_empty(*ex, "setting_id");
+                auto              dec = nlohmann::json::parse(raw, nullptr, false);
+                info.filament_setting_id = dec.is_string() ? dec.get<std::string>() : spoolman_normalize_raw_text(raw);
+            }
             info.name      = str_or_empty(f, "name");
             info.material  = str_or_empty(f, "material");
             info.color_hex = str_or_empty(f, "color_hex");
@@ -123,9 +142,14 @@ std::map<std::string, SpoolmanSpoolInfo> spoolman_parse_spools(const std::string
             if (vit != f.end() && vit->is_object())
                 info.vendor = str_or_empty(*vit, "name");
         }
-        for (const auto& uid : uids)
-            out.emplace(uid, info); // first spool wins if two share a UID
+        for (const auto& uid : uids) {
+            auto [it, inserted] = out.emplace(uid, info);
+            if (!inserted && it->second.spool_id != info.spool_id)
+                ambiguous.insert(uid);
+        }
     }
+    for (const auto& uid : ambiguous)
+        out.erase(uid); // one tag on two spools: nothing is guessed
     return out;
 }
 
@@ -179,6 +203,24 @@ void spoolman_cache_set(const std::string& dev_id, const std::vector<SpoolmanSpo
 {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     g_cache[dev_id] = slots;
+}
+
+SpoolmanSpoolInfo spoolman_cache_slot(const std::string& dev_id, int slot)
+{
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    auto                        it = g_cache.find(dev_id);
+    if (it == g_cache.end() || slot < 0 || slot >= static_cast<int>(it->second.size()))
+        return {};
+    return it->second[slot];
+}
+
+void spoolman_fill_tray_config(DynamicPrintConfig& c, const SpoolmanSpoolInfo& s)
+{
+    if (!s.valid() || s.filament_id <= 0)
+        return;
+    c.set_key_value("spoolman_filament_id", new ConfigOptionInts{s.filament_id});
+    c.set_key_value("spoolman_external_id", new ConfigOptionStrings{s.filament_external_id});
+    c.set_key_value("spoolman_setting_id", new ConfigOptionStrings{s.filament_setting_id});
 }
 
 nlohmann::json spoolman_cache_get()
