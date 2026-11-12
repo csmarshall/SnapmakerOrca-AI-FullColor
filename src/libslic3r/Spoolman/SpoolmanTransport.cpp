@@ -1,6 +1,7 @@
 #include "SpoolmanTransport.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <nlohmann/json.hpp>
 
@@ -239,5 +240,194 @@ std::optional<bool> moonraker_spoolman_connected(int http_status, const std::str
     }
     return std::nullopt;
 }
+
+namespace {
+
+struct ParsedUrl { std::string scheme, host; int port = 0; std::string path; }; // host as written (lower-case; [..] kept for IPv6)
+
+std::string lower(std::string s)
+{
+    for (char &c : s)
+        if (c >= 'A' && c <= 'Z')
+            c = char(c - 'A' + 'a');
+    return s;
+}
+
+// Returns a reason, or empty and fills `out`. `port` 0 = not given.
+std::string parse_url(const std::string &in, ParsedUrl &out, int &explicit_port)
+{
+    if (in.size() > kMaxSpoolmanUrlLength)
+        return "the URL is too long";
+    for (unsigned char c : in) {
+        if (c <= 0x20 || c == 0x7f)
+            return "the URL must not contain spaces or control characters";
+        if (c >= 0x80)
+            return "the URL must be plain ASCII";
+        if (c == '\\')
+            return "the URL must not contain backslashes";
+    }
+    const size_t sep = in.find("://");
+    if (sep == std::string::npos)
+        return "the URL must start with http:// or https://";
+    out.scheme = lower(in.substr(0, sep));
+    if (out.scheme != "http" && out.scheme != "https")
+        return "only http:// and https:// URLs are accepted";
+    if (in.find('#') != std::string::npos)
+        return "the URL must not contain a fragment (#)";
+    if (in.find('?') != std::string::npos)
+        return "the URL must not contain a query (?)";
+    const size_t auth_begin = sep + 3;
+    const size_t auth_end   = in.find('/', auth_begin);
+    const std::string authority = in.substr(auth_begin, auth_end == std::string::npos ? std::string::npos : auth_end - auth_begin);
+    out.path = auth_end == std::string::npos ? std::string() : in.substr(auth_end);
+    if (authority.find('@') != std::string::npos)
+        return "the URL must not contain credentials (user:password@)";
+    std::string host = authority, port;
+    if (!authority.empty() && authority[0] == '[') {
+        const size_t close = authority.find(']');
+        if (close == std::string::npos)
+            return "unterminated [IPv6] host";
+        host = authority.substr(0, close + 1);
+        if (close + 1 < authority.size()) {
+            if (authority[close + 1] != ':')
+                return "unexpected text after the [IPv6] host";
+            port = authority.substr(close + 2);
+            if (port.empty())
+                return "the port is empty";
+        }
+        for (size_t i = 1; i + 1 < host.size(); ++i)
+            if (!std::isxdigit(static_cast<unsigned char>(host[i])) && host[i] != ':' && host[i] != '.')
+                return "invalid character in the [IPv6] host";
+        if (host.size() <= 2)
+            return "the URL has no host";
+    } else {
+        const size_t colon = authority.find(':');
+        if (colon != std::string::npos) {
+            host = authority.substr(0, colon);
+            port = authority.substr(colon + 1);
+            if (port.empty())
+                return "the port is empty";
+        }
+        if (host.empty())
+            return "the URL has no host";
+        for (char c : host)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-' && c != '_')
+                return "invalid character in the host name";
+    }
+    explicit_port = 0;
+    if (!port.empty()) {
+        if (port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos)
+            return "the port must be a number from 1 to 65535";
+        const int n = std::stoi(port);
+        if (n < 1 || n > 65535)
+            return "the port must be a number from 1 to 65535";
+        explicit_port = n;
+    }
+    out.host = lower(host);
+    out.port = explicit_port ? explicit_port : (out.scheme == "https" ? 443 : 80);
+    while (!out.path.empty() && out.path.back() == '/')
+        out.path.pop_back();
+    return {};
+}
+
+// For redirect targets, which may carry a query: same parse but the query is cut off first.
+bool parse_url_lenient(const std::string &in, ParsedUrl &out, int &explicit_port)
+{
+    std::string t = in.substr(0, in.find_first_of("?#"));
+    return parse_url(t, out, explicit_port).empty();
+}
+
+std::string origin_key(const ParsedUrl &u) { return u.scheme + "://" + u.host + ":" + std::to_string(u.port); }
+
+} // namespace
+
+SpoolmanUrlCheck validate_spoolman_url(const std::string &input)
+{
+    SpoolmanUrlCheck r;
+    size_t b = input.find_first_not_of(" \t\r\n"), e = input.find_last_not_of(" \t\r\n");
+    if (b == std::string::npos) {
+        r.ok = true;
+        return r;
+    }
+    const std::string trimmed = input.substr(b, e - b + 1);
+    ParsedUrl         u;
+    int               explicit_port = 0;
+    if (std::string why = parse_url(trimmed, u, explicit_port); !why.empty()) {
+        r.reason = why;
+        return r;
+    }
+    r.ok  = true;
+    r.url = u.scheme + "://" + u.host + (explicit_port ? ":" + std::to_string(explicit_port) : std::string()) + u.path;
+    return r;
+}
+
+std::string direct_request_url(const std::string &validated_base, const std::string &path, const std::string &query)
+{
+    if (!(path == "/v1/vendor" || path == "/v1/filament" || path == "/v1/spool"))
+        return {};
+    std::string base = validated_base;
+    while (!base.empty() && base.back() == '/')
+        base.pop_back();
+    return base + kSpoolmanApiPrefix + path + (query.empty() ? std::string() : "?" + query);
+}
+
+std::optional<std::string> same_origin_redirect(const std::string &current, const std::string &location)
+{
+    ParsedUrl cur;
+    int       dummy = 0;
+    if (!parse_url_lenient(current, cur, dummy))
+        return std::nullopt;
+    for (unsigned char c : location)
+        if (c <= 0x20 || c == 0x7f || c >= 0x80 || c == '\\')
+            return std::nullopt;
+    if (location.empty())
+        return std::nullopt;
+    if (location[0] == '/' && (location.size() == 1 || location[1] != '/')) {
+        const size_t auth_begin = current.find("://") + 3;
+        const size_t auth_end   = current.find('/', auth_begin);
+        return current.substr(0, auth_end == std::string::npos ? current.size() : auth_end) + location; // same authority, new path
+    }
+    ParsedUrl tgt;
+    if (location.find("://") == std::string::npos || !parse_url_lenient(location, tgt, dummy))
+        return std::nullopt; // protocol-relative ("//host"), other relative forms and unparsable targets are refused
+    if (origin_key(tgt) != origin_key(cur))
+        return std::nullopt;
+    return location;
+}
+
+HttpGet make_direct_http_get(const std::string &validated_base, DirectFetch fetch)
+{
+    return [validated_base, fetch](const std::string &path, const std::string &query, std::string &body) {
+        body.clear();
+        std::string url = direct_request_url(validated_base, path, query);
+        if (url.empty() || !fetch)
+            return 0;
+        for (int hop = 0;; ++hop) {
+            std::string location;
+            const int   status = fetch(url, location, body);
+            if (status < 300 || status >= 400)
+                return status;
+            body.clear();
+            auto next = hop < kMaxDirectRedirects ? same_origin_redirect(url, location) : std::nullopt;
+            if (!next)
+                return status; // refused: another origin, no usable Location or too many hops
+            url = *next;
+        }
+    };
+}
+
+TransportChoice select_spoolman_transport(const std::string &stored_url)
+{
+    TransportChoice c;
+    const SpoolmanUrlCheck v = validate_spoolman_url(stored_url);
+    if (v.ok && !v.url.empty()) {
+        c.direct = true;
+        c.url    = v.url;
+    } else if (!v.ok)
+        c.reason = v.reason;
+    return c;
+}
+
+std::string direct_cache_key(const std::string &validated_base) { return "direct:" + validated_base; }
 
 }} // namespace Slic3r::Spoolman

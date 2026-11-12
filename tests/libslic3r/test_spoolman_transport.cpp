@@ -9,6 +9,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using json = nlohmann::json;
@@ -389,4 +390,172 @@ TEST_CASE("Spoolman transport: the cache records the time of the last good fetch
     // A clock that steps backwards never gives a negative age.
     now -= std::chrono::hours(2);
     CHECK(cache.last_good_age_seconds("printer-a") == 0);
+}
+
+// ---- #107: direct Spoolman server transport (pure; fakes only) ----
+
+TEST_CASE("Spoolman direct URL validator matrix", "[Spoolman]")
+{
+    SECTION("accepted and normalised")
+    {
+        CHECK(validate_spoolman_url("http://host:7912").url == "http://host:7912");
+        CHECK(validate_spoolman_url("https://host").url == "https://host");
+        CHECK(validate_spoolman_url("http://host:7912/").url == "http://host:7912");
+        CHECK(validate_spoolman_url("HTTP://Spool.Lan:7912//").url == "http://spool.lan:7912");
+        CHECK(validate_spoolman_url("  http://10.0.0.5:7912  ").url == "http://10.0.0.5:7912");
+        CHECK(validate_spoolman_url("http://[fd00::1]:7912").url == "http://[fd00::1]:7912");
+        CHECK(validate_spoolman_url("https://h/spoolman/").url == "https://h/spoolman");
+    }
+    SECTION("empty means unset")
+    {
+        auto r = validate_spoolman_url("   ");
+        CHECK(r.ok);
+        CHECK(r.url.empty());
+        CHECK(validate_spoolman_url("").ok);
+    }
+    SECTION("rejected, each with a reason")
+    {
+        const std::string long_url = "http://" + std::string(300, 'a');
+        for (const char *bad : {"ftp://host", "host:7912", "http://", "http://:7912", "http://user:pw@host", "http://user@host",
+                                "http://host?x=1", "http://host/#frag", "http://host/a?b", "http://ho st", "http://host\x01", "http://ho\nst",
+                                "http://host:0", "http://host:65536", "http://host:abc", "http://host:", "http://ho$t", "http://host\\a",
+                                "http://h\xc3\xb6st", "http://[::1", "http://[]", "file:///etc/passwd", "javascript:alert(1)"}) {
+            auto r = validate_spoolman_url(bad);
+            INFO(bad);
+            CHECK_FALSE(r.ok);
+            CHECK_FALSE(r.reason.empty());
+            CHECK(r.url.empty());
+        }
+        auto r = validate_spoolman_url(long_url);
+        CHECK_FALSE(r.ok);
+        CHECK_FALSE(r.reason.empty());
+    }
+}
+
+namespace {
+struct FakeDirect
+{
+    struct Call { std::string url; };
+    std::vector<Call>                                        calls;
+    std::map<std::string, std::tuple<int, std::string, std::string>> routes; // url -> {status, location, body}
+    DirectFetch fn()
+    {
+        return [this](const std::string &url, std::string &location, std::string &body) {
+            calls.push_back({url});
+            auto it = routes.find(url);
+            if (it == routes.end())
+                return 404;
+            location = std::get<1>(it->second);
+            body     = std::get<2>(it->second);
+            return std::get<0>(it->second);
+        };
+    }
+};
+} // namespace
+
+TEST_CASE("Spoolman direct request building", "[Spoolman]")
+{
+    CHECK(direct_request_url("http://h:7912", "/v1/vendor", "") == "http://h:7912/api/v1/vendor");
+    CHECK(direct_request_url("http://h:7912", "/v1/filament", "") == "http://h:7912/api/v1/filament");
+    CHECK(direct_request_url("http://h:7912", "/v1/spool", "allow_archived=false") == "http://h:7912/api/v1/spool?allow_archived=false");
+    CHECK(direct_request_url("https://h/sp", "/v1/vendor", "") == "https://h/sp/api/v1/vendor");
+    // only the three catalog paths exist
+    for (const char *p : {"/v1/spool/1", "/v1/vendor/", "/v1/export/spools", "/v1/", "/api/v1/vendor", "v1/vendor", "/v1/filament/../x", ""})
+        CHECK(direct_request_url("http://h", p, "").empty());
+
+    FakeDirect fake;
+    fake.routes["http://h:7912/api/v1/vendor"]                          = {200, "", "[]"};
+    fake.routes["http://h:7912/api/v1/filament"]                        = {200, "", "[]"};
+    fake.routes["http://h:7912/api/v1/spool?allow_archived=false"] = {200, "", "[]"};
+    auto f = fetch_catalog(make_direct_http_get("http://h:7912", fake.fn()));
+    CHECK(f.good());
+    REQUIRE(fake.calls.size() == 3);
+    CHECK(fake.calls[0].url == "http://h:7912/api/v1/vendor");
+    CHECK(fake.calls[1].url == "http://h:7912/api/v1/filament");
+    CHECK(fake.calls[2].url == "http://h:7912/api/v1/spool?allow_archived=false");
+
+    // a non-catalog path never reaches the network
+    FakeDirect none;
+    std::string body;
+    CHECK(make_direct_http_get("http://h", none.fn())("/v1/spool/1", "", body) == 0);
+    CHECK(none.calls.empty());
+}
+
+TEST_CASE("Spoolman direct redirects", "[Spoolman]")
+{
+    std::string body;
+    SECTION("to another host is refused: one request, the 3xx comes back")
+    {
+        FakeDirect fake;
+        fake.routes["http://h:7912/api/v1/vendor"] = {302, "http://evil.example/api/v1/vendor", "x"};
+        CHECK(make_direct_http_get("http://h:7912", fake.fn())("/v1/vendor", "", body) == 302);
+        CHECK(fake.calls.size() == 1);
+        CHECK(body.empty());
+    }
+    SECTION("other scheme, other port, protocol-relative, relative and bad targets are refused")
+    {
+        for (const char *loc : {"https://h:7912/api/v1/vendor", "http://h:7913/api/v1/vendor", "//evil/api/v1/vendor", "api/v1/vendor", "",
+                                "http://h:7912.evil.example/x", "ftp://h:7912/x", "/a b"}) {
+            FakeDirect fake;
+            fake.routes["http://h:7912/api/v1/vendor"] = {301, loc, ""};
+            INFO(loc);
+            CHECK(make_direct_http_get("http://h:7912", fake.fn())("/v1/vendor", "", body) == 301);
+            CHECK(fake.calls.size() == 1);
+        }
+    }
+    SECTION("same origin is followed (path-absolute and absolute), at most 2 hops")
+    {
+        FakeDirect fake;
+        fake.routes["http://h:7912/api/v1/vendor"]  = {301, "/api/v1/vendor/", ""};
+        fake.routes["http://h:7912/api/v1/vendor/"] = {308, "http://H:7912/api/v1/vendor2", ""};
+        fake.routes["http://H:7912/api/v1/vendor2"] = {200, "", "[1]"};
+        CHECK(make_direct_http_get("http://h:7912", fake.fn())("/v1/vendor", "", body) == 200);
+        CHECK(body == "[1]");
+        CHECK(fake.calls.size() == 3);
+        FakeDirect loop;
+        loop.routes["http://h/api/v1/vendor"] = {302, "/api/v1/vendor", ""};
+        CHECK(make_direct_http_get("http://h", loop.fn())("/v1/vendor", "", body) == 302);
+        CHECK(loop.calls.size() == 3); // original + 2 hops
+    }
+}
+
+TEST_CASE("Spoolman direct path keeps the caps and the gate", "[Spoolman]")
+{
+    // too large / too deep bodies are rejected by fetch_catalog exactly as on the proxy path
+    FakeDirect fake;
+    fake.routes["http://h/api/v1/vendor"] = {200, "", std::string(kMaxBodyBytes + 1, ' ')};
+    auto f = fetch_catalog(make_direct_http_get("http://h", fake.fn()));
+    CHECK(f.vendors.status == Slic3r::Spoolman::ParseStatus::Malformed);
+    CHECK(f.vendors.reason == "response too large");
+    FakeDirect big;
+    big.routes["http://h/api/v1/vendor"] = {kStatusTooLarge, "", ""};
+    CHECK(fetch_catalog(make_direct_http_get("http://h", big.fn())).vendors.status == Slic3r::Spoolman::ParseStatus::HttpFailure);
+    CHECK(kMaxBodyBytes == 4u * 1024u * 1024u);
+    CHECK(kMaxBodyDepth == 16);
+
+    // preference off: nothing is requested on the direct path either
+    FakeDirect off;
+    CatalogCache cache;
+    auto skipped = fetch_catalog_if_enabled(false, [] { return std::optional<bool>(true); }, cache, direct_cache_key("http://h"),
+                                            make_direct_http_get("http://h", off.fn()));
+    CHECK_FALSE(skipped.attempted);
+    CHECK(off.calls.empty());
+    CHECK(direct_cache_key("http://h") != "dev@http://h");
+}
+
+TEST_CASE("Spoolman transport selection falls back to the Moonraker proxy", "[Spoolman]")
+{
+    CHECK_FALSE(select_spoolman_transport("").direct);
+    CHECK_FALSE(select_spoolman_transport("  ").direct);
+    CHECK(select_spoolman_transport("").reason.empty());
+    auto bad = select_spoolman_transport("ftp://x");
+    CHECK_FALSE(bad.direct);
+    CHECK_FALSE(bad.reason.empty());
+    auto ok = select_spoolman_transport("http://Host:7912/");
+    CHECK(ok.direct);
+    CHECK(ok.url == "http://host:7912");
+    // the proxy encoding is unchanged: POST body always request_method GET, no body member
+    auto j = json::parse(moonraker_proxy_request_body("/v1/vendor", ""));
+    CHECK(j["request_method"] == "GET");
+    CHECK_FALSE(j.contains("body"));
 }

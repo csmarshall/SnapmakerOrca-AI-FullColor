@@ -109,6 +109,44 @@ int moonraker_proxy_unwrap(int http_status, const std::string &reply, std::strin
 // Parses the reply of GET /server/spoolman/status; nullopt when it is not understood.
 std::optional<bool> moonraker_spoolman_connected(int http_status, const std::string &reply);
 
+
+// ---- Direct Spoolman server transport (#107, pure) ----
+// An OPTIONAL app-config key `spoolman_server_url` (empty = use the Moonraker proxy). The URL names the Spoolman server itself; the
+// direct requests are GET <url>/api/v1/... only. There is no credential field: userinfo in the URL is rejected and no header is sent.
+// ASSUMED (from Spoolman's documented REST layout, not checked against a live server): the API lives under /api on the server.
+inline constexpr const char *kSpoolmanApiPrefix = "/api";
+inline constexpr int         kMaxDirectRedirects = 2; // same-origin hops only
+
+struct SpoolmanUrlCheck
+{
+    bool        ok = false;
+    std::string url;    // normalised (scheme and host lower-cased, no trailing slash); empty when the input was empty (= unset)
+    std::string reason; // why it was rejected; empty when ok
+};
+// Empty / whitespace-only input is ok with an empty url (the setting is unset). Accepts http and https with a host (name, IPv4 or
+// [IPv6]), an optional port 1..65535 and an optional path prefix. Rejects other schemes, userinfo, query, fragment, empty host, bad
+// port, spaces / control / non-ASCII characters, backslashes and anything over kMaxSpoolmanUrlLength.
+inline constexpr size_t kMaxSpoolmanUrlLength = 255;
+SpoolmanUrlCheck validate_spoolman_url(const std::string &input);
+
+// One network GET with redirects DISABLED. Returns the HTTP status (0 = failure, kStatusTooLarge) and fills body; `location` receives the
+// Location header of a 3xx reply (empty otherwise). There is no method parameter: it can only ever be a GET.
+using DirectFetch = std::function<int(const std::string &url, std::string &location, std::string &body)>;
+
+// The full request URL for a catalog path (path must be one of the three catalog paths, else empty).
+std::string direct_request_url(const std::string &validated_base, const std::string &path, const std::string &query);
+// Resolves a Location header against `current`; only a SAME-ORIGIN target (scheme, host, port) is returned, otherwise nullopt.
+std::optional<std::string> same_origin_redirect(const std::string &current, const std::string &location);
+// An HttpGet that talks to the Spoolman server directly. Anything but the three catalog paths returns status 0 without a request.
+// Follows at most kMaxDirectRedirects same-origin redirects; a redirect to another origin comes back as its 3xx status.
+HttpGet make_direct_http_get(const std::string &validated_base, DirectFetch fetch);
+// Which transport a catalog fetch uses for the stored `spoolman_server_url` value: direct only for a valid, non-empty URL; an empty or
+// invalid value falls back to the Moonraker proxy (`reason` then says why an invalid one was ignored).
+struct TransportChoice { bool direct = false; std::string url; std::string reason; };
+TransportChoice select_spoolman_transport(const std::string &stored_url);
+// Cache key for the direct path (distinct from any Moonraker "<id>@<url>" key).
+std::string direct_cache_key(const std::string &validated_base);
+
 }} // namespace Slic3r::Spoolman
 
 #endif
