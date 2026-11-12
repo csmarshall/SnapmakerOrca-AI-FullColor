@@ -44,7 +44,6 @@
 	],
 	"enable_arc_fitting": "0",
 	"ooze_prevention": "1",
-	"precise_outer_wall": "1",
 	"prime_tower_brim_width": "5",
 	"prime_tower_width": "28",
 	"prime_volume": "25",

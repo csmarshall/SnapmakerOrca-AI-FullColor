@@ -109,7 +109,6 @@
 	"wipe_tower_extra_spacing": "120%",
 	"enable_arc_fitting": "0",
 	"ooze_prevention": "1",
-	"precise_outer_wall": "1",
 	"standby_temperature_delta": "-150",
 	"support_threshold_angle": "25",
 	"support_type": "tree(auto)",

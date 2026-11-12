@@ -31,7 +31,6 @@
 	"wipe_tower_extra_spacing": "120%",
 	"wipe_tower_wall_type": "rib",
 	"ooze_prevention": "1",
-	"precise_outer_wall": "1",
 	"slowdown_for_curled_perimeters": [
 		"0",
 		"0",
