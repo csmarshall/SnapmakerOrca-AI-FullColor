@@ -2719,8 +2719,10 @@ TEST_CASE("Snapmaker Orca project keeps its plates", "[3mf][snapmaker]")
     CHECK(file_version == Semver(2, 4, 1));
     REQUIRE(plates.size() == 2);
     for (size_t i = 0; i < plates.size(); ++i) {
-        REQUIRE(plates[i]->objects_and_instances.size() == 1);
-        CHECK(plates[i]->objects_and_instances.front().first == int(i));
+        // The importer fills obj_inst_map (3MF object id -> instance id); objects_and_instances is only
+        // the writer's input. 3MF object ids are not the model object indices, so only count entries.
+        REQUIRE(plates[i]->obj_inst_map.size() == 1);
+        CHECK(plates[i]->obj_inst_map.begin()->second.first == 0);
     }
     release_PlateData_list(plates);
 }
