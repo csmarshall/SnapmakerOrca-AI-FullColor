@@ -314,22 +314,76 @@ TEST_CASE("apply_fetch_to_outcome: the last good age reaches the unreachable not
     CHECK_FALSE(n.last_good_age_seconds.has_value());
 }
 
-TEST_CASE("SyncRunner: a poster that drops the callback does not leave the runner busy", "[Spoolman][SyncRun]")
+TEST_CASE("SyncRunner: busy stays set while the callback is queued, and clears when the poster drops it unrun", "[Spoolman][SyncRun]")
 {
-    SyncRunner      r;
-    std::atomic<bool> posted{false};
-    int             done_calls = 0;
-    auto s = r.start(true, [] { return good_fetch(); }, [&](std::function<void()>) { posted = true; /* dropped */ },
-                     [&](CatalogFetch) { ++done_calls; });
-    REQUIRE(s == SyncRunner::Start::started);
-    for (int i = 0; i < 1000 && r.in_flight(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    CHECK(posted);
+    SyncRunner            r;
+    std::mutex            m;
+    std::condition_variable cv;
+    std::function<void()> held;
+    bool                  posted = false;
+    int                   done_calls = 0;
+    REQUIRE(r.start(true, [] { return good_fetch(); },
+                    [&](std::function<void()> f) {
+                        std::lock_guard<std::mutex> l(m);
+                        held   = std::move(f);
+                        posted = true;
+                        cv.notify_all();
+                    },
+                    [&](CatalogFetch) { ++done_calls; }) == SyncRunner::Start::started);
+    {
+        std::unique_lock<std::mutex> l(m);
+        REQUIRE(cv.wait_for(l, std::chrono::seconds(10), [&] { return posted; }));
+    }
+    // The worker has reached the poster and returned (or is about to): the callback is queued but not run, so still in flight.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(r.in_flight());
+    CHECK(r.start(true, [] { return good_fetch(); }, [](std::function<void()>) {}, [](CatalogFetch) {}) == SyncRunner::Start::busy);
+    {
+        std::lock_guard<std::mutex> l(m);
+        held = nullptr; // the poster drops it without running it
+    }
     CHECK_FALSE(r.in_flight());
     CHECK(done_calls == 0);
-    FakeGui gui;
-    CHECK(r.start(true, [] { return good_fetch(); }, gui.poster(), [](CatalogFetch) {}) == SyncRunner::Start::started);
-    gui.run_one();
+}
+
+TEST_CASE("SyncRunner: destroying callback copies after it ran does not clobber a newer start", "[Spoolman][SyncRun]")
+{
+    FakeGui                 gui;
+    SyncRunner              r;
+    std::function<void()>   keep_alive; // a second copy of the first callback, destroyed only at the end
+    std::mutex              m;
+    std::condition_variable cv;
+    bool                    posted = false;
+    bool                    second_started = false;
+    REQUIRE(r.start(true, [] { return good_fetch(); },
+                    [&](std::function<void()> f) {
+                        std::lock_guard<std::mutex> l(m);
+                        keep_alive = f; // copy
+                        gui.q.push_back(std::move(f));
+                        posted = true;
+                        cv.notify_all();
+                    },
+                    [&](CatalogFetch) {
+                        // start a new fetch from inside done; its callback is posted to gui but not run
+                        second_started = r.start(true, [] { return good_fetch(); }, gui.poster(), [](CatalogFetch) {}) == SyncRunner::Start::started;
+                    }) == SyncRunner::Start::started);
+    {
+        std::unique_lock<std::mutex> l(m);
+        REQUIRE(cv.wait_for(l, std::chrono::seconds(10), [&] { return posted; }));
+    }
+    std::function<void()> f;
+    {
+        std::lock_guard<std::mutex> l(m);
+        f = std::move(gui.q.front());
+        gui.q.pop_front();
+    }
+    f(); // runs the first callback: done starts the second fetch
+    REQUIRE(second_started);
+    f = nullptr;
+    keep_alive = nullptr; // last copies of the first callback die now
+    CHECK(r.in_flight());  // the second fetch must still be in flight
+    gui.run_one();         // second callback (waits for the worker to post it)
+    CHECK_FALSE(r.in_flight());
 }
 
 TEST_CASE("fetch_after_reread: a throwing re-read is reported and the fetch still runs", "[Spoolman][SyncRun][RfidReread]")

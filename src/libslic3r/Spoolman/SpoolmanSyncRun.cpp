@@ -33,15 +33,25 @@ SyncRunner::Start SyncRunner::start(bool preference_on, FetchFn fetch, PostFn po
             } catch (...) {
                 result = CatalogFetch{}; // attempted == false: reported as unreachable
             }
-            // If the poster drops the callback without running it (e.g. the app is shutting down), the last copy's destruction
-            // still clears `busy`, so the runner is never left in flight forever.
+            // If the poster drops the callback without ever running it (e.g. the app is shutting down), destroying the last copy clears
+            // `busy`. Once the callback has run it clears `busy` itself exactly once and sets `released`, so the destructor never
+            // clobbers a newer start().
             struct BusyReset {
+                explicit BusyReset(std::shared_ptr<State> s) : st(std::move(s)) {}
+                BusyReset(const BusyReset &) = delete;
+                BusyReset &operator=(const BusyReset &) = delete;
+                ~BusyReset()
+                {
+                    if (!released)
+                        st->busy = false;
+                }
                 std::shared_ptr<State> st;
-                ~BusyReset() { st->busy = false; }
+                bool                   released = false;
             };
-            auto reset = std::make_shared<BusyReset>(BusyReset{st});
+            auto reset = std::make_shared<BusyReset>(st);
             post([reset, st, done = std::move(done), result = std::move(result)]() mutable {
-                st->busy = false;
+                reset->released = true;
+                st->busy        = false;
                 if (st->alive)
                     done(std::move(result));
             });
