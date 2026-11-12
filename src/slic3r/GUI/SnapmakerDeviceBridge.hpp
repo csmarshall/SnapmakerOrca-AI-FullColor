@@ -51,6 +51,12 @@ nlohmann::json snapmaker_devices_to_json(const std::vector<SnapmakerDeviceInfo>&
 nlohmann::json snapmaker_device_to_json(const SnapmakerDeviceInfo& device);
 // The host part of an address as typed or stored: "http://u1.local:7125/x" -> "u1.local".
 std::string snapmaker_bare_host(const std::string& address);
+// Timelapse tab (#90): the printer's camera.get_timelapse_instance result, made safe for the page. Untrusted: strings are control-char
+// stripped, '<' '>' removed and capped (512 bytes); thumbnail_base64 must be pure base64 and <= SNAPMAKER_TIMELAPSE_COVER_MAX_BYTES or it is
+// emptied (and covers past a 4 MB total are emptied); at most 50 instances; only the known fields survive. False if `result` is not an
+// object with state "success" and an instances array.
+constexpr std::size_t SNAPMAKER_TIMELAPSE_COVER_MAX_BYTES = 256 * 1024;
+bool snapmaker_timelapse_reply(const nlohmann::json& result, nlohmann::json& out);
 // File tab: sw_GetFileListPage. The params must be exactly {root:"gcodes", page_number:int 0..10000, files_per_page:int 1..500}.
 bool snapmaker_file_list_params_valid(const nlohmann::json& params);
 // Turns the body of GET /server/files/list?root=gcodes ({"result":[{path,modified,size,permissions},...]}, unsorted, unpaged) into the
@@ -168,6 +174,9 @@ public:
         // Camera preview: IPrinterAgent::camera_monitor_async (start or stop the machine's monitor stream) with the page's
         // whitelisted params; `done(ok, result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
         std::function<void(bool start, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> camera_monitor;
+        // Timelapse listing (#90): IPrinterAgent::timelapse_list_async with the page's whitelisted params; `done(ok, result)` on the UI
+        // thread, exactly once. Null = no machine source (the command fails).
+        std::function<void(const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> timelapse_list;
         // Machine control (#75): IPrinterAgent::control_async with a method from the forklifted table and its validated params; `done(ok,
         // result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
         std::function<void(const std::string& method, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> control;

@@ -69,6 +69,19 @@ public:
                                    std::function<void(bool ok, nlohmann::json result)> done);
     static CameraReply parse_camera_monitor_reply(const std::string& message, int id, nlohmann::json& result);
 
+    // Timelapse listing (#90, read-only): camera.get_timelapse_instance, one websocket RPC, own gate (a camera stream never blocks it), 15 s.
+    void        timelapse_list_async(const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done) override;
+    // The JSON-RPC request text for that one method; "" if `params` fail timelapse_list_params_valid() (exposed for tests).
+    static std::string timelapse_list_request(const nlohmann::json& params, int id);
+    // The reply has the camera reply's envelope (result object with state "success"), so it is classified the same way.
+    static CameraReply parse_timelapse_list_reply(const std::string& message, int id, nlohmann::json& result)
+    {
+        return parse_camera_monitor_reply(message, id, result);
+    }
+    static void timelapse_list_run(const std::string& base_url, const std::string& api_key, const nlohmann::json& params,
+                                   std::chrono::milliseconds total, std::shared_ptr<InFlightGate> gate,
+                                   std::function<void(bool ok, nlohmann::json result)> done);
+
     // Machine control (#75): one-request websocket RPC for a method on the kControlRpcMethods allowlist (IPrinterAgent.hpp); same
     // thread/timeout/gate model as camera_monitor_async, with its own gate so a camera stream never blocks the LED (print.* has a third gate, below).
     void        control_async(const std::string& method, const nlohmann::json& params,
@@ -362,7 +375,8 @@ private:
     std::atomic<uint64_t>  connect_generation{0};
     std::thread            connect_thread;
     std::shared_ptr<InFlightGate> m_camera_gate = std::make_shared<InFlightGate>();
-    std::shared_ptr<InFlightGate> m_control_gate = std::make_shared<InFlightGate>();
+    std::shared_ptr<InFlightGate> m_timelapse_gate = std::make_shared<InFlightGate>();
+    std::shared_ptr<InFlightGate> m_control_gate =std::make_shared<InFlightGate>();
     std::shared_ptr<InFlightGate> m_print_gate = std::make_shared<InFlightGate>();
     mutable std::recursive_mutex connect_mutex; // mutable: spoolman_endpoint() snapshots under it
     mutable std::mutex     connect_error_mutex;

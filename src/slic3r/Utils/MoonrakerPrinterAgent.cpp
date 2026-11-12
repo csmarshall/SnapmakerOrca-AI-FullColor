@@ -599,6 +599,40 @@ void MoonrakerPrinterAgent::camera_monitor_async(bool start, const nlohmann::jso
     camera_monitor_run(base_url, api_key, start, params, std::chrono::milliseconds(5000), m_camera_gate, std::move(done));
 }
 
+// ---- timelapse listing (#90): Snapmaker's camera.get_timelapse_instance (Moonraker_Mqtt::async_get_timelapse_instance, MoonRaker.cpp),
+// read-only; the one method this path can ever send ----
+
+std::string MoonrakerPrinterAgent::timelapse_list_request(const nlohmann::json& params, int id)
+{
+    if (!timelapse_list_params_valid(params))
+        return {};
+    nlohmann::json req;
+    req["jsonrpc"] = "2.0";
+    req["method"]  = "camera.get_timelapse_instance";
+    req["params"]  = params;
+    req["id"]      = id;
+    return req.dump();
+}
+
+void MoonrakerPrinterAgent::timelapse_list_run(const std::string& base_url, const std::string& api_key, const nlohmann::json& params,
+                                               std::chrono::milliseconds total, std::shared_ptr<InFlightGate> gate,
+                                               std::function<void(bool ok, nlohmann::json result)> done)
+{
+    rpc_run(base_url, api_key, timelapse_list_request(params, 1), "timelapse", &MoonrakerPrinterAgent::parse_timelapse_list_reply, total,
+            std::move(gate), std::move(done));
+}
+
+void MoonrakerPrinterAgent::timelapse_list_async(const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)
+{
+    std::string base_url, api_key;
+    {
+        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+        base_url = device_info.base_url;
+        api_key  = device_info.api_key;
+    }
+    timelapse_list_run(base_url, api_key, params, std::chrono::milliseconds(15000), m_timelapse_gate, std::move(done));
+}
+
 void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::string>& object_names,
                                                         std::function<void(bool ok, nlohmann::json result)> done)
 {

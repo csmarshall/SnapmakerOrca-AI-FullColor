@@ -516,6 +516,17 @@ public:
     }
 
     /**
+     * Timelapse listing (#90, read-only): Snapmaker's JSON-RPC method camera.get_timelapse_instance (and nothing else; `params` must pass
+     * timelapse_list_params_valid()). `done(ok, result)` gets the printer's "result" object, exactly once, from ANY thread; ok=false
+     * (empty object) for refused params, no machine, an error reply or a timeout. Agents without the notion keep the default (fails at once).
+     */
+    virtual void timelapse_list_async(const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)
+    {
+        (void) params;
+        if (done) done(false, nlohmann::json::object());
+    }
+
+    /**
      * Machine control (#75): call one of the forklifted Snapmaker control JSON-RPC methods (kControlRpcMethods; anything else is
      * refused). `params` must be an object. `done(ok, result)` exactly once, from ANY thread; ok=false for a refused method, no
      * machine, an error reply or a timeout. Agents without the notion keep the default (fails at once).
@@ -645,6 +656,30 @@ inline bool snapmaker_nozzle_script_joined_valid(const std::string& script)
         if (nl == std::string::npos) return true;
         begin = nl + 1;
     }
+}
+
+// The whitelist for timelapse_list_async() and the page bridge (#90): an object with page_index (integer 0..10000), page_rows (integer
+// 1..50) and optionally thumbnail_direct (only true: covers inline). Snapmaker passes the page's params through unchanged
+// (Moonraker_Mqtt::async_get_timelapse_instance, MoonRaker.cpp); anything else here is refused.
+inline bool timelapse_list_params_valid(const nlohmann::json& p)
+{
+    if (!p.is_object()) return false;
+    bool has_index = false, has_rows = false;
+    for (auto it = p.begin(); it != p.end(); ++it) {
+        const std::string& k = it.key();
+        const nlohmann::json& v = it.value();
+        if (k == "page_index") {
+            if (!v.is_number_integer() || v.get<long long>() < 0 || v.get<long long>() > 10000) return false;
+            has_index = true;
+        } else if (k == "page_rows") {
+            if (!v.is_number_integer() || v.get<long long>() < 1 || v.get<long long>() > 50) return false;
+            has_rows = true;
+        } else if (k == "thumbnail_direct") {
+            if (!v.is_boolean() || !v.get<bool>()) return false;
+        } else
+            return false;
+    }
+    return has_index && has_rows;
 }
 
 // The whitelist for camera_monitor_async() and the page bridge: an object with exactly the keys domain ("lan"), clientid

@@ -16,6 +16,7 @@ REGISTERED sw_FileGetStatus
 REGISTERED sw_FileLog
 REGISTERED sw_FilesThumbnailsBase64
 REGISTERED sw_GetCache
+REGISTERED sw_GetCameraTimelapseInstance  # read-only: camera.get_timelapse_instance over the websocket, covers inline, reply sanitised (#90)
 REGISTERED sw_GetConnectedMachine
 REGISTERED sw_GetFileListPage  # read-only: GET /server/files/list?root=gcodes, sorted and paged host-side
 REGISTERED sw_GetLocalDevices
@@ -75,7 +76,6 @@ DENIED sw_Exit
 DENIED sw_FileView  # RISKY
 DENIED sw_FinishFilamentMapping
 DENIED sw_GetActiveFile
-DENIED sw_GetCameraTimelapseInstance
 DENIED sw_GetDeviceDataStorageSpace
 DENIED sw_GetFileFilamentMapping
 DENIED sw_GetFileStream  # RISKY

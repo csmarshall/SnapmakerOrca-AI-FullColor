@@ -94,6 +94,10 @@ struct BridgeHarness
     bool                              control_ok = true;
     bool                              hold_control = false;
     std::vector<std::function<void(bool, json)>> control_pending;
+    // Timelapse listing source (#90): every request's params recorded; answers at once with timelapse_ok/timelapse_result.
+    std::vector<json>                 timelapse_calls;
+    bool                              timelapse_ok = true;
+    json                              timelapse_result = json::object();
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -119,6 +123,10 @@ struct BridgeHarness
               o.camera_monitor = [this](bool start, const json& params, std::function<void(bool, json)> done) {
                       camera_calls.push_back({start, params});
                       if (hold_camera) camera_pending.push_back(std::move(done)); else done(camera_ok, camera_ok ? camera_result : json::object());
+                  };
+              o.timelapse_list = [this](const json& params, std::function<void(bool, json)> done) {
+                      timelapse_calls.push_back(params);
+                      done(timelapse_ok, timelapse_ok ? timelapse_result : json::object());
                   };
               o.control = [this](const std::string& method, const json& params, std::function<void(bool, json)> done) {
                       control_calls.push_back({method, params});
@@ -565,6 +573,8 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys", "sw_FilesThumbnailsBase64", "sw_MachineHeartbeat",
         // camera preview (start/stop only; the timelapse commands stay denied)
         "sw_CameraStartMonitor", "sw_CameraStopMonitor",
+        // read-only timelapse listing (#90; delete, uploads, download stay denied)
+        "sw_GetCameraTimelapseInstance",
         // read-only file listing (#75)
         "sw_GetFileListPage",
         // machine control (#75, #79): LED, speed, fans, bed temperature, pause/resume/cancel; nozzle temperature, purifier, device name
@@ -573,7 +583,7 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 51);
+    CHECK(expected.size() == 52);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -1033,7 +1043,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 51);
+    CHECK(registered.size() == 52);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
@@ -1174,7 +1184,7 @@ TEST_CASE("a camera reply that arrives after shutdown is dropped; the timelapse 
     h.bridge.shutdown();
     h.camera_pending[0](true, h.camera_result);
     CHECK(h.sent.empty());
-    for (const char* cmd : {"sw_DeleteCameraTimelapse", "sw_GetCameraTimelapseInstance", "sw_UploadCameraTimelapse"})
+    for (const char* cmd : {"sw_DeleteCameraTimelapse", "sw_UploadCameraTimelapse", "sw_UploadAsyncTimelapseInstance", "sw_OpenTimelapseFolder", "sw_DownLoadFile"})
         CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
 }
 
@@ -2283,4 +2293,147 @@ TEST_CASE("the newly registered controls forward the exact RPC with no state que
         CHECK(h.reply(0)["payload"]["code"] == 501);
     }
     CHECK(h.control_calls.size() == 4);
+}
+
+
+// ---- timelapse listing (#90, slice 1): sw_GetCameraTimelapseInstance -> camera.get_timelapse_instance, read-only ----
+namespace {
+const json kTlParams = {{"page_index", 0}, {"page_rows", 10}, {"thumbnail_direct", true}};
+json tl_instance(const std::string& name)
+{
+    return {{"date_index", "20261104"}, {"gcode_name", name}, {"gcode_path", "/g/" + name}, {"thumbnail_path", "/t.png"}, {"timelapse_dir", "/d"},
+            {"video_path", "/d/" + name + ".mp4"}, {"video_duration", 12}, {"generate_date", "2026-11-04"}, {"cover_path", "/d/c.jpg"},
+            {"thumbnail_base64", "QUJD"}, {"video_local_url_suffix", "/files/v.mp4"}, {"cover_local_url_suffix", "/files/c.jpg"},
+            {"video_file_size", 14900000}, {"unix_timestamp_s", 1762300000}};
+}
+json tl_result(const json& instances)
+{
+    return {{"state", "success"}, {"total_count", instances.size()}, {"page_index", 0}, {"page_rows", 10}, {"count", instances.size()}, {"instances", instances}};
+}
+} // namespace
+
+TEST_CASE("timelapse request: only camera.get_timelapse_instance with {page_index,page_rows,thumbnail_direct:true}", "[SSWCP][device_ui][timelapse]")
+{
+    const json req = json::parse(MoonrakerPrinterAgent::timelapse_list_request(kTlParams, 5));
+    CHECK(req["jsonrpc"] == "2.0");
+    CHECK(req["method"] == "camera.get_timelapse_instance");
+    CHECK(req["params"] == kTlParams);
+    CHECK(req["id"] == 5);
+    auto with = [&](const char* k, json v) { json p = kTlParams; p[k] = std::move(v); return p; };
+    CHECK_FALSE(MoonrakerPrinterAgent::timelapse_list_request(json{{"page_index", 0}, {"page_rows", 10}}, 1).empty()); // thumbnail_direct optional
+    for (const json& bad : {json::array(), json(), with("page_index", -1), with("page_index", 10001), with("page_index", "0"), with("page_rows", 0),
+                            with("page_rows", 51), with("page_rows", 1.5), with("thumbnail_direct", false), with("thumbnail_direct", 1),
+                            with("method", "camera.delete_timelapse_instance"), with("date_index", "x"), json{{"page_rows", 5}}, json{{"page_index", 0}}}) {
+        CAPTURE(bad.dump());
+        CHECK(MoonrakerPrinterAgent::timelapse_list_request(bad, 1).empty());
+    }
+}
+
+TEST_CASE("timelapse reply classification reuses the camera envelope", "[SSWCP][device_ui][timelapse]")
+{
+    using R = MoonrakerPrinterAgent::CameraReply;
+    json result;
+    CHECK(MoonrakerPrinterAgent::parse_timelapse_list_reply(json{{"jsonrpc", "2.0"}, {"id", 3}, {"result", tl_result(json::array())}}.dump(), 3, result) == R::Ok);
+    CHECK(MoonrakerPrinterAgent::parse_timelapse_list_reply(R"({"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"Method not found"}})", 3, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_timelapse_list_reply(R"({"jsonrpc":"2.0","id":3,"result":{"state":"failure"}})", 3, result) == R::Fail);
+    CHECK(MoonrakerPrinterAgent::parse_timelapse_list_reply(R"({"jsonrpc":"2.0","id":9,"result":{"state":"success"}})", 3, result) == R::Ignore);
+    CHECK(MoonrakerPrinterAgent::parse_timelapse_list_reply("garbage", 3, result) == R::Ignore);
+}
+
+TEST_CASE("sw_GetCameraTimelapseInstance forwards validated params and replies the sanitised list", "[SSWCP][device_ui][timelapse]")
+{
+    BridgeHarness h;
+    h.timelapse_result = tl_result(json::array({tl_instance("a"), tl_instance("b")}));
+    h.bridge.on_script_message(h.good, camera_msg("sw_GetCameraTimelapseInstance", kTlParams));
+    REQUIRE(h.timelapse_calls.size() == 1);
+    CHECK(h.timelapse_calls[0] == kTlParams);
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] == 200);
+    const json data = h.reply(0)["payload"]["data"];
+    CHECK(data["count"] == 2);
+    REQUIRE(data["instances"].size() == 2);
+    CHECK(data["instances"][0]["gcode_name"] == "a");
+    CHECK(data["instances"][0]["video_file_size"] == 14900000);
+    CHECK(data["instances"][0]["video_duration"] == 12);
+    CHECK(data["instances"][0]["thumbnail_base64"] == "QUJD");
+    CHECK(h.control_calls.empty());
+    CHECK(h.camera_calls.empty());
+    CHECK(h.fetched.empty());
+}
+
+TEST_CASE("sw_GetCameraTimelapseInstance: bad params are 400 and never reach the machine; errors are failures", "[SSWCP][device_ui][timelapse]")
+{
+    BridgeHarness h;
+    h.bridge.on_script_message(h.good, camera_msg("sw_GetCameraTimelapseInstance", json{{"page_index", 0}, {"page_rows", 500}}));
+    h.bridge.on_script_message(h.good, camera_msg("sw_GetCameraTimelapseInstance", json::array()));
+    CHECK(h.timelapse_calls.empty());
+    REQUIRE(h.sent.size() == 2);
+    CHECK(h.reply(0)["payload"]["code"] == 400);
+    CHECK(h.reply(1)["payload"]["code"] == 400);
+    h.sent.clear();
+    h.timelapse_ok = false;
+    h.bridge.on_script_message(h.good, camera_msg("sw_GetCameraTimelapseInstance", kTlParams));
+    REQUIRE(h.sent.size() == 1);
+    CHECK(h.reply(0)["payload"]["code"] != 200);
+}
+
+TEST_CASE("timelapse reply: garbage and oversize are neutralised", "[SSWCP][device_ui][timelapse]")
+{
+    json out;
+    for (const json& bad : {json(), json::array(), json::object(), json{{"state", "failure"}, {"instances", json::array()}}, json{{"state", "success"}},
+                            json{{"state", "success"}, {"instances", "x"}}})
+        CHECK_FALSE(snapmaker_timelapse_reply(bad, out));
+    // markup / control characters / long strings / non-base64 and oversize covers / wrong types / extra fields / more than 50
+    json evil = tl_instance("<img src=x onerror=alert(1)>\n\x01" + std::string(2000, 'z'));
+    evil["thumbnail_base64"] = std::string(SNAPMAKER_TIMELAPSE_COVER_MAX_BYTES + 1, 'A');
+    evil["video_file_size"]  = "big";
+    evil["unix_timestamp_s"] = -5;
+    evil["extra"]            = "must not leak";
+    json bad_cover = tl_instance("c");
+    bad_cover["thumbnail_base64"] = "AA\"><script>";
+    json list = json::array({evil, "not an object", bad_cover});
+    for (int i = 0; i < 70; ++i) list.push_back(tl_instance("n" + std::to_string(i)));
+    REQUIRE(snapmaker_timelapse_reply(tl_result(list), out));
+    CHECK(out["instances"].size() == 50);
+    CHECK(out["count"] == 50);
+    const json& e = out["instances"][0];
+    const std::string name = e["gcode_name"].get<std::string>();
+    CHECK(name.size() <= 512);
+    CHECK(name.find('<') == std::string::npos);
+    CHECK(name.find('>') == std::string::npos);
+    CHECK(name.find('\x01') == std::string::npos);
+    CHECK(name.find('\n') == std::string::npos);
+    CHECK(e["thumbnail_base64"] == "");
+    CHECK(e["video_file_size"] == 0);
+    CHECK(e["unix_timestamp_s"] == 0);
+    CHECK_FALSE(e.contains("extra"));
+    CHECK(out["instances"][1]["thumbnail_base64"] == "");
+    CHECK(out["instances"][2]["thumbnail_base64"] == "QUJD");
+    // total cover budget: 4 MB across a page
+    json big = json::array();
+    for (int i = 0; i < 30; ++i) { json x = tl_instance("b" + std::to_string(i)); x["thumbnail_base64"] = std::string(200 * 1024, 'A'); big.push_back(x); }
+    REQUIRE(snapmaker_timelapse_reply(tl_result(big), out));
+    std::size_t total = 0;
+    for (const auto& x : out["instances"]) total += x["thumbnail_base64"].get<std::string>().size();
+    CHECK(total <= 4u * 1024 * 1024);
+}
+
+TEST_CASE("no write-class timelapse method is ever emitted", "[SSWCP][device_ui][timelapse]")
+{
+    // the only request builder for this path hardcodes camera.get_timelapse_instance; whatever the params, nothing else comes out
+    for (const json& p : {kTlParams, json{{"page_index", 3}, {"page_rows", 50}}}) {
+        const std::string text = MoonrakerPrinterAgent::timelapse_list_request(p, 1);
+        REQUIRE_FALSE(text.empty());
+        CHECK(json::parse(text)["method"] == "camera.get_timelapse_instance");
+    }
+    BridgeHarness h;
+    for (const char* cmd : {"sw_DeleteCameraTimelapse", "sw_UploadCameraTimelapse", "sw_UploadAsyncTimelapseInstance", "sw_OpenTimelapseFolder"}) {
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, camera_msg(cmd, kTlParams));
+        CHECK(h.timelapse_calls.empty());
+        CHECK(h.control_calls.empty());
+        CHECK(h.camera_calls.empty());
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 501);
+    }
 }

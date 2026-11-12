@@ -186,6 +186,75 @@ bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json&
     return true;
 }
 
+namespace {
+std::string timelapse_clean_string(const nlohmann::json& v)
+{
+    if (!v.is_string()) return {};
+    std::string s;
+    for (unsigned char c : v.get_ref<const std::string&>()) {
+        if (c < 0x20 || c == 0x7F || c == '<' || c == '>') continue;
+        s += static_cast<char>(c);
+    }
+    if (s.size() > 512) {
+        std::size_t cut = 512;
+        while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+        s.resize(cut);
+    }
+    return s;
+}
+bool timelapse_is_base64(const std::string& s)
+{
+    for (unsigned char c : s)
+        if (!(ascii_alnum(c) || c == '+' || c == '/' || c == '=')) return false;
+    return true;
+}
+long long timelapse_clean_int(const nlohmann::json& v, long long hi)
+{
+    if (!v.is_number()) return 0;
+    const double d = v.get<double>();
+    return d < 0 || d > static_cast<double>(hi) ? 0 : static_cast<long long>(d);
+}
+} // namespace
+
+bool snapmaker_timelapse_reply(const nlohmann::json& r, nlohmann::json& out)
+{
+    if (!r.is_object() || !r.contains("state") || !r["state"].is_string() || r["state"].get<std::string>() != "success" ||
+        !r.contains("instances") || !r["instances"].is_array())
+        return false;
+    static const char* const kStrings[] = {"date_index", "gcode_name", "gcode_path", "thumbnail_path", "timelapse_dir", "video_path",
+                                           "generate_date", "cover_path", "video_local_url_suffix", "cover_local_url_suffix"};
+    constexpr long long kMax = 1000000000000LL;
+    nlohmann::json list = nlohmann::json::array();
+    std::size_t covers = 0;
+    for (const auto& in : r["instances"]) {
+        if (list.size() >= 50) break;
+        if (!in.is_object()) continue;
+        nlohmann::json o = nlohmann::json::object();
+        for (const char* k : kStrings) o[k] = timelapse_clean_string(in.value(k, nlohmann::json()));
+        o["video_duration"]  = timelapse_clean_int(in.value("video_duration", nlohmann::json()), kMax);
+        o["video_file_size"] = timelapse_clean_int(in.value("video_file_size", nlohmann::json()), kMax);
+        o["unix_timestamp_s"] = timelapse_clean_int(in.value("unix_timestamp_s", nlohmann::json()), kMax);
+        std::string cover;
+        const auto b64 = in.find("thumbnail_base64");
+        if (b64 != in.end() && b64->is_string()) {
+            const std::string& s = b64->get_ref<const std::string&>();
+            if (s.size() <= SNAPMAKER_TIMELAPSE_COVER_MAX_BYTES && covers + s.size() <= 4u * 1024 * 1024 && timelapse_is_base64(s)) {
+                cover = s;
+                covers += s.size();
+            }
+        }
+        o["thumbnail_base64"] = std::move(cover);
+        list.push_back(std::move(o));
+    }
+    out = nlohmann::json{{"state", "success"},
+                         {"total_count", timelapse_clean_int(r.value("total_count", nlohmann::json()), kMax)},
+                         {"page_index", timelapse_clean_int(r.value("page_index", nlohmann::json()), kMax)},
+                         {"page_rows", timelapse_clean_int(r.value("page_rows", nlohmann::json()), kMax)},
+                         {"count", static_cast<long long>(list.size())},
+                         {"instances", std::move(list)}};
+    return true;
+}
+
 bool snapmaker_file_list_params_valid(const nlohmann::json& p)
 {
     if (!p.is_object() || p.size() != 3) return false;
@@ -850,6 +919,27 @@ void SnapmakerDeviceBridge::register_commands()
             },
             false);
     }
+
+    // --- timelapse tab (#90, slice 1): the read-only instance listing, Snapmaker's sw_GetCameraTimelapseInstance ->
+    // camera.get_timelapse_instance (SSWCP.cpp, Moonraker_Mqtt::async_get_timelapse_instance in MoonRaker.cpp). Covers come back inline;
+    // the reply is sanitised. Delete, uploads, download and open-folder stay denied. ---
+    m_sswcp.register_command(
+        "sw_GetCameraTimelapseInstance",
+        [this](SSWCP_Instance& i) {
+            if (!timelapse_list_params_valid(i.params())) { i.handle_general_fail(SSWCPCode::BadRequest, "invalid timelapse parameters"); return; }
+            if (!m_options.timelapse_list) { i.handle_general_fail(SSWCPCode::Failure, "no machine connected"); return; }
+            auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            m_options.timelapse_list(i.params(), [weak, alive](bool ok, nlohmann::json result) {
+                if (!*alive) return;
+                auto inst = weak.lock();
+                if (!inst) return;
+                nlohmann::json out;
+                if (ok && snapmaker_timelapse_reply(result, out)) inst->reply_ok(std::move(out));
+                else inst->handle_general_fail(SSWCPCode::Failure, "cannot list the timelapse videos");
+            });
+        },
+        false);
 
     // --- machine control (#75, #79): only the commands in snapmaker_registered_control_commands() are reachable; the rest of the
     // forklifted table stays unregistered and gets the core's 501. pause / resume / cancel first ask the machine for print_stats.state

@@ -138,6 +138,17 @@ bool SnapmakerDevicePage::start()
             wxGetApp().CallAfter([done, ok, result = std::move(result)]() mutable { done(ok, std::move(result)); });
         });
     };
+    opt.timelapse_list = [](const nlohmann::json& params, std::function<void(bool, nlohmann::json)> done) {
+        auto* net   = wxGetApp().getAgent();
+        auto  agent = net ? net->get_printer_agent() : nullptr;
+        if (!agent) {
+            done(false, nlohmann::json::object());
+            return;
+        }
+        agent->timelapse_list_async(params, [done](bool ok, nlohmann::json result) {
+            wxGetApp().CallAfter([done, ok, result = std::move(result)]() mutable { done(ok, std::move(result)); });
+        });
+    };
     opt.control = [](const std::string& method, const nlohmann::json& params, std::function<void(bool, nlohmann::json)> done) {
         auto* net   = wxGetApp().getAgent();
         auto  agent = net ? net->get_printer_agent() : nullptr;
