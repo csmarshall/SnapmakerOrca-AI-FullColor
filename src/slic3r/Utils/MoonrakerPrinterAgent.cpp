@@ -24,6 +24,7 @@
 #include "../GUI/DeviceCore/DevStorage.h"
 #include "../GUI/DeviceCore/DevFirmware.h"
 #include "nlohmann/json.hpp"
+#include <algorithm>
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
@@ -1393,25 +1394,40 @@ MoonrakerPrinterAgent::RfidReread MoonrakerPrinterAgent::reread_spool_tags(std::
         return json["result"]["status"][object];
     };
 
-    // Joined slot UIDs; nullopt while every slot is empty (a cleared state) and on a failed read.
+    // One read of both objects the sync uses (as SnapmakerPrinterAgent::fetch_filament_info does): the tag UIDs from filament_detect and
+    // the per-slot type / colour / vendor / exist from print_task_config, which the firmware refills asynchronously after the clear.
+    // Returns one line per slot; nullopt on a failed read and while every slot UID is empty (a cleared state, remembered in cleared_seen).
     bool cleared_seen = false;
-    auto uid_signature = [&]() -> std::optional<std::string> {
-        const auto fd = query("filament_detect");
-        if (!fd || !fd->is_object() || !fd->contains("info"))
+    auto snapshot     = [&]() -> std::optional<std::string> {
+        std::string reply;
+        if (spoolman_moonraker_request(ep.base_url, ep.api_key, "/printer/objects/query?print_task_config&filament_detect", {}, reply) != 200)
             return std::nullopt;
-        std::string sig;
-        bool        any = false;
-        for (const std::string &uid : spoolman_slot_uids((*fd)["info"])) {
-            any = any || !uid.empty();
-            sig += uid + ",";
-        }
+        const auto json = nlohmann::json::parse(reply, nullptr, false, true);
+        if (json.is_discarded() || !json.contains("result") || !json["result"].contains("status"))
+            return std::nullopt;
+        const auto &status = json["result"]["status"];
+        if (!status.is_object() || !status.contains("filament_detect") || !status["filament_detect"].is_object() ||
+            !status["filament_detect"].contains("info") || !status.contains("print_task_config") || !status["print_task_config"].is_object())
+            return std::nullopt;
+        const auto &ptc  = status["print_task_config"];
+        const auto  uids = spoolman_slot_uids(status["filament_detect"]["info"]);
+        const bool  any  = std::any_of(uids.begin(), uids.end(), [](const std::string &u) { return !u.empty(); });
         if (!any) {
             cleared_seen = true;
             return std::nullopt;
         }
-        return cleared_seen ? sig + "|reread" : sig; // tags cleared and read back: a re-read even if the UIDs are unchanged
+        auto field = [&](const char *key, size_t i) -> std::string {
+            if (!ptc.contains(key) || !ptc[key].is_array() || i >= ptc[key].size())
+                return "?";
+            return ptc[key][i].is_string() ? ptc[key][i].get<std::string>() : ptc[key][i].dump();
+        };
+        std::string sig;
+        for (size_t i = 0; i < uids.size(); ++i)
+            sig += "slot " + std::to_string(i) + " uid=" + uids[i] + " type=" + field("filament_type", i) + " colour=" +
+                   field("filament_color_rgba", i) + " vendor=" + field("filament_vendor", i) + " exist=" + field("filament_exist", i) + "\n";
+        return cleared_seen ? sig + "|reread" : sig; // tags cleared and read back: a re-read even if the snapshot is unchanged
     };
-    const std::string baseline = uid_signature().value_or(std::string());
+    const std::string baseline = snapshot().value_or(std::string());
     cleared_seen               = false;
 
     Spoolman::RereadTransport transport;
@@ -1436,7 +1452,10 @@ MoonrakerPrinterAgent::RfidReread MoonrakerPrinterAgent::reread_spool_tags(std::
     const auto t0    = std::chrono::steady_clock::now();
     auto       now   = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0); };
     auto       sleep = [](std::chrono::milliseconds d) { std::this_thread::sleep_for(d); };
-    return Spoolman::poll_until_changed(uid_signature, baseline, now, sleep, timeout, interval) ? RfidReread::done : RfidReread::unconfirmed;
+    const auto settled = Spoolman::poll_until_settled(snapshot, baseline, now, sleep, timeout, interval, 3); // 3 identical polls = settled
+    BOOST_LOG_TRIVIAL(info) << "MoonrakerPrinterAgent::reread_spool_tags: tag re-read " << (settled.settled ? "settled" : "unconfirmed")
+                            << ", final snapshot:\n" << (settled.last.empty() ? std::string("(none read)\n") : settled.last);
+    return settled.settled ? RfidReread::done : RfidReread::unconfirmed;
 }
 
 // Fetch filament info from moonraker database

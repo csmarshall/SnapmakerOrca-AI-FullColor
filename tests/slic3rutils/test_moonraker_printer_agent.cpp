@@ -1632,6 +1632,13 @@ public:
     // filament_detect info JSON before and after the script was posted
     std::string before = R"([{"CARD_UID":[1,2,3,4]},{},{},{}])";
     std::string after  = R"([{"CARD_UID":[9,9,9,9]},{},{},{}])";
+    // print_task_config types before the script, right after it (the cleared default) and settled; the firmware refills them
+    // asynchronously, so `refill_after` polls of the combined query pass before the settled types show up.
+    std::string types_before  = R"(["PLA","PLA","PLA","PLA"])";
+    std::string types_cleared = R"(["PLA","PLA","PLA","PLA"])";
+    std::string types_settled = R"(["ABS","PETG","TPU","PETG"])";
+    int         refill_after  = 0;
+    mutable int polls_after_post = 0;
     bool        posted = false;
     int         post_status = 200;
 
@@ -1652,8 +1659,11 @@ protected:
             response = nlohmann::json{{"result", {{"status", {{"print_stats", {{"state", state}}}}}}}}.dump();
             return 200;
         }
-        if (path == "/printer/objects/query?filament_detect") {
-            response = R"({"result":{"status":{"filament_detect":{"info":)" + (posted ? after : before) + "}}}}";
+        if (path == "/printer/objects/query?print_task_config&filament_detect") {
+            const std::string &types = !posted ? types_before : (polls_after_post++ < refill_after ? types_cleared : types_settled);
+            response = R"({"result":{"status":{"filament_detect":{"info":)" + (posted ? after : before) +
+                       R"(},"print_task_config":{"filament_type":)" + types +
+                       R"(,"filament_color_rgba":["A9A9A9FF","FF1523FF","E22400FF","16171BFF"],"filament_vendor":["a","b","c","d"],"filament_exist":[true,true,true,true]}}}})";
             return 200;
         }
         return 404;
@@ -1703,11 +1713,22 @@ TEST_CASE("RFID re-read: idle posts exactly one script and sees the changed UID"
 TEST_CASE("RFID re-read: sent but no UID change times out as unconfirmed; a failed post is reported", "[MoonrakerPrinterAgent][RfidReread]")
 {
     RereadAgent same(true);
-    same.after = same.before;
+    same.after         = same.before;
+    same.types_settled = same.types_before; // nothing at all changed
     CHECK(same.reread_spool_tags(std::chrono::milliseconds(50), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::unconfirmed);
     CHECK(same.posts() == 1);
     RereadAgent failing(true);
     failing.post_status = 500;
     CHECK(failing.reread_spool_tags(std::chrono::milliseconds(50), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::send_failed);
     CHECK(failing.posts() == 1);
+}
+
+TEST_CASE("RFID re-read: UIDs change at once but print_task_config is refilled later; done only after it settles", "[MoonrakerPrinterAgent][RfidReread]")
+{
+    RereadAgent agent(true);
+    agent.after        = R"([{"CARD_UID":[9,9,9,9]},{"CARD_UID":[8,8,8,8]},{},{}])"; // UIDs are new on the first poll after the post
+    agent.refill_after = 2;                                                          // types stay at the cleared default for 2 polls
+    CHECK(agent.reread_spool_tags(std::chrono::milliseconds(2000), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::done);
+    // 2 polls at the default + 3 identical settled polls; the UID change alone would have been "done" after the first poll
+    CHECK(agent.polls_after_post == 5);
 }

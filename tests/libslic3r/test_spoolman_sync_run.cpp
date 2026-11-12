@@ -212,31 +212,59 @@ TEST_CASE("RFID re-read: idle state sends exactly one script after re-checking t
     CHECK(failing.sent.size() == 1);
 }
 
-TEST_CASE("RFID re-read: poll returns when the value changes, and times out otherwise", "[Spoolman][RfidReread]")
+TEST_CASE("RFID re-read: poll settles only after the snapshot changed and then stayed identical", "[Spoolman][RfidReread]")
 {
     using ms = std::chrono::milliseconds;
     ms   clock{0};
     auto now   = [&] { return clock; };
     auto sleep = [&](ms d) { clock += d; };
-    SECTION("changes on the third read")
+    auto run   = [&](const std::function<std::optional<std::string>(int)> &script, ms timeout = ms(15000)) {
+        int  n     = 0;
+        auto fetch = [&]() { return script(n++); };
+        return poll_until_settled(fetch, std::string("old"), now, sleep, timeout, ms(1000), 3);
+    };
+    SECTION("changes then settles -> settled, after 3 identical polls")
     {
         int  n = 0;
-        auto fetch = [&]() -> std::optional<std::string> { return ++n >= 3 ? "new" : "old"; };
-        CHECK(poll_until_changed(fetch, std::string("old"), now, sleep, ms(10000), ms(1000)));
-        CHECK(n == 3);
-        CHECK(clock < ms(10000));
+        auto r = poll_until_settled([&]() -> std::optional<std::string> { return ++n >= 2 ? "new" : "old"; }, "old", now, sleep, ms(15000),
+                                    ms(1000), 3);
+        CHECK(r.settled);
+        CHECK(r.last == "new");
+        CHECK(n == 4); // 1 baseline-equal poll + 3 identical new polls
     }
-    SECTION("never changes: times out and stops reading")
+    SECTION("keeps changing until the timeout -> not settled")
+    {
+        auto r = run([](int n) -> std::optional<std::string> { return "v" + std::to_string(n); });
+        CHECK_FALSE(r.settled);
+        CHECK(clock >= ms(15000));
+    }
+    SECTION("UIDs change at once but the types follow two polls later -> not settled until they do")
+    {
+        auto r = run([](int n) -> std::optional<std::string> {
+            return n < 2 ? "uid=NEW type=PLA" : "uid=NEW type=ABS,PETG"; // first two polls still the cleared default
+        });
+        CHECK(r.settled);
+        CHECK(r.last == "uid=NEW type=ABS,PETG");
+        CHECK(clock == ms(5000)); // 2 default polls do not count; 3 settled polls do
+    }
+    SECTION("never changes -> unconfirmed after the timeout")
     {
         int  n = 0;
-        auto fetch = [&]() -> std::optional<std::string> { ++n; return "old"; };
-        CHECK_FALSE(poll_until_changed(fetch, std::string("old"), now, sleep, ms(10000), ms(1000)));
-        CHECK(clock >= ms(10000));
-        CHECK(n <= 12);
+        auto r = run([&](int) -> std::optional<std::string> { ++n; return "old"; });
+        CHECK_FALSE(r.settled);
+        CHECK(clock >= ms(15000));
+        CHECK(n <= 16);
     }
-    SECTION("failed reads do not count as a change")
+    SECTION("failed reads are tolerated: not a change, and they reset the stable run")
     {
-        auto fetch = []() -> std::optional<std::string> { return std::nullopt; };
-        CHECK_FALSE(poll_until_changed(fetch, std::string("old"), now, sleep, ms(3000), ms(1000)));
+        auto r = run([](int n) -> std::optional<std::string> {
+            if (n == 2) return std::nullopt; // fail in the middle of the stable run
+            return "new";
+        });
+        CHECK(r.settled);
+        CHECK(clock == ms(6000)); // new,new,fail,new,new,new
+        auto allfail = run([](int) -> std::optional<std::string> { return std::nullopt; }, ms(3000));
+        CHECK_FALSE(allfail.settled);
+        CHECK(allfail.last.empty());
     }
 }

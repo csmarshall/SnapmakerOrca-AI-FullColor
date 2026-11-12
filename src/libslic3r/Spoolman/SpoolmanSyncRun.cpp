@@ -91,18 +91,29 @@ RereadSend send_rfid_reread(const RereadTransport &transport)
     return transport.send_script(rfid_reread_script()) ? RereadSend::sent : RereadSend::send_failed;
 }
 
-bool poll_until_changed(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
-                        const std::function<std::chrono::milliseconds()> &now, const std::function<void(std::chrono::milliseconds)> &sleep,
-                        std::chrono::milliseconds timeout, std::chrono::milliseconds interval)
+SettleResult poll_until_settled(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
+                                const std::function<std::chrono::milliseconds()> &now,
+                                const std::function<void(std::chrono::milliseconds)> &sleep, std::chrono::milliseconds timeout,
+                                std::chrono::milliseconds interval, int stable_polls)
 {
-    const auto start = now();
+    SettleResult result;
+    int          run = 0;
+    const auto   start = now();
     for (;;) {
         sleep(interval);
         const std::optional<std::string> value = fetch();
-        if (value && *value != baseline)
-            return true;
+        if (!value) {
+            run = 0;
+        } else {
+            run         = (*value == result.last) ? run + 1 : 1;
+            result.last = *value;
+            if (*value != baseline && run >= stable_polls) {
+                result.settled = true;
+                return result;
+            }
+        }
         if (now() - start >= timeout)
-            return false;
+            return result;
     }
 }
 

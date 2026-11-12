@@ -159,9 +159,9 @@ public:
     virtual bool supports_rfid_reread() const { return false; }
     enum class RfidReread { unsupported, busy, state_unknown, send_failed, done, unconfirmed };
     // Sends the approved re-read script (Spoolman::rfid_reread_script) through Spoolman::send_rfid_reread, which re-checks
-    // print_stats.state immediately before sending, then polls filament_detect (read-only) until a slot UID changed or `timeout` passed.
-    // `unconfirmed` = sent but no change was seen in time. Blocking: call it off the GUI thread.
-    RfidReread reread_spool_tags(std::chrono::milliseconds timeout = std::chrono::seconds(10),
+    // print_stats.state immediately before sending, then polls filament_detect + print_task_config (read-only) until the combined per-slot snapshot (UID, type, colour, vendor, exist) changed
+    // and then stayed identical for 3 polls, or `timeout` passed. `unconfirmed` = sent but no settled change in time (the final snapshot is logged). Blocking: call it off the GUI thread.
+    RfidReread reread_spool_tags(std::chrono::milliseconds timeout = std::chrono::seconds(15),
                                  std::chrono::milliseconds interval = std::chrono::seconds(1));
 
     // JSON helper methods

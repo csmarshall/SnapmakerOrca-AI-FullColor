@@ -67,11 +67,19 @@ enum class RereadSend { sent, busy, state_unknown, send_failed };
 // The single place the script is sent. Reads the state right now; sends nothing unless it was read and is idle.
 RereadSend send_rfid_reread(const RereadTransport &transport);
 
-// Polls `fetch` every `interval` (via the injected clock and sleep) until it returns a value different from `baseline`, or `timeout`
-// elapses. A failed read (nullopt) is not a change. Returns whether a change was seen.
-bool poll_until_changed(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
-                        const std::function<std::chrono::milliseconds()> &now, const std::function<void(std::chrono::milliseconds)> &sleep,
-                        std::chrono::milliseconds timeout, std::chrono::milliseconds interval);
+struct SettleResult
+{
+    bool        settled = false; // changed from the baseline and then identical for `stable_polls` consecutive polls
+    std::string last;            // the last successfully read snapshot ("" if none was ever read)
+};
+
+// Polls `fetch` (a snapshot of everything the sync will read) every `interval` (via the injected clock and sleep). Settled = a snapshot
+// different from `baseline` was seen identically on `stable_polls` consecutive polls. A failed read (nullopt) is not a change and resets
+// the stable run; a snapshot equal to the baseline never counts as settled (nothing changed). Gives up after `timeout` (settled=false).
+SettleResult poll_until_settled(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
+                                const std::function<std::chrono::milliseconds()> &now,
+                                const std::function<void(std::chrono::milliseconds)> &sleep, std::chrono::milliseconds timeout,
+                                std::chrono::milliseconds interval, int stable_polls);
 
 }} // namespace Slic3r::Spoolman
 
