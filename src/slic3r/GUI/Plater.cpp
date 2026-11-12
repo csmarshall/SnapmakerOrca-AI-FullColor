@@ -1,4 +1,5 @@
 #include "Plater.hpp"
+#include "SyncAmsConfirm.hpp"
 #include "slic3r/Utils/SpoolmanJoin.hpp"
 #include "../Utils/NetworkAgent.hpp"
 #include "IPrinterAgent.hpp"
@@ -6488,9 +6489,26 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
         m_sync_dlg->set_check_dirty_fialment(false);
         dlg_res = m_sync_dlg->ShowModal();
     } else {
-        dlg_res =(int) wxID_YES;
+        // 2.5's mapping dialog is skipped (empty project): keep Snapmaker Orca's confirm instead of syncing silently (#106).
+        struct SyncAmsConfirmDialog : MessageDialog {
+            SyncAmsConfirmDialog(wxWindow *parent, bool first)
+                : MessageDialog(parent,
+                      first ? _L("Sync filaments with AMS will drop all current selected filament presets and colors. Do you want to continue?")
+                            : _L("Already did a synchronization, do you want to sync only changes or resync all?"),
+                      _L("Sync filaments with AMS"), 0)
+            {
+                if (first) {
+                    add_button(wxID_YES, true, _L("Yes"));
+                } else {
+                    add_button(wxID_OK, true, _L("Sync"));
+                    add_button(wxID_YES, false, _L("Resync"));
+                }
+                add_button(wxID_CANCEL, false, _L("Cancel"));
+            }
+        } confirm_dlg(this, sync_ams_confirm_kind(ams_filament_ids) == SyncAmsConfirmKind::FirstTime);
+        dlg_res = confirm_dlg.ShowModal();
     }
-    if (dlg_res == wxID_CANCEL)
+    if (sync_ams_confirm_cancelled(dlg_res, wxID_CANCEL))
         return;
     auto sync_result = m_sync_dlg->get_result();
     if (!sync_result.is_same_printer) {
@@ -6502,7 +6520,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     for (int i = 0; i < list.size(); ++i, ++iter) {
         auto & ams = iter->second;
         auto filament_id = ams.opt_string("filament_id", 0u);
-        ams.set_key_value("filament_changed", new ConfigOptionBool{dlg_res == wxID_YES || list2[i] != filament_id});
+        ams.set_key_value("filament_changed", new ConfigOptionBool{sync_ams_confirm_force_all(dlg_res, wxID_YES) || list2[i] != filament_id});
         list2[i] = filament_id;
     }
 

@@ -3,6 +3,7 @@
 
 #include "slic3r/GUI/AMSMaterialsSetting.hpp"
 #include "slic3r/GUI/ColorPickerDialog.hpp"
+#include "slic3r/GUI/SyncAmsConfirm.hpp"
 #include "libslic3r/Color.hpp"
 
 #include <algorithm>
@@ -91,4 +92,22 @@ TEST_CASE("AMS alpha only edits and switching a gradient to solid replace the co
     const ColorItem result = ColorItem::from_picker_selection(solid);
     REQUIRE(result.ctype == 2);
     REQUIRE(result.colors == std::vector<wxColour>{original.colors.front()});
+}
+
+TEST_CASE("sync AMS confirm: first time vs repeat is decided by stored ams_filament_ids (#106)", "[ams][sync]")
+{
+    using namespace Slic3r::GUI;
+    REQUIRE(sync_ams_confirm_kind("") == SyncAmsConfirmKind::FirstTime);
+    REQUIRE(sync_ams_confirm_kind("GFA00,GFB00") == SyncAmsConfirmKind::Repeat);
+}
+
+TEST_CASE("sync AMS confirm: result mapping matches Snapmaker (Yes/Resync force all, Sync does not, Cancel aborts)", "[ams][sync]")
+{
+    using namespace Slic3r::GUI;
+    constexpr int ok = 1, yes = 2, cancel = 3; // distinct stand-ins for wxID_OK / wxID_YES / wxID_CANCEL
+    REQUIRE(sync_ams_confirm_cancelled(cancel, cancel));
+    REQUIRE_FALSE(sync_ams_confirm_cancelled(ok, cancel));
+    REQUIRE_FALSE(sync_ams_confirm_cancelled(yes, cancel));
+    REQUIRE(sync_ams_confirm_force_all(yes, yes));
+    REQUIRE_FALSE(sync_ams_confirm_force_all(ok, yes));
 }
