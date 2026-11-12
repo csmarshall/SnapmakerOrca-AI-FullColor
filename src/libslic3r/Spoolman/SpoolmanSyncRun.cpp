@@ -94,7 +94,7 @@ RereadSend send_rfid_reread(const RereadTransport &transport)
 SettleResult poll_until_settled(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
                                 const std::function<std::chrono::milliseconds()> &now,
                                 const std::function<void(std::chrono::milliseconds)> &sleep, std::chrono::milliseconds timeout,
-                                std::chrono::milliseconds interval, int stable_polls)
+                                std::chrono::milliseconds interval, int stable_polls, int unchanged_polls)
 {
     SettleResult result;
     int          run = 0;
@@ -111,6 +111,9 @@ SettleResult poll_until_settled(const std::function<std::optional<std::string>()
                 result.settled = true;
                 return result;
             }
+            // Still exactly the state read before the send: the re-read changed nothing and will not, so stop waiting.
+            if (*value == baseline && unchanged_polls > 0 && run >= unchanged_polls)
+                return result;
         }
         if (now() - start >= timeout)
             return result;

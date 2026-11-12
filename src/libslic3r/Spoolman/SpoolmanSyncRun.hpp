@@ -75,11 +75,13 @@ struct SettleResult
 
 // Polls `fetch` (a snapshot of everything the sync will read) every `interval` (via the injected clock and sleep). Settled = a snapshot
 // different from `baseline` was seen identically on `stable_polls` consecutive polls. A failed read (nullopt) is not a change and resets
-// the stable run; a snapshot equal to the baseline never counts as settled (nothing changed). Gives up after `timeout` (settled=false).
+// the stable run; a snapshot equal to the baseline never counts as settled (nothing changed), but if it stays equal to the baseline for
+// `unchanged_polls` consecutive polls the wait ends early (settled=false): nothing is going to change, so the caller need not sit out the
+// whole `timeout` (0 disables this). Gives up after `timeout` (settled=false).
 SettleResult poll_until_settled(const std::function<std::optional<std::string>()> &fetch, const std::string &baseline,
                                 const std::function<std::chrono::milliseconds()> &now,
                                 const std::function<void(std::chrono::milliseconds)> &sleep, std::chrono::milliseconds timeout,
-                                std::chrono::milliseconds interval, int stable_polls);
+                                std::chrono::milliseconds interval, int stable_polls, int unchanged_polls = 5);
 
 }} // namespace Slic3r::Spoolman
 

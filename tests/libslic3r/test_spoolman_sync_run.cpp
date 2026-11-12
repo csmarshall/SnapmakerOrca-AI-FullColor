@@ -252,8 +252,22 @@ TEST_CASE("RFID re-read: poll settles only after the snapshot changed and then s
         int  n = 0;
         auto r = run([&](int) -> std::optional<std::string> { ++n; return "old"; });
         CHECK_FALSE(r.settled);
+        // Identical to the baseline for 5 polls: the wait ends then, not at the 15 s cap (a real run waited the full 15 s for nothing)
+        CHECK(clock == ms(5000));
+        CHECK(n == 5);
+    }
+    SECTION("unchanged early-out can be disabled and does not fire while the state differs")
+    {
+        int  n = 0;
+        auto r = poll_until_settled([&]() -> std::optional<std::string> { ++n; return "old"; }, "old", [&] { return clock; },
+                                    [&](ms d) { clock += d; }, ms(15000), ms(1000), 3, 0);
+        CHECK_FALSE(r.settled);
         CHECK(clock >= ms(15000));
-        CHECK(n <= 16);
+        clock = ms(0);
+        auto c = poll_until_settled([&]() -> std::optional<std::string> { return "changing" + std::to_string(clock.count()); }, "old",
+                                    [&] { return clock; }, [&](ms d) { clock += d; }, ms(15000), ms(1000), 3, 5);
+        CHECK_FALSE(c.settled);
+        CHECK(clock >= ms(15000));
     }
     SECTION("failed reads are tolerated: not a change, and they reset the stable run")
     {
