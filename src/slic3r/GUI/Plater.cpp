@@ -6374,10 +6374,35 @@ void Sidebar::sync_spoolman_filaments()
     auto agent = spoolman_capable_agent();
     if (!agent)
         return;
+    if (p->spoolman_runner.in_flight())
+        return; // a sync is already running: no second dialog, no second re-read
+    // #105: optionally ask the printer to re-read its spool tags first. Only this button, only after an explicit Yes, and only for an
+    // agent that supports it; the worker thread re-checks that the printer is idle right before sending (Spoolman::send_rfid_reread).
+    bool reread = false;
+    if (agent->supports_rfid_reread()) {
+        MessageDialog dlg(this, _L("Re-read spool tags on the printer first?"), _L("Spoolman"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
+        reread = dlg.ShowModal() == wxID_YES;
+    }
+    auto reread_result = std::make_shared<MoonrakerPrinterAgent::RfidReread>(MoonrakerPrinterAgent::RfidReread::unsupported);
     const auto started = p->spoolman_runner.start(
-        true, [agent] { return agent->fetch_spoolman_catalog(true); },
+        true,
+        [agent, reread, reread_result] {
+            if (reread)
+                *reread_result = agent->reread_spool_tags(); // worker thread; read before `done` runs, ordered by the post
+            return agent->fetch_spoolman_catalog(true);
+        },
         [](std::function<void()> f) { wxTheApp->CallAfter(std::move(f)); },
-        [this, agent](Spoolman::CatalogFetch fetch) {
+        [this, agent, reread, reread_result](Spoolman::CatalogFetch fetch) {
+            if (reread) {
+                using R = MoonrakerPrinterAgent::RfidReread;
+                BOOST_LOG_TRIVIAL(info) << "sync_spoolman_filaments: spool tag re-read result " << int(*reread_result);
+                if (*reread_result == R::busy || *reread_result == R::state_unknown || *reread_result == R::send_failed) {
+                    const wxString why = *reread_result == R::busy ? _L("The printer is busy, so its spool tags were not re-read.") :
+                                         *reread_result == R::state_unknown ? _L("The printer state could not be read, so its spool tags were not re-read.") :
+                                                                              _L("The printer did not accept the spool tag re-read.");
+                    MessageDialog(this, why + " " + _L("Continuing with the tags it already has."), _L("Spoolman"), wxOK | wxICON_INFORMATION).ShowModal();
+                }
+            }
             p->spoolman_report = {};
             if (fetch.good()) {
                 auto *bundle = wxGetApp().preset_bundle;
