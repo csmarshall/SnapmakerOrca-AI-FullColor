@@ -79,12 +79,9 @@ TEST_CASE("Mixed print uses the highest bed temperature", "[BedTemperature]")
 
 // All paths: with wall_loops = 0 the brim-introduced wall_filament extruder must be included in the
 // max, even though it is not the first printing extruder of the object.
-// FAILS ON OUR STACK (suspected stack bug or intended difference, UNCLASSIFIED, see issue #91): Snapmaker takes the
-// max over print.extruders() (every used extruder). Our GCode::get_highest_bed_temperature takes the max over
-// Print::get_slice_used_filaments(true), the first-layer extruders, and with wall_loops=0 the brim extruder
-// (wall_filament) is not in that set, so the first M190 is 35 instead of 65. Left failing on purpose via
-// [!shouldfail]; remove the tag when the brim extruder is counted or the expectation is decided.
-TEST_CASE("Brim-introduced extruder is covered when wall_loops is zero", "[BedTemperature][!shouldfail]")
+// Snapmaker takes the max over every used extruder. We count the first layer filaments plus the brim extruder (issue #99);
+// a support interface that starts higher up stays excluded, see test_gcode.cpp.
+TEST_CASE("Brim-introduced extruder is covered when wall_loops is zero", "[BedTemperature]")
 {
     DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);

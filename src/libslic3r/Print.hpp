@@ -1244,6 +1244,8 @@ public:
         m_slice_used_filaments_first_layer = first_layer_used_filaments;
         m_slice_used_filaments = used_filaments;
     }
+    // 0-based filaments that print a brim (one per object); empty without a brim.
+    std::vector<unsigned int> get_brim_filaments() const { std::vector<unsigned int> out; for (const auto& kv : m_brimFilamentMap) out.push_back(kv.second); return out; }
     std::vector<unsigned int> get_slice_used_filaments(bool first_layer) const { return first_layer ? m_slice_used_filaments_first_layer : m_slice_used_filaments;}
     void set_slice_used_mixed_filaments(const std::vector<unsigned int> &used_mixed_filaments) {
         m_slice_used_mixed_filaments = used_mixed_filaments;

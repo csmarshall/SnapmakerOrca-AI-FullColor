@@ -5576,11 +5576,14 @@ int GCode::get_highest_bed_temperature(const bool is_first_layer, const Print& p
 {
     auto bed_type = m_config.curr_bed_type;
     int bed_temp = 0;
-    // Only the filaments printed on the first layer touch the bed, so a filament that starts higher up, such as a
-    // support interface, must not raise the bed temperature for the rest of the print.
-    for (auto fidx : print.get_slice_used_filaments(true)) {
+    // Filaments that touch the bed: the first layer ones plus the brim extruder (Snapmaker counts every extruder, issue #99).
+    // A filament that starts higher up, such as a support interface, must not raise the bed temperature for the rest of the print.
+    std::vector<unsigned int> bed_filaments = print.get_slice_used_filaments(true);
+    if (print.has_brim())
+        append(bed_filaments, print.get_brim_filaments());
+    sort_remove_duplicates(bed_filaments);
+    for (auto fidx : bed_filaments)
         bed_temp = std::max(bed_temp, get_bed_temperature(fidx, is_first_layer, bed_type));
-    }
     return bed_temp;
 }
 
