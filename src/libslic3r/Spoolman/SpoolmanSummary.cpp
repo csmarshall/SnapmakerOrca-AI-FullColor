@@ -67,6 +67,12 @@ std::string num_text(double v)
     return o.str();
 }
 
+// Remaining weight is shown to the nearest gram: Spoolman reports it as a double with a long tail (609.922446765844).
+std::string weight_text(double grams)
+{
+    return std::to_string(static_cast<long long>(std::llround(grams)));
+}
+
 std::string plural(long long n, const char *unit)
 {
     return std::to_string(n) + " " + unit + (n == 1 ? "" : "s");
@@ -444,7 +450,7 @@ SummaryModel build_summary(const SyncOutcome &o)
             c.spool_name = t.spoolman_filament_id ? kFilamentName + std::to_string(t.spoolman_filament_id) : t.display_slot;
         if (t.remaining_weight_g)
             c.remaining_weight_text = (std::isfinite(*t.remaining_weight_g) && *t.remaining_weight_g >= 0) ?
-                                          num_text(*t.remaining_weight_g) + kWeightLeft : std::string(kWeightUnknown);
+                                          weight_text(*t.remaining_weight_g) + kWeightLeft : std::string(kWeightUnknown);
         m.show_dialog = m.show_dialog || notable;
         cards.push_back(std::move(c));
     }

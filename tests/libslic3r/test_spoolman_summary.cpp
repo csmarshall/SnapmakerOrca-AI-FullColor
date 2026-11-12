@@ -849,8 +849,11 @@ TEST_CASE("Spoolman summary: UTF-8 names and odd weights", "[Spoolman]")
     o.trays[0].spool_name = "PolyLite\xE2\x84\xA2 ABS Gr\xC3\xBCn";
     CHECK(build_summary(o).slots[0].spool_name == "PolyLite\xE2\x84\xA2 ABS Gr\xC3\xBCn");
 
-    o.trays[0].remaining_weight_g = 612.5;
-    CHECK(build_summary(o).slots[0].remaining_weight_text == "612.5 g left");
+    // Shown to the nearest gram: Spoolman reports e.g. 609.922446765844 (seen in a real run, #103).
+    o.trays[0].remaining_weight_g = 612.4;
+    CHECK(build_summary(o).slots[0].remaining_weight_text == "612 g left");
+    o.trays[0].remaining_weight_g = 609.922446765844;
+    CHECK(build_summary(o).slots[0].remaining_weight_text == "610 g left");
     o.trays[0].remaining_weight_g = 0;
     CHECK(build_summary(o).slots[0].remaining_weight_text == "0 g left");
     o.trays[0].remaining_weight_g = -3;
