@@ -459,6 +459,8 @@ set(lisbslic3r_sources
     Spoolman/SpoolmanTierReport.hpp
     Spoolman/SpoolmanSummary.cpp
     Spoolman/SpoolmanSummary.hpp
+    Spoolman/SpoolmanSyncRun.cpp
+    Spoolman/SpoolmanSyncRun.hpp
     Spoolman/SpoolmanTransport.cpp
     Spoolman/SpoolmanTransport.hpp
     SLA/AGGRaster.hpp

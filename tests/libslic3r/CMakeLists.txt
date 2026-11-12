@@ -70,6 +70,7 @@ add_executable(${_TEST_NAME}_tests
     test_spoolman_parent.cpp
     test_spoolman_presets.cpp
     test_spoolman_summary.cpp
+    test_spoolman_sync_run.cpp
     test_spoolman_sync_tier.cpp
     test_spoolman_cloud_sync.cpp
     test_spoolman_transport.cpp
