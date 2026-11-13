@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <system_error>
 #include <fstream>
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace Slic3r
 {
@@ -20,6 +22,28 @@ constexpr const char *g_snapmaker_vendor = "Snapmaker";
 constexpr const char *g_generic_vendor   = "Generic";
 constexpr const char *g_undefined_vendor = "(Undefined)";
 constexpr int         g_allowlist_schema_version = 1;
+constexpr const char *g_allow_list_file_name     = "filament_allow_list.json";
+
+/** @brief Position of @p name in the hard-coded Bambu preset list kept as the fallback after the configured order. */
+size_t bambu_name_rank(const wxString &name)
+{
+    static const char *const names[] = {"Bambu PLA Basic",  "Bambu PLA Matte", "Bambu PETG HF",  "Bambu ABS",
+                                        "Bambu PLA Silk",   "Bambu PLA-CF",    "Bambu PLA Galaxy", "Bambu PLA Metal",
+                                        "Bambu PLA Marble", "Bambu PETG-CF",   "Bambu PETG Translucent", "Bambu ABS-GF"};
+    size_t index = 0;
+    for (const char *candidate : names) {
+        if (name == wxString::FromUTF8(candidate))
+            return index;
+        ++index;
+    }
+    return index;
+}
+
+/** @brief Position of @p value in @p list, or the list size when absent. */
+size_t position_in(const std::vector<std::string> &list, const std::string &value)
+{
+    return static_cast<size_t>(std::find(list.begin(), list.end(), value) - list.begin());
+}
 
 /** @brief Removes leading and trailing whitespace. */
 std::string trimmed(std::string value)
@@ -255,6 +279,104 @@ std::filesystem::path choose_allow_list_copy(const std::filesystem::path &user_c
                                              bool                         user_copy_exists)
 {
     return user_copy_exists ? user_copy : shipped_copy;
+}
+
+std::optional<AllowListCopy> allow_list_deployment(const std::filesystem::path &source_root,
+                                                   const std::filesystem::path &target_root,
+                                                   const std::string           &vendor)
+{
+    // Exact match: the vendor here is the bundle directory name, which is spelled canonically.
+    if (vendor != g_snapmaker_vendor)
+        return std::nullopt;
+
+    AllowListCopy copy;
+    copy.source = source_root / vendor / "filament" / g_allow_list_file_name;
+    copy.target = target_root / vendor / "filament" / g_allow_list_file_name;
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(copy.source, ec))
+        return std::nullopt;
+    std::filesystem::create_directories(copy.target.parent_path(), ec);
+    return copy;
+}
+
+bool deploy_allow_list(const std::filesystem::path &source_root,
+                       const std::filesystem::path &target_root,
+                       const std::string           &vendor)
+{
+    const std::optional<AllowListCopy> copy = allow_list_deployment(source_root, target_root, vendor);
+    if (!copy)
+        return false;
+    std::error_code ec;
+    return std::filesystem::copy_file(copy->source, copy->target, std::filesystem::copy_options::overwrite_existing, ec) && !ec;
+}
+
+FilamentOrderLoad load_filament_order(const std::filesystem::path &data_dir, const std::filesystem::path &resources_dir)
+{
+    const std::filesystem::path user_path = data_dir / "system" / g_snapmaker_vendor / "filament" / g_allow_list_file_name;
+    const std::filesystem::path shipped_path =
+        resources_dir / "profiles" / g_snapmaker_vendor / "filament" / g_allow_list_file_name;
+
+    std::error_code ec;
+    const bool      user_exists = std::filesystem::exists(user_path, ec);
+
+    FilamentOrderLoad result;
+    result.path  = choose_allow_list_copy(user_path, shipped_path, user_exists);
+    result.order = FilamentOrder::from_file(result.path, &result.failure);
+    return result;
+}
+
+SystemFilamentRow make_system_filament_row(const wxString &full_name, const std::string &vendor, const std::string &type, size_t index)
+{
+    SystemFilamentRow row;
+    row.item.display_name     = full_name;
+    row.item.vendor           = canonical_vendor(vendor);
+    row.item.filament_product = filament_product_key(full_name.ToStdString(wxConvUTF8), row.item.vendor);
+    row.item.original_index   = index;
+    row.type                  = type;
+    return row;
+}
+
+SystemFilamentComparator::SystemFilamentComparator(FilamentOrder filament_order)
+    : m_order(filament_order), m_sorter(std::make_shared<const SystemFilamentSorter>(std::move(filament_order)))
+{
+}
+
+bool SystemFilamentComparator::operator()(const SystemFilamentRow &left, const SystemFilamentRow &right) const
+{
+    // 1. Snapmaker's configured order wins: ranked Snapmaker presets precede everything else, by rank.
+    const auto configured_rank = [this](const SystemFilamentRow &row) {
+        return is_snapmaker_vendor(row.item.vendor) ? m_order.rank(row.item.vendor, row.item.filament_product)
+                                                    : std::numeric_limits<size_t>::max();
+    };
+    const size_t left_rank  = configured_rank(left);
+    const size_t right_rank = configured_rank(right);
+    if (left_rank != right_rank)
+        return left_rank < right_rank;
+
+    // 2. Fallback: the hard-coded Bambu name list (listed names first, in list order).
+    const size_t left_name  = bambu_name_rank(left.item.display_name);
+    const size_t right_name = bambu_name_rank(right.item.display_name);
+    if (left_name != right_name)
+        return left_name < right_name;
+
+    // 3. Fallback: vendor, as before ("" = no vendor, then Bambu, Generic); Snapmaker's unlisted presets lead the
+    //    named vendors because this fork's profiles are Snapmaker-first.
+    static const std::vector<std::string> first_vendors = {"", "Snapmaker", "Bambu", "Generic"};
+    const size_t left_vendor  = position_in(first_vendors, left.item.vendor);
+    const size_t right_vendor = position_in(first_vendors, right.item.vendor);
+    if (left_vendor != right_vendor)
+        return left_vendor < right_vendor;
+
+    // 4. Fallback: filament type, as before.
+    static const std::vector<std::string> first_types = {"PLA", "PETG", "ABS", "TPU"};
+    const size_t left_type  = position_in(first_types, left.type);
+    const size_t right_type = position_in(first_types, right.type);
+    if (left_type != right_type)
+        return left_type < right_type;
+
+    // 5. Name, then original position (the sorter's own tie-break).
+    return m_sorter->less(left.item, right.item);
 }
 
 } // namespace GUI

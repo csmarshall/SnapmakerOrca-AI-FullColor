@@ -2,6 +2,7 @@
 
 #include "slic3r/GUI/FilamentSort.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -312,4 +313,199 @@ TEST_CASE("the shipped allow-list parses and orders the Snapmaker products", "[G
     // A shipped product proves the vendor key matched; an unknown one proves the name fallback.
     CHECK(order.rank("Snapmaker", "PLA SnapSpeed") != std::numeric_limits<size_t>::max());
     CHECK(order.rank("Snapmaker", "Not A Shipped Product") == std::numeric_limits<size_t>::max());
+}
+
+namespace
+{
+
+/** @brief Creates a scratch directory that is removed again on scope exit. */
+struct ScratchDir
+{
+    std::filesystem::path path;
+    explicit ScratchDir(const char *name) : path(std::filesystem::temp_directory_path() / name)
+    {
+        std::filesystem::remove_all(path);
+        std::filesystem::create_directories(path);
+    }
+    ~ScratchDir() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+};
+
+void write_file(const std::filesystem::path &path, const char *content)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream stream(path);
+    REQUIRE(stream.good());
+    stream << content;
+    stream.close();
+}
+
+const char *k_order_json = R"({"schema_version": 1, "sections": {"filament_order": {"Snapmaker": ["PLA Matte", "PETG HF"]}}})";
+const char *k_other_json = R"({"schema_version": 1, "sections": {"filament_order": {"Snapmaker": ["PETG HF", "PLA Matte"]}}})";
+
+} // namespace
+
+// ---- slice 2: updater deployment helper ----
+
+TEST_CASE("allow_list_deployment names the vendor file and creates the target directory", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_deploy_test");
+    const auto src = scratch.path / "rsrc";
+    const auto dst = scratch.path / "data" / "system";
+    write_file(src / "Snapmaker" / "filament" / "filament_allow_list.json", k_order_json);
+
+    SECTION("Snapmaker with the file present")
+    {
+        const auto copy = allow_list_deployment(src, dst, "Snapmaker");
+        REQUIRE(copy.has_value());
+        CHECK(copy->source == src / "Snapmaker" / "filament" / "filament_allow_list.json");
+        CHECK(copy->target == dst / "Snapmaker" / "filament" / "filament_allow_list.json");
+        CHECK(std::filesystem::is_directory(copy->target.parent_path()));
+    }
+    SECTION("other vendors get nothing")
+    {
+        write_file(src / "BBL" / "filament" / "filament_allow_list.json", k_order_json);
+        CHECK_FALSE(allow_list_deployment(src, dst, "BBL").has_value());
+    }
+    SECTION("file absent gets nothing and creates nothing")
+    {
+        std::filesystem::remove(src / "Snapmaker" / "filament" / "filament_allow_list.json");
+        CHECK_FALSE(allow_list_deployment(src, dst, "Snapmaker").has_value());
+        CHECK_FALSE(std::filesystem::exists(dst / "Snapmaker"));
+    }
+}
+
+TEST_CASE("deploy_allow_list copies and replaces a stale deployed copy", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_deploy_replace_test");
+    const auto src = scratch.path / "rsrc";
+    const auto dst = scratch.path / "data" / "system";
+    const auto deployed = dst / "Snapmaker" / "filament" / "filament_allow_list.json";
+    write_file(src / "Snapmaker" / "filament" / "filament_allow_list.json", k_order_json);
+    write_file(deployed, k_other_json);
+
+    REQUIRE(deploy_allow_list(src, dst, "Snapmaker"));
+    const FilamentOrder order = FilamentOrder::from_file(deployed);
+    CHECK(order.rank("Snapmaker", "PLA Matte") == 0);
+    CHECK_FALSE(deploy_allow_list(src, dst, "Generic"));
+}
+
+// ---- slice 3: path resolution and load ----
+
+TEST_CASE("load_filament_order prefers the deployed copy and falls back to the shipped one", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_load_test");
+    const auto data = scratch.path / "data";
+    const auto res  = scratch.path / "res";
+    write_file(res / "profiles" / "Snapmaker" / "filament" / "filament_allow_list.json", k_order_json);
+
+    FilamentOrderLoad shipped = load_filament_order(data, res);
+    CHECK(shipped.path == res / "profiles" / "Snapmaker" / "filament" / "filament_allow_list.json");
+    CHECK(shipped.failure.empty());
+    CHECK(shipped.order.rank("Snapmaker", "PLA Matte") == 0);
+
+    write_file(data / "system" / "Snapmaker" / "filament" / "filament_allow_list.json", k_other_json);
+    FilamentOrderLoad deployed = load_filament_order(data, res);
+    CHECK(deployed.path == data / "system" / "Snapmaker" / "filament" / "filament_allow_list.json");
+    CHECK(deployed.order.rank("Snapmaker", "PETG HF") == 0);
+}
+
+TEST_CASE("load_filament_order reports why nothing loaded", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_load_missing_test");
+    const FilamentOrderLoad none = load_filament_order(scratch.path / "data", scratch.path / "res");
+    CHECK(none.order.empty());
+    CHECK(none.failure == "cannot be opened");
+}
+
+// ---- slice 4: extracted system comparator ----
+
+namespace
+{
+
+SystemFilamentRow make_row(const char *full_name, const char *vendor, const char *type, size_t index)
+{
+    return make_system_filament_row(wxString::FromUTF8(full_name), vendor, type, index);
+}
+
+std::vector<std::string> sorted_names(const FilamentOrder &order, std::vector<SystemFilamentRow> rows)
+{
+    const SystemFilamentComparator cmp(order);
+    std::stable_sort(rows.begin(), rows.end(), cmp);
+    std::vector<std::string> out;
+    for (const auto &r : rows)
+        out.push_back(r.item.display_name.ToStdString());
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("make_system_filament_row derives the product key and canonical vendor", "[GUI][FilamentSort]")
+{
+    const SystemFilamentRow row = make_row("Snapmaker PLA Matte @U1", "snapmaker", "PLA", 3);
+    CHECK(row.item.vendor == "Snapmaker");
+    CHECK(row.item.filament_product == "PLA Matte");
+    CHECK(row.item.original_index == 3);
+    CHECK(row.type == "PLA");
+}
+
+TEST_CASE("system comparator: Snapmaker's configured order wins, unlisted fall back as before", "[GUI][FilamentSort]")
+{
+    const FilamentOrder order = parse_order(k_order_json); // PLA Matte, PETG HF
+    const std::vector<SystemFilamentRow> rows = {
+        make_row("Generic ABS", "Generic", "ABS", 0),
+        make_row("Bambu PLA Basic", "Bambu", "PLA", 1),
+        make_row("Snapmaker PETG HF", "Snapmaker", "PETG", 2),
+        make_row("Snapmaker ABS", "Snapmaker", "ABS", 3),
+        make_row("Snapmaker PLA Matte", "Snapmaker", "PLA", 4),
+    };
+    const std::vector<std::string> expected = {
+        "Snapmaker PLA Matte", "Snapmaker PETG HF", // configured rank 0, 1
+        "Bambu PLA Basic",                          // hard-coded Bambu name list, as before, ahead of the vendor fallback
+        "Snapmaker ABS",                            // Snapmaker, unlisted: first among the vendor fallbacks
+        "Generic ABS"};
+    CHECK(sorted_names(order, rows) == expected);
+}
+
+TEST_CASE("system comparator: with an empty order it reproduces the previous hard-coded behaviour", "[GUI][FilamentSort]")
+{
+    const std::vector<SystemFilamentRow> rows = {
+        make_row("Zeta Thing", "Zeta", "PLA", 0),
+        make_row("Generic PETG", "Generic", "PETG", 1),
+        make_row("Generic PLA", "Generic", "PLA", 2),
+        make_row("Bambu PETG HF", "Bambu", "PETG", 3),
+        make_row("Bambu PLA Basic", "Bambu", "PLA", 4),
+        make_row("Bambu PLA Matte", "Bambu", "PLA", 5),
+        make_row("Bambu Support For PLA", "Bambu", "Support", 6),
+        make_row("Alpha TPU", "Alpha", "TPU", 7),
+        make_row("Alpha PLA", "Alpha", "PLA", 8),
+    };
+    // Names in the hard-coded list first (in list order), then vendor (Bambu, Generic, others),
+    // then type (PLA, PETG, ABS, TPU, others), then name.
+    const std::vector<std::string> expected = {
+        "Bambu PLA Basic", "Bambu PLA Matte", "Bambu PETG HF",
+        "Bambu Support For PLA",
+        "Generic PLA", "Generic PETG",
+        "Alpha PLA", "Zeta Thing", "Alpha TPU"};
+    CHECK(sorted_names(FilamentOrder{}, rows) == expected);
+}
+
+TEST_CASE("system comparator is a strict weak ordering over mixed input", "[GUI][FilamentSort]")
+{
+    const FilamentOrder order = parse_order(k_order_json);
+    const std::vector<SystemFilamentRow> rows = {
+        make_row("Snapmaker PETG HF", "Snapmaker", "PETG", 0), make_row("Snapmaker PLA Matte", "Snapmaker", "PLA", 1),
+        make_row("Snapmaker ABS", "Snapmaker", "ABS", 2),      make_row("Bambu PLA Basic", "Bambu", "PLA", 3),
+        make_row("Generic PLA", "Generic", "PLA", 4),          make_row("Other PLA", "Other", "PLA", 5),
+        make_row("Other PLA", "Other", "PLA", 6)};
+    const SystemFilamentComparator cmp(order);
+    for (const auto &a : rows) {
+        CHECK_FALSE(cmp(a, a));
+        for (const auto &b : rows) {
+            if (cmp(a, b))
+                CHECK_FALSE(cmp(b, a));
+            for (const auto &c : rows)
+                if (cmp(a, b) && cmp(b, c))
+                    CHECK(cmp(a, c));
+        }
+    }
 }

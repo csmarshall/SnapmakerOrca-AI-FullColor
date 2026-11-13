@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <filesystem>
 #include <iosfwd>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -120,6 +122,61 @@ std::string filament_product_key(const std::string &preset_name, const std::stri
 std::filesystem::path choose_allow_list_copy(const std::filesystem::path &user_copy,
                                              const std::filesystem::path &shipped_copy,
                                              bool user_copy_exists);
+
+/** @brief A deployable copy of the allow-list: where it is read from and where it must land. */
+struct AllowListCopy
+{
+    std::filesystem::path source;
+    std::filesystem::path target;
+};
+
+/** @brief Names the allow-list copy PresetUpdater must deploy for @p vendor, or nothing when the vendor is not
+ *         Snapmaker or the source file does not exist. Creates the target's parent directory when it names a copy. */
+std::optional<AllowListCopy> allow_list_deployment(const std::filesystem::path &source_root,
+                                                   const std::filesystem::path &target_root,
+                                                   const std::string           &vendor);
+
+/** @brief Copies the allow-list for @p vendor over any deployed copy; returns false when there is nothing to copy or it failed. */
+bool deploy_allow_list(const std::filesystem::path &source_root,
+                       const std::filesystem::path &target_root,
+                       const std::string           &vendor);
+
+/** @brief Result of locating and reading the allow-list order. */
+struct FilamentOrderLoad
+{
+    FilamentOrder         order;
+    std::filesystem::path path;    ///< The file that was read.
+    std::string           failure; ///< Empty on success, otherwise the reason fragment from FilamentOrder::from_file.
+};
+
+/** @brief Reads the order from <data_dir>/system/Snapmaker/filament when that copy exists, otherwise from
+ *         <resources_dir>/profiles/Snapmaker/filament. The caller keeps the result for the process lifetime. */
+FilamentOrderLoad load_filament_order(const std::filesystem::path &data_dir, const std::filesystem::path &resources_dir);
+
+/** @brief One system filament preset as the combo box orders it. */
+struct SystemFilamentRow
+{
+    FilamentSortItem item;
+    std::string      type;
+};
+
+/** @brief Builds a row from the full preset name; vendor is canonicalized and the product key derived. */
+SystemFilamentRow make_system_filament_row(const wxString &full_name, const std::string &vendor, const std::string &type, size_t index);
+
+/** @brief Strict weak ordering for the sidebar's System/Unsupported filament presets: Snapmaker's configured order
+ *         first, then the previous hard-coded fallbacks (Bambu name list, vendor, type), then name. */
+class SystemFilamentComparator
+{
+public:
+    explicit SystemFilamentComparator(FilamentOrder filament_order);
+
+    bool operator()(const SystemFilamentRow &left, const SystemFilamentRow &right) const;
+
+private:
+    FilamentOrder                              m_order;
+    // Shared so the comparator stays copyable (std algorithms copy it); the sorter itself is immutable.
+    std::shared_ptr<const SystemFilamentSorter> m_sorter;
+};
 
 } // namespace GUI
 } // namespace Slic3r
