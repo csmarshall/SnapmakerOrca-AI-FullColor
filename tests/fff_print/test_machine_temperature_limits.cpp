@@ -159,3 +159,29 @@ TEST_CASE("Golden: limit 0, or a limit nothing exceeds, leaves the G-code byte-i
     CHECK_FALSE(has_warning(warnings_of({ { "curr_bed_type", "High Temp Plate" }, { "hot_plate_temp", "110" },
                                           { "hot_plate_temp_initial_layer", "105" } }), "above this printer"));
 }
+
+// The ceiling lowers what is emitted, not what the user configured: the config block keeps the user's values (Snapmaker's file keeps hot_plate_temp 110 for ASA).
+// VERIFIED: block text for the active plate, both layers and nozzle, on a plate other than the default. NOT shown: 3MF project_settings.config (written from the preset bundle, not from Print).
+TEST_CASE("The config block keeps the user's values while the emitted G-code is clamped", "[MachineTempLimit]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "curr_bed_type", "Graphic Effect Plate" }, // a per-plate override of the bed type is just curr_bed_type in the applied config
+        { "graphic_effect_plate_temp", "110" },
+        { "graphic_effect_plate_temp_initial_layer", "105" },
+        { "nozzle_temperature", "320" },
+        { "nozzle_temperature_initial_layer", "330" },
+        { "machine_max_bed_temperature", "100" },
+        { "machine_max_nozzle_temperature", "300" },
+    });
+    const std::string gcode = Slic3r::Test::slice({make_cube(20, 20, 20)}, config);
+    CHECK(first_s(gcode, "M190") == 100);
+    CHECK(first_s(gcode, "M104") == 300); // initial layer and later layers both land on the limit, so no M109/M140 follow
+    CHECK(gcode.find("M190 S105") == std::string::npos);
+    CHECK(gcode.find("M140 S110") == std::string::npos);
+    CHECK(gcode.find("; graphic_effect_plate_temp = 110\n") != std::string::npos);
+    CHECK(gcode.find("; graphic_effect_plate_temp_initial_layer = 105\n") != std::string::npos);
+    CHECK(gcode.find("; nozzle_temperature = 320\n") != std::string::npos);
+    CHECK(gcode.find("; nozzle_temperature_initial_layer = 330\n") != std::string::npos);
+    CHECK(gcode.find("; machine_max_bed_temperature = 100\n") != std::string::npos);
+}

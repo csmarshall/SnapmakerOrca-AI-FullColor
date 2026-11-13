@@ -8318,6 +8318,13 @@ void GCode::apply_print_config(const PrintConfig &print_config)
 void GCode::append_full_config(const Print &print, std::string &str)
 {
     DynamicPrintConfig cfg = print.full_print_config();
+    // The printer-level temperature ceilings (machine_max_*_temperature) lower what is emitted, not what the user configured:
+    // write the user's values back into the config block so the file records them (Snapmaker's keeps hot_plate_temp 110 for ASA).
+    for (const Print::TemperatureClamp &c : print.temperature_clamps()) {
+        auto *opt = cfg.option<ConfigOptionInts>(c.key);
+        if (opt != nullptr && c.filament >= 0 && size_t(c.filament) < opt->values.size() && opt->values[c.filament] == c.to)
+            opt->values[c.filament] = c.from;
+    }
     { // correct the flush_volumes_matrix with flush_multiplier values
         // Fast purge mode uses flush_multiplier_fast; Default is inert.
         std::vector<double> temp_cfg_flush_multiplier = (print.config().prime_volume_mode == PrimeVolumeMode::pvmFast)

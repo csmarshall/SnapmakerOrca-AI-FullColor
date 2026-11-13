@@ -1346,7 +1346,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
 
-    // Printer-level temperature ceilings (0 = none). Clamped here, once, so every consumer (G-code, placeholders, config block) sees the same value.
+    // Printer-level temperature ceilings (0 = none). Clamped here, once, so every emitting consumer (G-code, placeholders) sees the same value;
+    // GCode::append_full_config writes the recorded user values back into the config block.
     m_temperature_clamps.clear();
     {
         const int max_bed    = new_full_config.opt_int("machine_max_bed_temperature");
