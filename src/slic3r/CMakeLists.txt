@@ -824,6 +824,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/SpoolmanJoin.cpp
     Utils/SpoolmanJoin.hpp
     Utils/MoonrakerPrinterAgent.cpp
+    Utils/SpoolmanDirect.cpp
+    Utils/SpoolmanDirect.hpp
     Utils/MoonrakerPrinterAgent.hpp
     Utils/SnapmakerPrintPreference.hpp
     Utils/Moonraker.cpp

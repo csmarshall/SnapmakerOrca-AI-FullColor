@@ -142,6 +142,7 @@ struct Http::priv
 	std::string error_buffer;    // Used for CURLOPT_ERRORBUFFER
     std::string headers;
 	size_t limit;
+	bool follow_redirects = true;
 	std::atomic_bool cancel;
     std::unique_ptr<form_file> putFile;
 
@@ -447,7 +448,7 @@ std::string Http::priv::body_size_error()
 
 void Http::priv::http_perform()
 {
-	::curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	::curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, follow_redirects ? 1L : 0L);
 	::curl_easy_setopt(curl, CURLOPT_POSTREDIR, CURL_REDIR_POST_ALL);
 	::curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writecb);
 	::curl_easy_setopt(curl, CURLOPT_WRITEDATA, static_cast<void*>(this));
@@ -783,6 +784,12 @@ Http& Http::on_progress(ProgressFn fn)
 Http& Http::on_ip_resolve(IPResolveFn fn)
 {
 	if (p) { p->ipresolvefn = std::move(fn); }
+	return *this;
+}
+
+Http &Http::follow_redirects(bool follow)
+{
+	if (p) { p->follow_redirects = follow; }
 	return *this;
 }
 

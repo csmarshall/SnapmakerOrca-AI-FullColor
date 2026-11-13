@@ -9,6 +9,7 @@
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Spoolman/SpoolmanTransport.hpp"
 #include "libslic3r/Format/DRC.hpp"
 #include <wx/gdicmn.h>
 #include <wx/arrstr.h>
@@ -694,6 +695,37 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxS
         app_config->set("log_severity_level",level);
         e.Skip();
      });
+    return m_sizer;
+}
+
+// #107: free-text entry for the optional direct Spoolman URL. Validated on Enter / focus loss with Spoolman::validate_spoolman_url; an
+// invalid value is NOT stored, the reason is shown and the field goes back to the stored value. Stores the normalised URL.
+wxBoxSizer *PreferencesDialog::create_item_spoolman_url(wxString title, wxString tooltip)
+{
+    wxBoxSizer *m_sizer = create_item_label(title, tooltip);
+    auto input = new ::TextInput(m_parent, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition, wxSize(FromDIP(300), -1), wxTE_PROCESS_ENTER);
+    input->GetTextCtrl()->SetValue(wxString::FromUTF8(app_config->get("spoolman_server_url")));
+    input->SetToolTip(tooltip);
+    m_sizer->Add(input, 0, wxALIGN_CENTER_VERTICAL);
+
+    auto commit = [this, input]() {
+        const std::string raw = std::string(input->GetTextCtrl()->GetValue().ToUTF8());
+        const auto        check = Spoolman::validate_spoolman_url(raw);
+        if (!check.ok) {
+            MessageDialog dlg(this, _L("This is not a usable Spoolman server URL:") + "\n" + wxString::FromUTF8(check.reason), _L("Spoolman"),
+                              wxOK | wxICON_WARNING);
+            dlg.ShowModal();
+            input->GetTextCtrl()->SetValue(wxString::FromUTF8(app_config->get("spoolman_server_url")));
+            return;
+        }
+        input->GetTextCtrl()->SetValue(wxString::FromUTF8(check.url));
+        if (app_config->get("spoolman_server_url") != check.url) {
+            app_config->set("spoolman_server_url", check.url);
+            app_config->save();
+        }
+    };
+    input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent &e) { commit(); e.Skip(); });
+    input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit](wxFocusEvent &e) { commit(); e.Skip(); });
     return m_sizer;
 }
 
@@ -2438,6 +2470,18 @@ void PreferencesDialog::create_items()
             "Route print jobs for non-Bambu printers through printer plug-in agents instead of the classic print-host upload flow.\nWhen disabled, OrcaSlicer uses the legacy print-host behavior."),
         "use_printer_agents");
     g_sizer->Add(item_plugin_printer_agents);
+
+    //// DEVELOPER > Spoolman (#95, #107)
+    g_sizer->Add(create_item_title(_L("Spoolman")), 1, wxEXPAND);
+    auto item_spoolman_sync = create_item_checkbox(
+        _L("Sync filament presets from Spoolman"),
+        _L("Show the Spoolman button in the filament panel. It reads the Spoolman catalog (read-only, nothing is ever written to Spoolman) and creates or updates filament presets from it.\nWhile off, no Spoolman request of any kind is made."),
+        "spoolman_preset_sync");
+    g_sizer->Add(item_spoolman_sync);
+    auto item_spoolman_url = create_item_spoolman_url(
+        _L("Spoolman server URL"),
+        _L("Optional. The address of your Spoolman server, for example http://192.168.1.20:7912 (http or https, no user name or password, no query).\nWhen set, the catalog is read directly from this server with plain GET requests. When empty, it is read through the Moonraker server of the selected printer."));
+    g_sizer->Add(item_spoolman_url);
 
     //// DEVELOPER > Storage
 
