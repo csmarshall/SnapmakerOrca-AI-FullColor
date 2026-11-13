@@ -104,8 +104,10 @@ inline SnapmakerExtruderMapResult build_snapmaker_extruder_map_script(const std:
     return r;
 }
 
-// Parses PrintParams::ams_mapping, a JSON array with one integer per filament (the layout QidiPrinterAgent reads). An empty string or "[]"
-// gives an empty mapping and true. Anything that is not an array of integers is rejected (false).
+// Parses PrintParams::ams_mapping, a JSON array with one integer per filament (the layout QidiPrinterAgent reads and Bambu's
+// SelectMachineDialog produces). -1 and the external-tray ids 254/255 mean "no extruder" and are stored as -1. Empty string gives an empty
+// mapping and true. Anything that is not an array of integers in -1..3, 254 or 255 is rejected (false); unsigned values are range-checked
+// before the cast so 18446744073709551615 cannot wrap to -1.
 inline bool parse_snapmaker_ams_mapping(const std::string& ams_mapping, std::vector<int>& mapping)
 {
     mapping.clear();
@@ -114,18 +116,30 @@ inline bool parse_snapmaker_ams_mapping(const std::string& ams_mapping, std::vec
     const auto j = nlohmann::json::parse(ams_mapping, nullptr, false);
     if (!j.is_array() || j.size() > size_t(snapmaker_max_filaments))
         return false;
+    std::vector<int> out;
     for (const auto& v : j) {
-        if (!v.is_number_integer())
+        long long x = 0;
+        if (v.is_number_unsigned()) {
+            const auto u = v.get<unsigned long long>();
+            if (u > 255)
+                return false;
+            x = static_cast<long long>(u);
+        } else if (v.is_number_integer()) {
+            x = v.get<long long>();
+        } else
             return false;
-        const long long x = v.get<long long>();
+        if (x == 254 || x == 255)
+            x = -1;
         if (x < -1 || x >= snapmaker_max_extruders)
             return false;
-        mapping.push_back(int(x));
+        out.push_back(int(x));
     }
+    mapping = std::move(out);
     return true;
 }
 
-// True only for a script that build_snapmaker_extruder_map_script could have produced (every filament in it used).
+// True only for a script that build_snapmaker_extruder_map_script could have produced (every filament in it used). This is a
+// self-consistency check on our own output, not a safety layer: it cannot tell a right map from a wrong one.
 inline bool is_snapmaker_extruder_map_script(const std::string& script)
 {
     std::vector<int> mapping;

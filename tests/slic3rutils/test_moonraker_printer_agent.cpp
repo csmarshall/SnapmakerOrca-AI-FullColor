@@ -914,7 +914,7 @@ TEST_CASE("Print preferences are sent as one script before the print starts", "[
     CHECK(scripts[1] == "SDCARD_PRINT_FILE FILENAME=\"ignored.gcode\"");
 }
 
-TEST_CASE("The extruder map is sent before the preferences and the print", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
+TEST_CASE("The extruder map, preferences and print go as map+preferences in one script, then the print", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
 {
     TempDir     dir;
     FakePrinter printer(Behavior::Silent);
@@ -926,11 +926,73 @@ TEST_CASE("The extruder map is sent before the preferences and the print", "[Moo
     params.ams_mapping = "[2,0]";
     REQUIRE(agent.start_local_print(params, nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
     const auto scripts = printer.scripts();
-    REQUIRE(scripts.size() == 3);
+    REQUIRE(scripts.size() == 2);
     CHECK(scripts[0] == "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=2\nSET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=1 MAP_EXTRUDER=0\n"
-                        "SET_PRINT_USED_EXTRUDERS EXTRUDERS=2,0");
-    CHECK(scripts[1] == build_snapmaker_print_preference_script(true, false, true));
-    CHECK(scripts[2] == "SDCARD_PRINT_FILE FILENAME=\"ignored.gcode\"");
+                        "SET_PRINT_USED_EXTRUDERS EXTRUDERS=2,0\n" + build_snapmaker_print_preference_script(true, false, true));
+    CHECK(scripts[1] == "SDCARD_PRINT_FILE FILENAME=\"ignored.gcode\"");
+}
+
+TEST_CASE("Unused (-1) filaments are left out of the sent map", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    PrintParams params = preference_params(file, true, false, true);
+    params.ams_mapping = "[0,1,-1,-1]";
+    REQUIRE(agent.start_local_print(params, nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer.scripts().size() == 2);
+    CHECK(printer.scripts()[0].rfind("SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=0\nSET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=1 MAP_EXTRUDER=1\n"
+                                     "SET_PRINT_USED_EXTRUDERS EXTRUDERS=0,1\nSET_PRINT_PREFERENCE", 0) == 0);
+
+    // All -1 is an empty mapping: preferences only
+    FakePrinter printer2(Behavior::Silent);
+    PreferenceAgent agent2(printer2);
+    params.ams_mapping = "[-1,-1]";
+    REQUIRE(agent2.start_local_print(params, nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer2.scripts().size() == 2);
+    CHECK(printer2.scripts()[0] == build_snapmaker_print_preference_script(true, false, true));
+}
+
+TEST_CASE("A refused combined script does not start the print", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    printer.reject_scripts_starting_with("SET_PRINT_EXTRUDER_MAP");
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    PrintParams params = preference_params(file, true, false, true);
+    params.ams_mapping = "[1]";
+    CHECK(agent.start_local_print(params, nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);
+    for (const std::string& script : printer.scripts())
+        CHECK(script.find("SDCARD_PRINT_FILE") == std::string::npos);
+}
+
+TEST_CASE("A non-empty mapping is refused when the printer lacks the map commands", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
+{
+    TempDir     dir;
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+    PrintParams params = preference_params(file, true, false, true);
+    params.ams_mapping = "[1]";
+
+    FakePrinter printer(Behavior::Silent);
+    printer.set_gcode_commands({"SDCARD_PRINT_FILE", "SET_PRINT_PREFERENCE", "SET_PRINT_EXTRUDER_MAP"}); // USED_EXTRUDERS missing
+    PreferenceAgent agent(printer);
+    CHECK(agent.start_local_print(params, nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);
+    CHECK(printer.scripts().empty());
+
+    // Same mapping, preferences command missing but map commands present: map lines still go out and the print starts
+    FakePrinter printer2(Behavior::Silent);
+    printer2.set_gcode_commands({"SDCARD_PRINT_FILE", "SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"});
+    PreferenceAgent agent2(printer2);
+    REQUIRE(agent2.start_local_print(params, nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    REQUIRE(printer2.scripts().size() == 2);
+    CHECK(printer2.scripts()[0] == "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=1\nSET_PRINT_USED_EXTRUDERS EXTRUDERS=1");
 }
 
 TEST_CASE("An invalid extruder mapping stops the print before anything is sent", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
@@ -941,7 +1003,7 @@ TEST_CASE("An invalid extruder mapping stops the print before anything is sent",
     const auto  file = dir.path / "part.gcode";
     { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
 
-    for (const char* bad : {"[0,-1]", "[7]", "not json"}) {
+    for (const char* bad : {"[7]", "not json", "[18446744073709551615]"}) {
         PrintParams params = preference_params(file, true, false, true);
         params.ams_mapping = bad;
         CHECK(agent.start_local_print(params, nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);

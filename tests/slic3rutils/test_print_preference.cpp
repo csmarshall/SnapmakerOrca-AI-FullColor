@@ -133,6 +133,10 @@ TEST_CASE("PrintParams::ams_mapping parses strictly", "[PrintPreference][Extrude
     CHECK_FALSE(parse_snapmaker_ams_mapping("[0,\"1\"]", m));
     CHECK_FALSE(parse_snapmaker_ams_mapping("[0,1.5]", m));
     CHECK_FALSE(parse_snapmaker_ams_mapping("[9]", m));
+    CHECK_FALSE(parse_snapmaker_ams_mapping("[18446744073709551615]", m)); // must not wrap to -1
+    CHECK_FALSE(parse_snapmaker_ams_mapping("[256]", m));
+    CHECK(parse_snapmaker_ams_mapping("[0,1,-1,254,255]", m)); // unused and external-tray ids become -1
+    CHECK(m == std::vector<int>({0, 1, -1, -1, -1}));
     CHECK_FALSE(parse_snapmaker_ams_mapping("[-2]", m));
     CHECK_FALSE(parse_snapmaker_ams_mapping("not json", m));
 }

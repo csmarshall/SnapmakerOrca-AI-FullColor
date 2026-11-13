@@ -920,27 +920,56 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
     if (supports_print_preferences() && gcode_command_known(device_info.base_url, device_info.api_key, "SET_PRINT_PREFERENCE", preferences_known_unsupported) &&
         preferences_known_unsupported)
         BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: the printer has no SET_PRINT_PREFERENCE command, time-lapse / bed-leveling / flow-calibration choices are not applied";
-    if (supports_print_preferences() && !preferences_known_unsupported) {
-        // The filament-to-extruder map goes before the preferences, as on Snapmaker's page (#118). An empty mapping sends no map lines.
+    if (supports_print_preferences()) {
+        // Like Snapmaker's page, the filament-to-extruder map and the preferences go as ONE script: map lines first (#118, #120).
+        // PrintParams::ams_mapping is a per-filament array; -1 (and the external tray ids 254/255) mean the filament is not used and has no
+        // line, as in QidiPrinterAgent::build_tool_slot_script. No mapping at all sends no map lines (the legacy send path has no mapping UI);
+        // PrintParams carries no used-filament count, so a multi-filament plate without a mapping can only be warned about here.
         std::vector<int> extruder_mapping;
         if (!parse_snapmaker_ams_mapping(params.ams_mapping, extruder_mapping)) {
             BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: the filament-to-extruder mapping is not valid, the print is not started";
             return false;
         }
-        const SnapmakerExtruderMapResult extruder_map = build_snapmaker_extruder_map_script(extruder_mapping);
-        if (!extruder_map.ok()) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: " << extruder_map.error << ", the print is not started";
+        std::vector<bool> used(extruder_mapping.size());
+        bool              any_used = false;
+        for (size_t i = 0; i < extruder_mapping.size(); ++i) {
+            used[i]  = extruder_mapping[i] >= 0;
+            any_used = any_used || used[i];
+            if (!used[i])
+                BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: filament " << (i + 1) << " has no extruder in the mapping and is left out";
+        }
+        if (!any_used) {
+            extruder_mapping.clear();
+            BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: no filament-to-extruder mapping, none is sent and the printer keeps its own choice";
+        }
+        const SnapmakerExtruderMapResult extruder_map = build_snapmaker_extruder_map_script(extruder_mapping, used);
+        if (!extruder_map.ok() || (!extruder_map.script.empty() && !is_snapmaker_extruder_map_script(extruder_map.script))) {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: " << (extruder_map.ok() ? "extruder map script invalid" : extruder_map.error)
+                                     << ", the print is not started";
             return false;
         }
-        if (!extruder_map.script.empty() &&
-            (!is_snapmaker_extruder_map_script(extruder_map.script) || !send_gcode_sync(device_info.dev_id, extruder_map.script))) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: extruder map not applied, the print is not started";
-            return false;
+        if (!extruder_map.script.empty()) {
+            for (const char* command : {"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}) {
+                bool missing = false;
+                if (gcode_command_known(device_info.base_url, device_info.api_key, command, missing) && missing) {
+                    BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: the printer has no " << command
+                                             << " command, the filament-to-extruder mapping cannot be applied and the print is not started";
+                    return false;
+                }
+            }
         }
-        const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
-                                                                                params.task_bed_leveling);
-        if (!is_snapmaker_print_preference_script(preferences) || !send_gcode_sync(device_info.dev_id, preferences)) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: print preferences not applied, the print is not started";
+        std::string script = extruder_map.script;
+        if (!preferences_known_unsupported) {
+            const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
+                                                                                    params.task_bed_leveling);
+            if (!is_snapmaker_print_preference_script(preferences)) {
+                BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: print preferences not valid, the print is not started";
+                return false;
+            }
+            script += (script.empty() ? "" : "\n") + preferences;
+        }
+        if (!script.empty() && !send_gcode_sync(device_info.dev_id, script)) {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: print preferences / extruder map not applied, the print is not started";
             return false;
         }
     }
