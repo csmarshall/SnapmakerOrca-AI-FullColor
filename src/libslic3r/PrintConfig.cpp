@@ -3679,6 +3679,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionInts{ 100 });
 
+    // Forklifted from Snapmaker Orca main (PrintConfig.cpp). The start G-code's chamber_cooling_mode skips these filaments.
+    def          = this->add("filament_is_high_temperature", coBools);
+    def->label   = L("Is high-temperature filament");
+    def->tooltip = L("Indicates whether this is a high-temperature filament that requires elevated printing temperatures.");
+    def->mode    = comSimple;
+    def->set_default_value(new ConfigOptionBools{false});
+
     def = this->add("filament_cost", coFloats);
     def->label = L("Price");
     def->tooltip = L("Filament price, for statistical purposes only.");

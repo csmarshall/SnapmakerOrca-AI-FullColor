@@ -4066,6 +4066,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
         constexpr int kVitrificationWeakCool   = 70; // <= 70: weak cooling
         int chamber_cooling_mode = kChamberCoolingKeepWarm;
         for (unsigned int extruder : tool_ordering.all_extruders()) {
+            // Snapmaker skips high-temperature filaments here: they are meant to run in a warm chamber.
+            if (m_config.filament_is_high_temperature.get_at(extruder))
+                continue;
             const int vitrification = m_config.temperature_vitrification.get_at(extruder);
             if (vitrification <= kVitrificationStrongCool) {
                 chamber_cooling_mode = kChamberCoolingStrong;

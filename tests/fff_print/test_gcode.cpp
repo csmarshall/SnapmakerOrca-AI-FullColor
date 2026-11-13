@@ -333,6 +333,29 @@ TEST_CASE("The all-extruder bed maximum is still clamped to the printer's bed li
     CHECK(gcode.find("M140 S105") == std::string::npos);
 }
 
+// Snapmaker's start G-code reads chamber_cooling_mode (0 keep warm, 1 weak, 2 strong); filaments flagged filament_is_high_temperature
+// are skipped, as in Snapmaker's GCode.cpp. Expectations are from that source, not from a Snapmaker slice.
+TEST_CASE("chamber_cooling_mode skips high-temperature filaments", "[GCode]")
+{
+    const auto cooling_mode = [](const char* vitrification, const char* high_temp) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            {"temperature_vitrification", vitrification},
+            {"filament_is_high_temperature", high_temp},
+            {"machine_start_gcode", "; CCM={chamber_cooling_mode}"},
+        });
+        const std::string gcode = Test::slice({Test::cube(20)}, config);
+        const size_t pos = gcode.find("; CCM=");
+        REQUIRE(pos != std::string::npos);
+        return std::stoi(gcode.substr(pos + 6));
+    };
+    CHECK(cooling_mode("45", "0") == 2);  // <= 50: strong cooling
+    CHECK(cooling_mode("60", "0") == 1);  // <= 70: weak cooling
+    CHECK(cooling_mode("90", "0") == 0);  // keep warm
+    CHECK(cooling_mode("45", "1") == 0);  // high-temperature filament: skipped
+    CHECK(cooling_mode("60", "1") == 0);
+}
+
 TEST_CASE("Object label comments number each object and copy with or without exclude object", "[GCode]")
 {
     // repetier has no exclude-object commands, so set_object_info() writes nothing for it.
