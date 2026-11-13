@@ -13,6 +13,7 @@
 #include "FilamentGroupUtils.hpp"
 #include "MultiNozzleUtils.hpp"
 #include "FilamentMixer.hpp"
+#include "MixedFilamentEngine.hpp"
 #include "LocalesUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "Utils.hpp"
@@ -2275,6 +2276,21 @@ void ToolOrdering::resolve_mixed_filaments(const PrintConfig &config)
 
     const bool sublayer_enabled = config.enable_mixed_color_sublayer.value;
 
+    // Slice 4c: slots whose filament_mixed_engine_row marker is non-empty are resolved by Snapmaker's engine, one
+    // physical extruder per layer. The engine is built once per call from the config (no Print member). With every
+    // marker empty (a native 2.5 project) the engine is empty and nothing below differs from the pre-4c code.
+    MixedEngineSlotsReport engine_report;
+    const MixedFilamentEngine engine = mixed_engine_from_config(config, &engine_report);
+    for (const std::string &w : engine_report.warnings)
+        BOOST_LOG_TRIVIAL(warning) << w;
+    const MixedEngineGlobals engine_globals = engine_report.valid ? mixed_engine_globals_from_config(config) : MixedEngineGlobals();
+    // num_physical is filament count minus mixed slots, never filament_diameter.size() (engine_report.num_physical).
+    const size_t engine_num_physical = engine_report.valid ? engine_report.num_physical : 0;
+    std::vector<char> is_engine_slot(is_mixed.size(), 0);
+    if (engine_report.valid)
+        for (size_t i = engine_num_physical; i < is_mixed.size(); ++i)
+            is_engine_slot[i] = is_mixed[i] && engine.is_engine_row(i - engine_num_physical);
+
     struct SlotInfo {
         std::vector<unsigned int> components; // 1-based
         std::vector<double>       ratios;
@@ -2282,7 +2298,7 @@ void ToolOrdering::resolve_mixed_filaments(const PrintConfig &config)
     };
     std::vector<SlotInfo> slots(is_mixed.size());
     for (size_t i = 0; i < is_mixed.size(); ++i) {
-        if (!is_mixed[i])
+        if (!is_mixed[i] || is_engine_slot[i])
             continue;
         slots[i].components = parse_mixed_components(i < comp_strs.size() ? comp_strs[i] : "");
         if (slots[i].components.size() < 2) {
@@ -2534,6 +2550,51 @@ void ToolOrdering::resolve_mixed_filaments(const PrintConfig &config)
 
         std::vector<unsigned int> new_extruders;
         for (unsigned int ext : lt.extruders) {
+            if (ext < is_engine_slot.size() && is_engine_slot[ext]) {
+                // Engine row: whole-layer resolution as in Snapmaker's ToolOrdering::collect_extruders, with the
+                // OBJECT-LOCAL layer index (its layerCount) of every object that uses the slot on this layer.
+                // Several objects can resolve differently on one plate-wide layer: all their tools are printed
+                // (as Snapmaker adds each object's tool), and the per-layer map, which has room for one answer,
+                // keeps the lowest tool id so that the choice does not depend on object pointer order.
+                std::set<unsigned int> resolved_0based;
+                const auto obj_layers_it = m_mixed_object_layers.find(ext);
+                if (obj_layers_it != m_mixed_object_layers.end())
+                    for (const auto &[obj, layer_indices] : obj_layers_it->second) {
+                        if (!std::binary_search(layer_indices.begin(), layer_indices.end(), layer_idx))
+                            continue;
+                        const auto all_it = m_object_all_layer_indices.find(obj);
+                        if (all_it == m_object_all_layer_indices.end())
+                            continue;
+                        const size_t local = size_t(std::lower_bound(all_it->second.begin(), all_it->second.end(), layer_idx) - all_it->second.begin());
+                        if (local >= obj->layers().size())
+                            continue;
+                        const Layer *layer = obj->layers()[local];
+                        const unsigned int r = mixed_engine_resolve_layer(engine, engine_globals, ext + 1, engine_num_physical, int(local),
+                                                                          float(layer->print_z), float(layer->height),
+                                                                          float(obj->config().layer_height.value));
+                        if (r != 0)
+                            resolved_0based.insert(r - 1);
+                    }
+                if (resolved_0based.empty()) {
+                    // No object recorded the slot here (e.g. a support-only layer): plate-wide index, previous
+                    // layer's z for the height, the first object's layer height as base.
+                    float base = 0.2f;
+                    if (!m_object_all_layer_indices.empty())
+                        base = float(m_object_all_layer_indices.begin()->first->config().layer_height.value);
+                    const unsigned int r = mixed_engine_resolve_layer(engine, engine_globals, ext + 1, engine_num_physical, int(layer_idx),
+                                                                      float(lt.print_z), float(lt.print_z - prev_print_z), base);
+                    if (r != 0)
+                        resolved_0based.insert(r - 1);
+                }
+                if (resolved_0based.empty()) {
+                    new_extruders.push_back(ext);
+                    continue;
+                }
+                lt.mixed_filament_resolution[ext] = *resolved_0based.begin();
+                for (unsigned int r : resolved_0based)
+                    new_extruders.push_back(r);
+                continue;
+            }
             if (ext >= slots.size() || slots[ext].components.empty()) {
                 new_extruders.push_back(ext);
                 continue;

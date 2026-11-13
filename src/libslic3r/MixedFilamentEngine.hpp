@@ -28,8 +28,9 @@
 //
 // Slot-backed view: this build keeps mixed filaments as ordinary tail slots (filament_is_mixed). The engine
 // is built over the rows of those slots with from_slots(); slot id == num_physical + 1 + k, the same numbering
-// as Snapmaker's virtual ids for the enabled subset, so the arithmetic is unchanged. Native 2.5 slots (no
-// engine fields) are not engine rows (is_engine_row) and never reach this code.
+// as Snapmaker's virtual ids for the enabled subset, so the arithmetic is unchanged. Native 2.5 slots (empty
+// filament_mixed_engine_row marker) are not engine rows (MixedFilamentEngine::is_engine_row) and are resolved by
+// ToolOrdering::resolve_mixed_filaments exactly as before.
 
 #include <cstddef>
 #include <string>
@@ -44,10 +45,6 @@ class ConfigBase;
 
 // Largest total slot count the paint encoding can address (Extruder32, TriangleSelector.hpp).
 constexpr size_t kMixedEngineMaxSlots = 32;
-
-// True when the row carries any field the native 2.5 mixed model cannot express. Rows for which this is
-// false are resolved by ToolOrdering::resolve_mixed_filaments exactly as before.
-bool is_engine_row(const MixedFilament &row);
 
 // Weighted, evenly interleaved extruder sequence for a gradient row (cycle capped at 48).
 std::vector<unsigned int> build_weighted_gradient_sequence(const std::vector<unsigned int> &ids,
@@ -127,6 +124,11 @@ public:
     // ---- Accessors ---------------------------------------------------------------------------------------
     const std::vector<MixedFilament> &mixed_filaments() const { return m_mixed; }
     std::vector<MixedFilament>       &mixed_filaments()       { return m_mixed; }
+    // Slice 4c routing: true when the row at `row_index` (slot order) came from a non-empty
+    // filament_mixed_engine_row marker. The marker is the whole rule (no field heuristic): a plain Snapmaker ratio
+    // row is an engine row too. Set by mixed_engine_from_config; false for every row of an engine built any other way.
+    bool is_engine_row(size_t row_index) const { return row_index < m_engine_rows.size() && m_engine_rows[row_index]; }
+    void set_engine_rows(std::vector<bool> engine_rows) { m_engine_rows = std::move(engine_rows); }
     size_t enabled_count() const;
     size_t total_filaments(size_t num_physical) const { return num_physical + enabled_count(); }
 
@@ -137,6 +139,7 @@ private:
     float                      m_height_upper_bound = 0.16f;
     bool                       m_advanced_dithering = false;
     size_t                     m_num_physical       = 0;
+    std::vector<bool>          m_engine_rows;
 };
 
 // ---- Slice 4b: config -> engine -----------------------------------------------------------------------
@@ -159,6 +162,15 @@ struct MixedEngineGlobals
     bool  region_collapse        = true;
 };
 MixedEngineGlobals mixed_engine_globals_from_config(const ConfigBase &config, std::vector<std::string> *warnings = nullptr);
+
+// Slice 4c: Snapmaker's resolve_mixed_with_layer_heights (S:GCode/ToolOrdering.cpp:32-70) over the engine.
+// `filament_id` is the 1-based slot id; a non-mixed id is returned unchanged. A non-custom row with
+// mixed_color_layer_height_a/b set and no active gradient is resolved by the A/B height cadence of the globals,
+// everything else by engine.resolve(). Snapmaker's "current_object != nullptr" gate of the gradient test is always
+// true on its ToolOrdering call sites and is therefore folded in. layer_index is the OBJECT-LOCAL layer index.
+unsigned int mixed_engine_resolve_layer(const MixedFilamentEngine &engine, const MixedEngineGlobals &globals, unsigned int filament_id,
+                                        size_t num_physical, int layer_index, float layer_print_z, float layer_height,
+                                        float base_layer_height);
 
 // Builds the engine from the per-slot filament_mixed_engine_row strings (Snapmaker's single-row token format,
 // parsed by the bounded parser) and the global keys. Works on DynamicPrintConfig and PrintConfig alike.

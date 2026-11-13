@@ -130,18 +130,20 @@ TEST_CASE("Mixed engine: from_slots refuses inconsistent slots and warns above t
     CHECK(rep.warnings.empty());
 }
 
-TEST_CASE("Mixed engine: native slots are not engine rows", "[MixedFilament][engine]")
+TEST_CASE("Mixed engine: engine rows are routed by the marker, not by row fields", "[MixedFilament][engine]")
 {
-    CHECK(!is_engine_row(MixedFilament()));
-    CHECK(!is_engine_row(row(1, 2, true, 30)));
-    MixedFilament mf;
-    mf.manual_pattern = "12";            CHECK(is_engine_row(mf));
-    mf = MixedFilament(); mf.gradient_component_ids = "123"; CHECK(is_engine_row(mf));
-    mf = MixedFilament(); mf.distribution_mode = int(MixedFilament::LayerCycle); CHECK(is_engine_row(mf));
-    mf = MixedFilament(); mf.local_z_max_sublayers = 2; CHECK(is_engine_row(mf));
-    mf = MixedFilament(); mf.gradient_enabled = true; CHECK(is_engine_row(mf));
-    mf = MixedFilament(); mf.component_b_surface_offset = 0.1f; CHECK(is_engine_row(mf));
-    mf = MixedFilament(); mf.ui_mode = 0; CHECK(is_engine_row(mf));
+    // An engine built from rows alone has no markers: nothing is an engine row, whatever the fields say.
+    MixedFilament pattern = row(1, 2);
+    pattern.manual_pattern = "12";
+    pattern.ui_mode        = 0;
+    MixedFilamentEngine e = MixedFilamentEngine::from_slots({ MixedFilament(), pattern }, 4);
+    CHECK(!e.is_engine_row(0));
+    CHECK(!e.is_engine_row(1));
+    CHECK(!e.is_engine_row(99));
+    // The marker alone decides, including for a plain ratio row (the hole the old field heuristic had).
+    e.set_engine_rows({ true, false });
+    CHECK(e.is_engine_row(0));
+    CHECK(!e.is_engine_row(1));
 }
 
 TEST_CASE("Mixed engine: ratio arithmetic (derived by reading Snapmaker's source)", "[MixedFilament][engine]")
@@ -389,7 +391,7 @@ TEST_CASE("Mixed engine: manual pattern length is capped", "[MixedFilament][engi
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     CHECK(secs < 1.0);
 
-    // from_slots reports a pattern it ignores, and is_engine_row no longer counts it
+    // from_slots reports a pattern it ignores, 
     MixedFilament mf = row(1, 2);
     mf.manual_pattern = flat;
     MixedEngineSlotsReport rep;

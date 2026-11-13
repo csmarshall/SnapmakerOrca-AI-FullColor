@@ -174,13 +174,6 @@ const std::string &pattern_of(const MixedFilament &mf)
 
 } // namespace
 
-bool is_engine_row(const MixedFilament &row)
-{
-    return !pattern_of(row).empty() || !row.gradient_component_ids.empty() || !row.gradient_component_weights.empty() ||
-           row.distribution_mode != int(MixedFilament::Simple) || row.local_z_max_sublayers != 0 || row.gradient_enabled ||
-           row.component_a_surface_offset != 0.f || row.component_b_surface_offset != 0.f || row.ui_mode != -1;
-}
-
 std::vector<unsigned int> build_weighted_gradient_sequence(const std::vector<unsigned int> &ids,
                                                            const std::vector<int>          &weights)
 {
@@ -801,7 +794,7 @@ MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngi
         const std::string text = i < rows_opt->values.size() ? rows_opt->values[i] : std::string();
         MixedFilament     mf;
         if (text.empty()) {
-            // Native slot: placeholder row, never resolved by the engine (is_engine_row is false for it).
+            // Native slot: placeholder row, never resolved by the engine (is_engine_row is false for it: empty marker).
             std::vector<unsigned int> c;
             if (comps != nullptr && i < comps->values.size())
                 c = parse_mixed_components(comps->values[i]);
@@ -821,10 +814,35 @@ MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngi
     rep = inner;
     if (!inner.valid)
         return MixedFilamentEngine();
+    std::vector<bool> engine_rows(num_mixed, false);
+    for (size_t k = 0; k < num_mixed; ++k)
+        engine_rows[k] = num_physical + k < rows_opt->values.size() && !rows_opt->values[num_physical + k].empty();
+    engine.set_engine_rows(std::move(engine_rows));
 
     const MixedEngineGlobals g = mixed_engine_globals_from_config(config, &rep.warnings);
     engine.apply_gradient_settings(g.gradient_mode ? 1 : 0, g.height_lower_bound, g.height_upper_bound, g.advanced_dithering);
     return engine;
+}
+
+unsigned int mixed_engine_resolve_layer(const MixedFilamentEngine &engine, const MixedEngineGlobals &globals, unsigned int filament_id,
+                                        size_t num_physical, int layer_index, float layer_print_z, float layer_height,
+                                        float base_layer_height)
+{
+    if (!engine.is_mixed(filament_id, num_physical))
+        return filament_id;
+    const MixedFilament *row = engine.mixed_filament_from_id(filament_id, num_physical);
+    const float layer_height_a = globals.color_layer_height_a, layer_height_b = globals.color_layer_height_b;
+
+    const bool gradient_active = row != nullptr && row->gradient_enabled && row->component_a != row->component_b && layer_index > 0;
+    if (row != nullptr && !row->custom && !gradient_active && (layer_height_a > 0.f || layer_height_b > 0.f)) {
+        const float safe_base = std::max<float>(0.01f, base_layer_height);
+        const int ratio_a = std::max(1, int(std::lround((layer_height_a > 0.f ? layer_height_a : safe_base) / safe_base)));
+        const int ratio_b = std::max(1, int(std::lround((layer_height_b > 0.f ? layer_height_b : safe_base) / safe_base)));
+        const int cycle   = ratio_a + ratio_b;
+        const int pos     = ((layer_index % cycle) + cycle) % cycle;
+        return pos < ratio_a ? row->component_a : row->component_b;
+    }
+    return engine.resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, false);
 }
 
 void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,

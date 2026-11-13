@@ -102,7 +102,8 @@ TriangleMesh cube_at(double x, double size_xy, double size_z)
     return m;
 }
 
-void setup(Print &print, Model &model, std::vector<TriangleMesh> meshes, const DynamicPrintConfig &config_in)
+void setup(Print &print, Model &model, std::vector<TriangleMesh> meshes, const DynamicPrintConfig &config_in,
+           const std::vector<const char *> &object_layer_heights = {})
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.apply(config_in);
@@ -111,6 +112,13 @@ void setup(Print &print, Model &model, std::vector<TriangleMesh> meshes, const D
         object->name += "object.stl";
         object->add_volume(std::move(t));
         object->add_instance();
+        const size_t idx = model.objects.size() - 1;
+        if (idx < object_layer_heights.size() && object_layer_heights[idx] != nullptr)
+        {
+            DynamicPrintConfig oc;
+            oc.set_deserialize_strict("layer_height", object_layer_heights[idx]);
+            object->config.apply(oc);
+        }
     }
     for (ModelObject *mo : model.objects) {
         mo->ensure_on_bed();
@@ -182,5 +190,160 @@ TEST_CASE("4c native twin: a native 2.5 mixed project keeps its tool-order trans
         INFO("transcript bytes=" << t.size() << " hash=" << fnv1a(t) << "\n" << t.substr(0, 600));
         CHECK(t.size() == tc.length);
         CHECK(fnv1a(t) == tc.hash);
+    }
+}
+
+// ---- (b) engine rows -----------------------------------------------------------------------------------------
+
+namespace {
+// Snapmaker row strings (custom flag 1 = token 4). Fields: a,b,enabled,custom,mix_b%,pointillism,g<ids>,w<weights>,m<ui>,...
+const char *kRow50   = "1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1";
+const char *kRow25   = "1,2,1,1,25,0,g,w,m2,z0,xa0,xb0,d0,o0,u2";
+const char *kRowAuto = "1,2,1,0,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u3"; // non-custom: the A/B height cadence applies
+
+MixedFilamentEngine engine_of(const DynamicPrintConfig &c, MixedEngineGlobals *globals = nullptr)
+{
+    MixedEngineSlotsReport rep;
+    MixedFilamentEngine    e = mixed_engine_from_config(c, &rep);
+    REQUIRE(rep.valid);
+    if (globals)
+        *globals = mixed_engine_globals_from_config(c);
+    return e;
+}
+
+// 0-based tool the engine picks for object-local layer `i` of slot 3 (1-based id 3, two physical filaments).
+unsigned expected_tool(const MixedFilamentEngine &e, const MixedEngineGlobals &g, const PrintObject &o, size_t i, unsigned id1)
+{
+    const Layer *l = o.layers()[i];
+    return mixed_engine_resolve_layer(e, g, id1, 2, int(i), float(l->print_z), float(l->height), float(o.config().layer_height.value)) - 1;
+}
+} // namespace
+
+TEST_CASE("4c engine row: per-layer tool equals the engine's choice for the object's own layer index", "[MixedFilament][ToolOrdering][EngineRow]")
+{
+    for (const char *row : { kRow50, kRow25 }) {
+        INFO(row);
+        const DynamicPrintConfig cfg = make_config(2, { { "1,2", "0.5,0.5", row, false } }, false, 3);
+        Print print;
+        Model model;
+        setup(print, model, { cube_at(80, 20, 20) }, cfg);
+        MixedEngineGlobals g;
+        const MixedFilamentEngine e = engine_of(cfg, &g);
+        const PrintObject &obj = *print.objects().front();
+        REQUIRE(obj.layers().size() >= 50);
+        std::set<unsigned> seen;
+        for (size_t i = 0; i < obj.layers().size(); ++i) {
+            const double z = obj.layers()[i]->print_z;
+            const std::vector<unsigned> tools = tools_at(print.tool_ordering(), z);
+            INFO("layer " << i << " z=" << z);
+            REQUIRE(tools.size() == 1);
+            CHECK(tools.front() == expected_tool(e, g, obj, i, 3));
+            seen.insert(tools.front());
+        }
+        CHECK(seen == std::set<unsigned>{ 0, 1 });
+        // Resolution map points at the same tool, and no sub-layer group exists for an engine row.
+        for (const LayerTools &lt : print.tool_ordering()) {
+            CHECK(lt.mixed_sub_layer_groups.empty());
+            if (!lt.extruders.empty() && lt.mixed_filament_resolution.count(2))
+                CHECK(lt.mixed_filament_resolution.at(2) == lt.extruders.front());
+        }
+    }
+}
+
+TEST_CASE("4c engine row: 50/50 row alternates by layer parity, derived by hand", "[MixedFilament][ToolOrdering][EngineRow]")
+{
+    // Independent of the engine: a 1:1 ratio row cycles A,B,A,B... so adjacent layers always differ and layers
+    // two apart agree. Which component leads is read off the engine (pinned to Snapmaker's golden elsewhere).
+    const DynamicPrintConfig cfg = make_config(2, { { "1,2", "0.5,0.5", kRow50, false } }, false, 3);
+    Print print;
+    Model model;
+    setup(print, model, { cube_at(80, 20, 20) }, cfg);
+    const PrintObject &obj = *print.objects().front();
+    std::vector<unsigned> seq;
+    for (const Layer *l : obj.layers())
+        seq.push_back(tools_at(print.tool_ordering(), l->print_z).at(0));
+    REQUIRE(seq.size() >= 50);
+    for (size_t i = 0; i + 2 < seq.size(); ++i) {
+        CHECK(seq[i] != seq[i + 1]);
+        CHECK(seq[i] == seq[i + 2]);
+    }
+}
+
+TEST_CASE("4c engine row: mixed_color_layer_height_a/b cadence on a non-custom row", "[MixedFilament][ToolOrdering][EngineRow]")
+{
+    // base 0.2, a = 0.2 -> 1 layer of A; b = 0.4 -> 2 layers of B: cycle A,B,B (Snapmaker resolve_mixed_with_layer_heights).
+    const DynamicPrintConfig cfg = make_config(2, { { "1,2", "0.5,0.5", kRowAuto, false } }, false, 3,
+                                               { { "mixed_color_layer_height_a", "0.2" }, { "mixed_color_layer_height_b", "0.4" } });
+    Print print;
+    Model model;
+    setup(print, model, { cube_at(80, 20, 20) }, cfg);
+    const PrintObject &obj = *print.objects().front();
+    for (size_t i = 0; i < obj.layers().size(); ++i) {
+        const std::vector<unsigned> tools = tools_at(print.tool_ordering(), obj.layers()[i]->print_z);
+        INFO("layer " << i);
+        REQUIRE(tools.size() == 1);
+        CHECK(tools.front() == (i % 3 == 0 ? 0u : 1u));
+    }
+}
+
+TEST_CASE("4c engine row: two engine slots and a native slot coexist, native one untouched", "[MixedFilament][ToolOrdering][EngineRow]")
+{
+    // slot 3 native (empty marker), slot 4 engine. Roles are assigned to slot 4; slot 3 must not become an engine row.
+    const DynamicPrintConfig cfg = make_config(2, { { "1,2", "0.6,0.4", "", false }, { "1,2", "0.5,0.5", kRow25, false } }, false, 4);
+    Print print;
+    Model model;
+    setup(print, model, { cube_at(80, 20, 20) }, cfg);
+    MixedEngineGlobals g;
+    const MixedFilamentEngine e = engine_of(cfg, &g);
+    REQUIRE(e.is_engine_row(1));
+    REQUIRE(!e.is_engine_row(0));
+    const PrintObject &obj = *print.objects().front();
+    for (size_t i = 0; i < obj.layers().size(); ++i) {
+        const std::vector<unsigned> tools = tools_at(print.tool_ordering(), obj.layers()[i]->print_z);
+        REQUIRE(tools.size() == 1);
+        CHECK(tools.front() == expected_tool(e, g, obj, i, 4)); // id 4 = second mixed slot, numbered by row
+    }
+}
+
+// ---- (c) multi-object plates (R2) ------------------------------------------------------------------------------
+
+TEST_CASE("4c engine row: multi-object plate uses each object's own layer index", "[MixedFilament][ToolOrdering][EngineRow][R2]")
+{
+    // Object 1 prints 0.2 mm layers, object 2 0.3 mm layers, so a plate-wide layer's position differs from both
+    // objects' own indices. Snapmaker resolves with the object-local layerCount and unions the tools; so do we.
+    const DynamicPrintConfig cfg = make_config(2, { { "1,2", "0.5,0.5", kRow25, false } }, false, 3);
+    Print print;
+    Model model;
+    setup(print, model, { cube_at(60, 20, 20), cube_at(120, 20, 18) }, cfg, { nullptr, "0.3" });
+    REQUIRE(print.objects().size() == 2);
+    MixedEngineGlobals g;
+    const MixedFilamentEngine e = engine_of(cfg, &g);
+
+    std::vector<std::pair<double, std::set<unsigned>>> expected;
+    auto add = [&](double z, unsigned t) {
+        for (auto &[ez, s] : expected)
+            if (std::abs(ez - z) < 1e-4) { s.insert(t); return; }
+        expected.push_back({ z, { t } });
+    };
+    size_t mismatching_global_index = 0;
+    for (const PrintObject *o : print.objects())
+        for (size_t i = 0; i < o->layers().size(); ++i) {
+            add(o->layers()[i]->print_z, expected_tool(e, g, *o, i, 3));
+        }
+    // The scenario is only meaningful if some plate-wide index differs from the object-local one.
+    size_t plate_idx = 0;
+    for (const LayerTools &lt : print.tool_ordering()) {
+        for (const PrintObject *o : print.objects())
+            for (size_t i = 0; i < o->layers().size(); ++i)
+                if (std::abs(o->layers()[i]->print_z - lt.print_z) < 1e-4 && i != plate_idx)
+                    ++mismatching_global_index;
+        ++plate_idx;
+    }
+    CHECK(mismatching_global_index > 10);
+
+    for (const auto &[z, want] : expected) {
+        const std::vector<unsigned> got = tools_at(print.tool_ordering(), z);
+        INFO("z=" << z);
+        CHECK(std::set<unsigned>(got.begin(), got.end()) == want);
     }
 }

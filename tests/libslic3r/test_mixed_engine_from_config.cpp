@@ -119,7 +119,9 @@ TEST_CASE("mixed_engine_from_config: a native slot between engine rows keeps lat
     const MixedFilamentEngine e = mixed_engine_from_config(c, &rep);
     REQUIRE(rep.valid);
     REQUIRE(e.mixed_filaments().size() == 3);
-    CHECK_FALSE(is_engine_row(e.mixed_filaments()[1])); // native placeholder, never resolved here
+    CHECK_FALSE(e.is_engine_row(1));
+    CHECK(e.is_engine_row(0));
+    CHECK(e.is_engine_row(2)); // native placeholder, never resolved here
     CHECK(e.mixed_filament_from_id(6, 4)->component_a == 3);
     CHECK(e.mixed_filament_from_id(7, 4)->component_a == 2); // not shifted down to 6
     CHECK(e.mixed_filament_from_id(7, 4)->mix_b_percent == 75);
