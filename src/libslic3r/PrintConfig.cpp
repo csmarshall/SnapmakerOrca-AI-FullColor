@@ -3633,6 +3633,14 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comDevelop;
     def->set_default_value(new ConfigOptionBools{false});
 
+    def          = this->add("filament_mixed_engine_row", coStrings);
+    def->label   = L("Mixed filament engine row");
+    def->tooltip = L("Snapmaker mixed-filament row for this slot in Snapmaker's serialized token format. "
+                     "Empty means the slot is a native mixed filament; non-empty means the slot is resolved "
+                     "by the Snapmaker mixed-filament engine.");
+    def->mode    = comDevelop;
+    def->set_default_value(new ConfigOptionStrings{""});
+
     // defined in bits
     // 0 means cannot support, 1 means support
     // 0 bit: can support in left extruder
@@ -8299,6 +8307,125 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Snapmaker mixed-filament engine globals, copied verbatim from Snapmaker Orca.
+    def = this->add("mixed_color_layer_height_a", coFloat);
+    def->label = L("Dithering cadence height A");
+    def->category = L("Others");
+    def->tooltip = L("Layer height contribution of component A for dithering virtual filaments. "
+                     "Set to 0 to use normal 1-layer A / 1-layer B alternation.\n\n"
+                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_color_layer_height_b", coFloat);
+    def->label = L("Dithering cadence height B");
+    def->category = L("Others");
+    def->tooltip = L("Layer height contribution of component B for dithering virtual filaments. "
+                     "Set to 0 to use normal 1-layer A / 1-layer B alternation.\n\n"
+                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_gradient_mode", coBool);
+    def->label = L("Height-weighted cadence");
+    def->category = L("Others");
+    def->tooltip = L("Enable height-weighted cadence for mixed filaments. "
+                     "Limitation: only one height-weighted mixed color should be present at a given Z plane, "
+                     "because independent per-color layer heights are not supported and the resulting layer height applies to the whole plane. "
+                     "When disabled, layer-cycle cadence is used.\n\n"
+                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_height_lower_bound", coFloat);
+    def->label = L("Local-Z lower height bound");
+    def->category = L("Others");
+    def->tooltip = L("Lower bound used when Local-Z mixed-filament dithering chooses per-color sublayer heights.\n\n"
+                     "Smaller values let Local-Z use thinner sublayers for a color when needed.\n\n"
+                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.04));
+
+    def = this->add("mixed_filament_height_upper_bound", coFloat);
+    def->label = L("Local-Z upper height bound");
+    def->category = L("Others");
+    def->tooltip = L("Upper bound used when Local-Z mixed-filament dithering chooses per-color sublayer heights.\n\n"
+                     "Larger values let Local-Z use thicker sublayers for a color when needed.\n\n"
+                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
+    def->sidetext = "mm";
+    def->min = 0.01;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.16));
+
+    def = this->add("mixed_filament_advanced_dithering", coBool);
+    def->label = L("Advanced dithering");
+    def->category = L("Others");
+    def->tooltip = L("Distribute mixed filament layer-cycle cadence using an advanced ordered dithering pattern "
+                     "instead of a simple contiguous A-then-B run. This can reduce visible striping for some hues.\n\n"
+                     "This is an even more experimental mode and the perceived color may differ from normal dithering "
+                     "for the same filament pair and ratio.\n\n"
+                     "Detailed mixed filament setting explanations will be published once the project wiki is available.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_pointillism_pixel_size", coFloat);
+    def->label = L("Pointillisme pixel size");
+    def->category = L("Others");
+    def->tooltip = L("Length of one pointillisme segment along an extrusion path for same-layer pointillisme mode. "
+                     "Set to 0 to use automatic nozzle-based sizing.\n\n"
+                     "Warning: Same-layer pointillisme is extremely experimental and may produce unusable results.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_pointillism_line_gap", coFloat);
+    def->label = L("Pointillisme line gap");
+    def->category = L("Others");
+    def->tooltip = L("Optional non-extruded spacing between adjacent pointillisme segments. "
+                     "Increase carefully to improve separation and print quality.\n\n"
+                     "Warning: Same-layer pointillisme is extremely experimental and may produce unusable results.");
+    def->sidetext = "mm";
+    def->min = 0.;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_component_bias_enabled", coBool);
+    def->label = L("Enable mixed filament bias");
+    def->category = L("Others");
+    def->tooltip = L("Show and apply the per-row mixed filament Bias control.\n\n"
+                     "When enabled, the selected filament in a mixed pair is recessed slightly so the other component becomes more visible.\n\n"
+                     "Bias is ignored for grouped wall patterns, same-layer pointillisme, and Local Z dithering.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("mixed_filament_surface_indentation", coFloat);
+    def->label = L("Selective Expansion contraction");
+    def->category = L("Others");
+    def->tooltip = L("XY offset applied to mixed-filament painted regions before region assignment.\n\n"
+                     "Positive values contract the mixed zone inward. Negative values expand it outward.\n\n"
+                     "This applies to mixed filament usage in layer cadence, height cadence, same-layer pointillisme, and local Z dithering.");
+    def->sidetext = "mm";
+    def->min = -2.0;
+    def->max = 2.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.0));
+
+    def = this->add("mixed_filament_region_collapse", coBool);
+    def->label = L("Collapse same-color mixed regions");
+    def->category = L("Others");
+    def->tooltip = L("Merge ordinary mixed-filament painted regions into a single area when they resolve to the same physical filament on a layer.\n\n"
+                     "This improves continuity for adjacent same-color areas.\n\n"
+                     "Subdivide Mix Layer disables this behavior, and gradient mixed regions also bypass it because they use the Local-Z pipeline.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("enable_prime_tower", coBool);
     def->label = L("Enable");
     def->tooltip = L("The wiping tower can be used to clean up residue on the nozzle and stabilize the chamber pressure inside the nozzle in order to avoid appearance defects when printing objects.");
@@ -11528,6 +11655,7 @@ void resize_mixed_filament_metadata(DynamicPrintConfig &config, size_t old_slot_
     resize(config.option<ConfigOptionStrings>("filament_mixed_gradient_range", true));
     resize(config.option<ConfigOptionStrings>("filament_mixed_gradient_curve", true));
     resize(config.option<ConfigOptionBools>("filament_mixed_gradient_per_part", true));
+    resize(config.option<ConfigOptionStrings>("filament_mixed_engine_row", true));
 }
 
 

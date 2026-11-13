@@ -49,6 +49,7 @@ add_executable(${_TEST_NAME}_tests
     test_mixed_filament_engine.cpp
     test_mixed_filament_legacy.cpp
     test_mixed_filament_rows.cpp
+    test_mixed_engine_row_config.cpp
     test_fill_plane_path.cpp
     test_adaptive_infill_field.cpp
     test_geometry.cpp

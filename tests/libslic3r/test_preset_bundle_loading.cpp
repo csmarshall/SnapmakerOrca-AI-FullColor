@@ -2722,6 +2722,7 @@ const char *kMixedKeys[] = {
     "filament_mixed_gradient_range",
     "filament_mixed_gradient_curve",
     "filament_mixed_gradient_per_part",
+    "filament_mixed_engine_row",
 };
 
 } // namespace
