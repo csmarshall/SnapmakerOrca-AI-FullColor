@@ -1,5 +1,10 @@
 #include "MixedFilamentEngine.hpp"
 
+#include "Config.hpp"
+#include "FilamentMixer.hpp"
+#include "MixedFilamentLegacy.hpp"
+#include "PrintConfig.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -669,6 +674,192 @@ size_t MixedFilamentEngine::enabled_count() const
         if (mf.enabled && !mf.deleted)
             ++n;
     return n;
+}
+
+// ---- Slice 4b ---------------------------------------------------------------------------------------------
+
+namespace {
+
+float sanitize_global(float v, float lo, float hi, float def, const char *key, std::vector<std::string> *warnings)
+{
+    float out = v;
+    if (!std::isfinite(v))
+        out = def;
+    else
+        out = std::min(std::max(v, lo), hi);
+    if (out != v && warnings != nullptr)
+        warnings->push_back(std::string("Mixed filament setting ") + key + " was out of range and was corrected.");
+    return out;
+}
+
+// Largest value accepted for the mm-valued globals; far above any real nozzle or layer height.
+constexpr float k_max_global_mm = 100.f;
+
+std::string pattern_token(unsigned int n)
+{
+    return n >= 10 ? "[" + std::to_string(n) + "]" : std::string(1, char('0' + n));
+}
+
+std::string remap_pattern_on_delete(const std::string &pattern, unsigned int del, bool &names_deleted)
+{
+    std::string out;
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        const char c = pattern[i];
+        if (c == ',') {
+            out.push_back(c);
+        } else if (c >= '1' && c <= '9') {
+            const unsigned int id = unsigned(c - '0');
+            if (id == del) { names_deleted = true; return {}; }
+            out.append(pattern_token(id > del ? id - 1 : id));
+        } else if (c == '[') {
+            const size_t j = pattern.find(']', i);
+            int id = 0;
+            if (j == std::string::npos || !parse_bounded_mixed_token(pattern.substr(i + 1, j - i - 1), id))
+                return pattern;
+            if (unsigned(id) == del) { names_deleted = true; return {}; }
+            out.append(pattern_token(unsigned(id) > del ? unsigned(id) - 1 : unsigned(id)));
+            i = j;
+        } else {
+            return pattern;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+MixedEngineGlobals mixed_engine_globals_from_config(const ConfigBase &config, std::vector<std::string> *warnings)
+{
+    MixedEngineGlobals g;
+    auto f = [&](const char *key, float def, float lo, float hi) {
+        const auto *o = config.option<ConfigOptionFloat>(key);
+        return o == nullptr ? def : sanitize_global(float(o->value), lo, hi, def, key, warnings);
+    };
+    auto b = [&](const char *key, bool def) {
+        const auto *o = config.option<ConfigOptionBool>(key);
+        return o == nullptr ? def : o->value;
+    };
+    g.color_layer_height_a   = f("mixed_color_layer_height_a", 0.f, 0.f, k_max_global_mm);
+    g.color_layer_height_b   = f("mixed_color_layer_height_b", 0.f, 0.f, k_max_global_mm);
+    g.gradient_mode          = b("mixed_filament_gradient_mode", false);
+    g.height_lower_bound     = f("mixed_filament_height_lower_bound", 0.04f, 0.01f, k_max_global_mm);
+    g.height_upper_bound     = f("mixed_filament_height_upper_bound", 0.16f, 0.01f, k_max_global_mm);
+    g.advanced_dithering     = b("mixed_filament_advanced_dithering", false);
+    g.pointillism_pixel_size = f("mixed_filament_pointillism_pixel_size", 0.f, 0.f, k_max_global_mm);
+    g.pointillism_line_gap   = f("mixed_filament_pointillism_line_gap", 0.f, 0.f, k_max_global_mm);
+    g.component_bias_enabled = b("mixed_filament_component_bias_enabled", false);
+    g.surface_indentation    = f("mixed_filament_surface_indentation", 0.f, -2.f, 2.f);
+    g.region_collapse        = b("mixed_filament_region_collapse", true);
+    return g;
+}
+
+MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngineSlotsReport *report)
+{
+    MixedEngineSlotsReport local;
+    MixedEngineSlotsReport &rep = report ? *report : local;
+    rep = MixedEngineSlotsReport();
+
+    const auto *rows_opt = config.option<ConfigOptionStrings>("filament_mixed_engine_row");
+    if (rows_opt == nullptr || std::all_of(rows_opt->values.begin(), rows_opt->values.end(), [](const std::string &s) { return s.empty(); }))
+        return MixedFilamentEngine(); // native project: no engine rows
+
+    auto fail = [&](const std::string &why) {
+        rep = MixedEngineSlotsReport();
+        rep.warnings.push_back("Mixed filament engine: " + why + "; engine disabled.");
+        return MixedFilamentEngine();
+    };
+
+    const auto *colours  = config.option<ConfigOptionStrings>("filament_colour");
+    const auto *is_mixed = config.option<ConfigOptionBools>("filament_is_mixed");
+    const auto *comps    = config.option<ConfigOptionStrings>("filament_mixed_components");
+    if (colours == nullptr || is_mixed == nullptr)
+        return fail("filament_colour or filament_is_mixed is missing");
+    const size_t total = colours->values.size();
+    if (rows_opt->values.size() > total || is_mixed->values.size() > total)
+        return fail("per-slot mixed settings have more entries than there are filament slots");
+
+    // Mixed slots must be a contiguous tail, so that slot id == num_physical + 1 + k.
+    size_t num_mixed = 0;
+    for (size_t i = 0; i < is_mixed->values.size(); ++i)
+        if (is_mixed->values[i])
+            ++num_mixed;
+    if (num_mixed == 0 || num_mixed >= total)
+        return fail("no mixed slots, or no physical slot is left");
+    const size_t num_physical = total - num_mixed;
+    for (size_t i = 0; i < total; ++i) {
+        const bool mixed = i < is_mixed->values.size() && is_mixed->values[i];
+        if (mixed != (i >= num_physical))
+            return fail("mixed slots are not the last slots");
+    }
+    for (size_t i = 0; i < rows_opt->values.size() && i < num_physical; ++i)
+        if (!rows_opt->values[i].empty())
+            return fail("physical slot " + std::to_string(i + 1) + " carries an engine row");
+
+    std::vector<MixedFilament> slot_rows;
+    slot_rows.reserve(num_mixed);
+    for (size_t i = num_physical; i < total; ++i) {
+        const std::string text = i < rows_opt->values.size() ? rows_opt->values[i] : std::string();
+        MixedFilament     mf;
+        if (text.empty()) {
+            // Native slot: placeholder row, never resolved by the engine (is_engine_row is false for it).
+            std::vector<unsigned int> c;
+            if (comps != nullptr && i < comps->values.size())
+                c = parse_mixed_components(comps->values[i]);
+            mf.component_a = (c.size() >= 2 && c[0] >= 1 && c[0] <= num_physical) ? c[0] : 1;
+            mf.component_b = (c.size() >= 2 && c[1] >= 1 && c[1] <= num_physical) ? c[1] : 1;
+        } else {
+            LegacyMixedRow r;
+            if (text.size() > 4096 || text.find(';') != std::string::npos || !parse_legacy_mixed_row(text, r))
+                return fail("the engine row of slot " + std::to_string(i + 1) + " is malformed");
+            mf = mixed_filament_from_legacy_row(r);
+        }
+        slot_rows.push_back(std::move(mf));
+    }
+
+    MixedEngineSlotsReport inner;
+    MixedFilamentEngine engine = MixedFilamentEngine::from_slots(slot_rows, total, &inner);
+    rep = inner;
+    if (!inner.valid)
+        return MixedFilamentEngine();
+
+    const MixedEngineGlobals g = mixed_engine_globals_from_config(config, &rep.warnings);
+    engine.apply_gradient_settings(g.gradient_mode ? 1 : 0, g.height_lower_bound, g.height_upper_bound, g.advanced_dithering);
+    return engine;
+}
+
+void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,
+                                       unsigned int del_1based)
+{
+    for (size_t i = 0; i < rows.size() && i < is_mixed.size(); ++i) {
+        if (!is_mixed[i] || rows[i].empty())
+            continue;
+        LegacyMixedRow r;
+        if (rows[i].size() > 4096 || rows[i].find(';') != std::string::npos || !parse_legacy_mixed_row(rows[i], r))
+            continue;
+        MixedFilament mf = mixed_filament_from_legacy_row(r);
+        auto remap = [del_1based](unsigned int id) { return id == del_1based ? 0u : (id > del_1based ? id - 1 : id); };
+        mf.component_a = remap(mf.component_a);
+        mf.component_b = remap(mf.component_b);
+
+        if (!mf.gradient_component_ids.empty()) {
+            std::vector<unsigned int> ids = decode_gradient_component_ids(mf.gradient_component_ids, 0);
+            if (std::find(ids.begin(), ids.end(), del_1based) != ids.end()) {
+                mf.gradient_component_ids.clear();
+                mf.gradient_component_weights.clear();
+            } else {
+                for (unsigned int &id : ids)
+                    id = remap(id);
+                mf.gradient_component_ids = encode_gradient_component_ids(ids);
+            }
+        }
+        if (!mf.manual_pattern.empty()) {
+            bool names_deleted = false;
+            mf.manual_pattern  = remap_pattern_on_delete(mf.manual_pattern, del_1based, names_deleted);
+            if (names_deleted)
+                mf.manual_pattern.clear();
+        }
+        rows[i] = serialize_mixed_filaments({ mf });
+    }
 }
 
 } // namespace Slic3r

@@ -40,6 +40,8 @@
 
 namespace Slic3r {
 
+class ConfigBase;
+
 // Largest total slot count the paint encoding can address (Extruder32, TriangleSelector.hpp).
 constexpr size_t kMixedEngineMaxSlots = 32;
 
@@ -136,6 +138,45 @@ private:
     bool                       m_advanced_dithering = false;
     size_t                     m_num_physical       = 0;
 };
+
+// ---- Slice 4b: config -> engine -----------------------------------------------------------------------
+
+// The 11 global mixed_* keys after range validation (PrintConfig.cpp bounds, plus a finite upper cap so a
+// hostile project file cannot feed absurd values to the arithmetic). Out-of-range values are clamped, NaN/inf
+// fall back to the key's default; each correction adds a warning.
+struct MixedEngineGlobals
+{
+    float color_layer_height_a   = 0.f;
+    float color_layer_height_b   = 0.f;
+    bool  gradient_mode          = false;
+    float height_lower_bound     = 0.04f;
+    float height_upper_bound     = 0.16f;
+    bool  advanced_dithering     = false;
+    float pointillism_pixel_size = 0.f;
+    float pointillism_line_gap   = 0.f;
+    bool  component_bias_enabled = false;
+    float surface_indentation    = 0.f;
+    bool  region_collapse        = true;
+};
+MixedEngineGlobals mixed_engine_globals_from_config(const ConfigBase &config, std::vector<std::string> *warnings = nullptr);
+
+// Builds the engine from the per-slot filament_mixed_engine_row strings (Snapmaker's single-row token format,
+// parsed by the bounded parser) and the global keys. Works on DynamicPrintConfig and PrintConfig alike.
+// num_physical = filament count - mixed slot count (never the vector size). The engine has one row per mixed
+// slot in slot order; native 2.5 slots (empty marker) get a placeholder row so ids stay aligned, and are not
+// engine rows. Returns an EMPTY engine (report.valid == false) when every marker is empty (native project, no
+// warning), and also, with a warning, when anything is inconsistent: a malformed row, a marker on a physical
+// slot, mixed slots that are not a contiguous tail, more markers than slots, or from_slots() rejecting the rows.
+// Never throws on bad input.
+MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngineSlotsReport *report = nullptr);
+
+// Remaps component references inside engine-row strings after a PHYSICAL filament is deleted, the way
+// remap_mixed_components_on_delete does for filament_mixed_components: the deleted id becomes 0 in the row's
+// components (the row then no longer parses, so the engine is disabled with a warning rather than guessing),
+// higher ids shift down by one. A gradient id list or manual pattern that names the deleted id is cleared;
+// otherwise its ids shift. Rows that are empty, on non-mixed slots, or unparseable are left alone.
+void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,
+                                       unsigned int del_1based);
 
 } // namespace Slic3r
 

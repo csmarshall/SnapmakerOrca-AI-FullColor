@@ -46,6 +46,7 @@
 #include "PrintConfig.hpp"
 #include "PublishSettings.hpp"
 #include "FilamentMixer.hpp"
+#include "MixedFilamentEngine.hpp"
 #include "Semver.hpp"
 #include "libslic3r.h"
 #include "I18N.hpp"
@@ -4553,6 +4554,15 @@ void PresetBundle::update_num_filaments(unsigned int to_del_flament_id)
             if (del_is_physical)
                 remap_mixed_components_on_delete(is_mixed_opt->values, comp_opt->values,
                                                  to_del_flament_id + 1);
+        }
+        // Engine rows name physical filaments too (components, gradient ids, pattern): same remap.
+        auto *engine_row_opt = project_config.option<ConfigOptionStrings>("filament_mixed_engine_row");
+        if (is_mixed_opt && engine_row_opt) {
+            bool del_is_physical = (to_del_flament_id >= is_mixed_opt->values.size()
+                                    || !is_mixed_opt->values[to_del_flament_id]);
+            if (del_is_physical)
+                remap_mixed_engine_rows_on_delete(is_mixed_opt->values, engine_row_opt->values,
+                                                  to_del_flament_id + 1);
         }
         if (is_mixed_opt)
             erase_or_resize(is_mixed_opt->values);

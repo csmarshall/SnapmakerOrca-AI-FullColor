@@ -508,7 +508,7 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
     }
 
     // Per-slot text for the new slots.
-    struct NewSlot { std::string colour, components, ratios, range; bool gradient; };
+    struct NewSlot { std::string colour, components, ratios, range, engine_row; bool gradient; };
     std::vector<NewSlot> news;
     for (size_t k = 0; k < slots.size(); ++k) {
         const LegacyMixedRow &r    = *slots[k];
@@ -525,6 +525,15 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
         }
         s.ratios     = format_mixed_ratios({ 100 - mix, mix });
         s.gradient   = r.gradient_enabled;
+        // The marker: the whole Snapmaker row, so a later slice can slice it with Snapmaker's engine.
+        {
+            MixedFilament mf = mixed_filament_from_legacy_row(r);
+            mf.enabled       = true;
+            mf.deleted       = false;
+            if (mf.stable_id == 0)
+                mf.stable_id = 1000000 + k; // unique within this conversion; real ids are small counters
+            s.engine_row = serialize_mixed_filaments({ mf });
+        }
         if (r.gradient_enabled)
             s.range = float_to_string_decimal_point(r.gradient_start, 4) + "," + float_to_string_decimal_point(r.gradient_end, 4);
         s.colour = blend_color(colours->values[r.a - 1], colours->values[r.b - 1], float(mix) / 100.f);
@@ -576,7 +585,8 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
         "filament_colour", "filament_multi_colour", "filament_colour_type", "filament_map", "filament_nozzle_map",
         "filament_volume_map", "filament_settings_id", "filament_ids", "filament_is_mixed", "filament_mixed_components",
         "filament_mixed_sublayer_ratios", "filament_mixed_gradient", "filament_mixed_gradient_range",
-        "filament_mixed_gradient_curve", "filament_mixed_gradient_per_part", "compatible_process_expression_group" };
+        "filament_mixed_gradient_curve", "filament_mixed_gradient_per_part", "filament_mixed_engine_row",
+        "compatible_process_expression_group" };
     std::set<std::string> keys(project_keys);
     for (const std::string &k : Preset::filament_options())
         keys.insert(k);
@@ -669,6 +679,7 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
     auto *ratios     = config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios", true);
     auto *gradient   = config.option<ConfigOptionBools>("filament_mixed_gradient", true);
     auto *range      = config.option<ConfigOptionStrings>("filament_mixed_gradient_range", true);
+    auto *engine_row = config.option<ConfigOptionStrings>("filament_mixed_engine_row", true);
     auto *colour     = config.option<ConfigOptionStrings>("filament_colour", true);
     auto *multi      = config.option<ConfigOptionStrings>("filament_multi_colour");
     auto *colour_typ = config.option<ConfigOptionStrings>("filament_colour_type");
@@ -679,6 +690,7 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
         ratios->values[i]    = news[k].ratios;
         gradient->values[i]  = news[k].gradient ? 1 : 0;
         range->values[i]     = news[k].range;
+        engine_row->values[i] = news[k].engine_row;
         colour->values[i]    = news[k].colour;
         if (multi != nullptr && i < multi->values.size())
             multi->values[i] = news[k].colour;
