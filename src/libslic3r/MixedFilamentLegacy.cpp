@@ -410,7 +410,7 @@ bool parse_legacy_mixed_row(const std::string &row, LegacyMixedRow &out)
 LegacyMixedParse parse_legacy_mixed_definitions(const std::string &serialized, size_t n)
 {
     LegacyMixedParse result;
-    if (serialized.empty() || n < 2)
+    if (serialized.empty() || n < 2 || n > kLegacyMixedMaxFilaments)
         return result;
 
     // Parse and validate every row first; auto rows are only honoured when the string shows the
@@ -423,22 +423,26 @@ LegacyMixedParse parse_legacy_mixed_definitions(const std::string &serialized, s
         while (std::getline(all, row, ';')) {
             if (row.empty())
                 continue;
+            if (result.parsed >= kLegacyMixedMaxRows) {
+                ++result.skipped;
+                continue;
+            }
             ++result.parsed;
             LegacyMixedRow r;
             if (!parse_legacy_mixed_row(row, r)) {
                 ++result.skipped;
-                BOOST_LOG_TRIVIAL(warning) << "Legacy mixed filament row malformed, skipped: " << row;
+                if (result.skipped <= 10) BOOST_LOG_TRIVIAL(warning) << "Legacy mixed filament row malformed, skipped: " << row;
                 continue;
             }
             if (r.a > n || r.b > n || r.a == r.b) {
                 ++result.skipped;
-                BOOST_LOG_TRIVIAL(warning) << "Legacy mixed filament row rejected (components out of range or equal): " << row;
+                if (result.skipped <= 10) BOOST_LOG_TRIVIAL(warning) << "Legacy mixed filament row rejected (components out of range or equal): " << row;
                 continue;
             }
             const std::string norm_pattern = normalize_manual_pattern(r.manual_pattern);
             if (references_exceed_physical(r.gradient_component_ids, norm_pattern, n)) {
                 ++result.skipped;
-                BOOST_LOG_TRIVIAL(warning) << "Legacy mixed filament row rejected (gradient/pattern ids exceed physical count): " << row;
+                if (result.skipped <= 10) BOOST_LOG_TRIVIAL(warning) << "Legacy mixed filament row rejected (gradient/pattern ids exceed physical count): " << row;
                 continue;
             }
             r.manual_pattern = norm_pattern;
@@ -507,6 +511,11 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
     if (colours == nullptr || colours->values.size() < 2)
         return out;
     const size_t n = colours->values.size();
+    if (n > kLegacyMixedMaxFilaments) {
+        out.warnings.push_back("This project has " + std::to_string(n) + " filaments; Snapmaker mixed filament definitions are only converted up to " +
+                               std::to_string(kLegacyMixedMaxFilaments) + ", so they were ignored.");
+        return out;
+    }
 
     if (const auto *is_mixed = config.option<ConfigOptionBools>("filament_is_mixed");
         is_mixed != nullptr && std::any_of(is_mixed->values.begin(), is_mixed->values.end(), [](unsigned char v) { return v != 0; })) {
@@ -526,6 +535,14 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
             slots.push_back(&r);
     if (slots.empty())
         return out;
+    if (n + slots.size() > kLegacyMixedMaxFilaments) {
+        out.warnings.push_back("The Snapmaker project defines " + std::to_string(slots.size()) + " mixed filaments but only " +
+                               std::to_string(kLegacyMixedMaxFilaments - n) + " more slots fit (limit " + std::to_string(kLegacyMixedMaxFilaments) +
+                               "); the rest were dropped, so objects using them fall back to filament 1.");
+        slots.resize(kLegacyMixedMaxFilaments - n);
+        if (slots.empty())
+            return out;
+    }
 
     // Per-slot text for the new slots.
     struct NewSlot { std::string colour, components, ratios, range; bool gradient; };
@@ -534,11 +551,20 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
         const LegacyMixedRow &r    = *slots[k];
         NewSlot               s;
         s.components = format_mixed_components({ r.a, r.b });
-        s.ratios     = format_mixed_ratios({ 100 - r.mix_b_percent, r.mix_b_percent });
+        // Snapmaker resolves an auto row without a pattern at a forced 1:1 cadence (apply_gradient_settings),
+        // whatever mix_b_percent the string carries.
+        int mix = (r.custom || !r.manual_pattern.empty()) ? r.mix_b_percent : 50;
+        if (mix < 1 || mix > 99) {
+            // The 2.5 ratio validator needs both ratios above zero.
+            mix = std::clamp(mix, 1, 99);
+            out.warnings.push_back("Snapmaker mixed filament " + std::to_string(n + k + 1) + " (filaments " + std::to_string(r.a) + "+" + std::to_string(r.b) +
+                                   ") is a pure single-filament mix; it was stored as a " + std::to_string(100 - mix) + "/" + std::to_string(mix) + " blend.");
+        }
+        s.ratios     = format_mixed_ratios({ 100 - mix, mix });
         s.gradient   = r.gradient_enabled;
         if (r.gradient_enabled)
             s.range = float_to_string_decimal_point(r.gradient_start, 4) + "," + float_to_string_decimal_point(r.gradient_end, 4);
-        s.colour = blend_color(colours->values[r.a - 1], colours->values[r.b - 1], float(r.mix_b_percent) / 100.f);
+        s.colour = blend_color(colours->values[r.a - 1], colours->values[r.b - 1], float(mix) / 100.f);
         if (s.colour.empty())
             s.colour = colours->values[r.a - 1];
         news.push_back(std::move(s));
@@ -546,7 +572,7 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
         std::vector<std::string> dropped;
         if (!r.manual_pattern.empty())
             dropped.push_back("manual pattern");
-        if (decode_gradient_ids(r.gradient_component_ids).size() >= 3)
+        if (r.distribution_mode != 2 && decode_gradient_ids(r.gradient_component_ids).size() >= 3) // Snapmaker ignores the ids in simple mode
             dropped.push_back("3+ colour gradient");
         if (std::abs(r.surface_offset_a) > 1e-6f || std::abs(r.surface_offset_b) > 1e-6f)
             dropped.push_back("surface offsets");
@@ -560,11 +586,9 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
                 list += (i ? ", " : "") + dropped[i];
             out.warnings.push_back("Snapmaker mixed filament " + std::to_string(n + k + 1) + " (filaments " + std::to_string(r.a) + "+" +
                                    std::to_string(r.b) + ") uses " + list + ", which this build cannot represent; it was converted to a " +
-                                   std::to_string(100 - r.mix_b_percent) + "/" + std::to_string(r.mix_b_percent) + " blend of the two filaments.");
+                                   std::to_string(100 - mix) + "/" + std::to_string(mix) + " blend of the two filaments.");
         }
     }
-    if (n + slots.size() > 32)
-        out.warnings.push_back("The project now has " + std::to_string(n + slots.size()) + " filament slots; painting supports at most 32.");
 
     // Extend every per-filament vector. Layouts: one value per filament; one value per filament
     // variant (filament_self_index maps variants to filaments); [print, filaments..., printer] groups.
@@ -574,7 +598,16 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
     if (self_idx != nullptr)
         self_index_values = self_idx->values;
     const size_t variant_count = self_index_values.size();
-    const bool   has_variants  = variant_count > n && variant_count == (config.option<ConfigOptionStrings>("filament_extruder_variant") ? config.option<ConfigOptionStrings>("filament_extruder_variant")->size() : 0);
+    // Variant layout only when filament_self_index and filament_extruder_variant agree in length and every
+    // value names an existing filament; anything else is treated as one value per filament.
+    const auto *variant_names = config.option<ConfigOptionStrings>("filament_extruder_variant");
+    bool        has_variants  = variant_count > n && variant_names != nullptr && variant_names->size() == variant_count;
+    if (has_variants)
+        for (int v : self_index_values)
+            if (v < 1 || size_t(v) > n) {
+                has_variants = false;
+                break;
+            }
 
     static const std::set<std::string> project_keys = {
         "filament_colour", "filament_multi_colour", "filament_colour_type", "filament_map", "filament_nozzle_map",
@@ -589,6 +622,32 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
     std::vector<size_t> src_slot;
     for (const LegacyMixedRow *r : slots)
         src_slot.push_back(r->a - 1);
+
+    // Check every vector first, so a malformed project is left exactly as loaded rather than half extended.
+    auto is_variant_key_of = [](const std::string &key) {
+        return filament_options_with_variant.count(key) != 0 || key == "filament_extruder_variant" || key == "filament_self_index";
+    };
+    std::string inconsistent;
+    if (has_variants)
+        for (size_t s : src_slot)
+            if (std::find(self_index_values.begin(), self_index_values.end(), int(s + 1)) == self_index_values.end())
+                inconsistent = "filament_self_index";
+    for (const std::string &key : keys) {
+        if (key == "compatible_printers" || key == "compatible_prints" || !inconsistent.empty())
+            continue;
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));
+        if (opt == nullptr)
+            continue;
+        const size_t sz = opt->size();
+        if (sz <= 1 || sz == n || (has_variants && is_variant_key_of(key) && sz == variant_count))
+            continue;
+        inconsistent = key;
+    }
+    if (!inconsistent.empty()) {
+        out.warnings.push_back("The Snapmaker mixed filaments could not be converted: the per-filament setting \"" + inconsistent +
+                               "\" does not match the filament count. The project was loaded without them.");
+        return out;
+    }
 
     for (const std::string &key : keys) {
         if (key == "compatible_printers" || key == "compatible_prints")
@@ -617,13 +676,13 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
     }
     if (has_variants) {
         // The new slots' variants belong to the new filament numbers.
-        auto *si = config.option<ConfigOptionInts>("filament_self_index");
-        if (si != nullptr && si->values.size() >= variant_count) {
-            size_t pos = variant_count;
+        // Rebuilt by push_back from the validated copy: no write depends on the option's current size.
+        if (auto *si = config.option<ConfigOptionInts>("filament_self_index")) {
+            si->values = self_index_values;
             for (size_t k = 0; k < slots.size(); ++k)
                 for (size_t i = 0; i < variant_count; ++i)
                     if (size_t(self_index_values[i]) == src_slot[k] + 1)
-                        si->values[pos++] = int(n + k + 1);
+                        si->values.push_back(int(n + k + 1));
         }
     }
     // [print, filament 1..N, printer] groups: the new slots go before the printer entry.

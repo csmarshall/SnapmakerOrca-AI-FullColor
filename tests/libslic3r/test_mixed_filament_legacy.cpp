@@ -461,3 +461,105 @@ TEST_CASE("Legacy mixed rows: the definitions are converted at 3MF load, and not
         CHECK(dst.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values[4] == "0.4200,0.5800");
     }
 }
+
+TEST_CASE("Legacy mixed rows: malformed filament_self_index never writes out of bounds", "[MixedFilament][legacy]")
+{
+    const std::string defs = "1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1";
+    auto run = [&](std::vector<int> self_index, size_t variants) {
+        DynamicPrintConfig c = project_config(4);
+        c.set_key_value("filament_self_index", new ConfigOptionInts(self_index));
+        c.set_key_value("filament_extruder_variant", new ConfigOptionStrings(std::vector<std::string>(variants, "Direct Drive Standard")));
+        const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c, defs);
+        CHECK(conv.slots_added == 0);
+        CHECK_FALSE(conv.warnings.empty());
+        CHECK(c.option<ConfigOptionStrings>("filament_colour")->values.size() == 4); // left exactly as loaded
+    };
+    SECTION("short") { run({ 1, 2 }, 2); }
+    SECTION("longer than the filaments, with a value naming no filament") { run({ 1, 1, 2, 2, 3, 3, 9, 4 }, 8); }
+    SECTION("right length but the source filament has no entry") { run({ 2, 2, 3, 3, 4, 4, 4, 4 }, 8); }
+    SECTION("variant names and self index disagree in length") { run({ 1, 1, 2, 2, 3, 3, 4, 4 }, 5); }
+}
+
+TEST_CASE("Legacy mixed rows: a two-variant layout is extended per variant", "[MixedFilament][legacy]")
+{
+    DynamicPrintConfig c = project_config(3);
+    c.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 1, 2, 2, 3, 3 }));
+    c.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "L", "R", "L", "R", "L", "R" }));
+    c.set_key_value("nozzle_temperature", new ConfigOptionInts({ 200, 201, 210, 211, 220, 221 }));
+    const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c, "2,3,1,1,40,0,g,w,m2,z0,xa0,xb0,d0,o0,u1");
+    REQUIRE(conv.slots_added == 1);
+    CHECK(c.option<ConfigOptionInts>("filament_self_index")->values == std::vector<int>({ 1, 1, 2, 2, 3, 3, 4, 4 }));
+    CHECK(c.option<ConfigOptionStrings>("filament_extruder_variant")->values == std::vector<std::string>({ "L", "R", "L", "R", "L", "R", "L", "R" }));
+    // new slot 4 takes component A (filament 2): its two variants 210, 211
+    CHECK(c.option<ConfigOptionInts>("nozzle_temperature")->values == std::vector<int>({ 200, 201, 210, 211, 220, 221, 210, 211 }));
+    CHECK(c.option<ConfigOptionStrings>("filament_colour")->values.size() == 4);
+}
+
+TEST_CASE("Legacy mixed rows: bounds on untrusted input", "[MixedFilament][legacy]")
+{
+    SECTION("a huge physical count is refused before any expansion") {
+        const LegacyMixedParse p = parse_legacy_mixed_definitions(k_auto2, 1000);
+        CHECK(p.rows.empty());
+        DynamicPrintConfig c = project_config(3);
+        c.set_key_value("filament_colour", new ConfigOptionStrings(std::vector<std::string>(1000, "#FF0000")));
+        const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c, k_auto2);
+        CHECK(conv.slots_added == 0);
+        CHECK(conv.warnings.size() == 1);
+        CHECK(c.option<ConfigOptionStrings>("filament_colour")->values.size() == 1000);
+    }
+    SECTION("rows read from the string are capped") {
+        std::string many;
+        for (int i = 0; i < 5000; ++i)
+            many += "1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1;";
+        const LegacyMixedParse p = parse_legacy_mixed_definitions(many, 3);
+        CHECK(p.parsed == kLegacyMixedMaxRows);
+        CHECK(p.rows.size() <= kLegacyMixedMaxRows);
+        CHECK(p.skipped >= 5000 - kLegacyMixedMaxRows);
+    }
+    SECTION("slots added never take the project past the limit") {
+        const size_t n = 20; // auto rows: C(20,2) = 190 pairs
+        std::string  defs = "1,2,1,0,50,0,g,w,m2,z0,xa0,xb0,d0,o1,u1";
+        DynamicPrintConfig c = project_config(n);
+        const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c, defs);
+        CHECK(conv.slots_added == kLegacyMixedMaxFilaments - n);
+        CHECK(c.option<ConfigOptionStrings>("filament_colour")->values.size() == kLegacyMixedMaxFilaments);
+        CHECK(c.option<ConfigOptionBools>("filament_is_mixed")->values.size() == kLegacyMixedMaxFilaments);
+        CHECK_FALSE(conv.warnings.empty());
+    }
+}
+
+TEST_CASE("Legacy mixed rows: pure and forced ratios", "[MixedFilament][legacy]")
+{
+    SECTION("0 and 100 percent and an all-b pattern are stored as 99/1 blends with a warning") {
+        DynamicPrintConfig c = project_config(3);
+        const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c,
+            "1,2,1,1,0,0,g,w,m2,z0,xa0,xb0,d0,o0,u1;"
+            "1,3,1,1,100,0,g,w,m2,z0,xa0,xb0,d0,o0,u2;"
+            "2,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u3,22");
+        REQUIRE(conv.slots_added == 3);
+        const auto &r = c.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values;
+        CHECK(r[3] == "0.9900,0.0100");
+        CHECK(r[4] == "0.0100,0.9900");
+        CHECK(r[5] == "0.0100,0.9900");
+        CHECK(conv.warnings.size() >= 3);
+    }
+    SECTION("an auto row without a pattern resolves 1:1 in Snapmaker whatever its stored mix") {
+        const LegacyMixedParse p = parse_legacy_mixed_definitions(k_disabled_auto4, 4);
+        CHECK(p.rows[2].mix_b_percent == 30); // as serialized
+        DynamicPrintConfig c = project_config(4);
+        const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c, k_disabled_auto4);
+        REQUIRE(conv.slots_added == 5);
+        // row 3 is the second enabled row: slot 6
+        CHECK(c.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values[5] == "0.5000,0.5000");
+    }
+    SECTION("a custom row keeps its mix") {
+        DynamicPrintConfig c = project_config(3);
+        convert_legacy_mixed_filaments(c, "1,2,1,1,30,0,g,w,m2,z0,xa0,xb0,d0,o0,u1");
+        CHECK(c.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios")->values[3] == "0.7000,0.3000");
+    }
+    SECTION("3+ colour gradient ids in simple mode are ignored by Snapmaker, so not warned about") {
+        DynamicPrintConfig c = project_config(3);
+        const LegacyMixedConversion conv = convert_legacy_mixed_filaments(c, "1,2,1,1,25,0,g123,w,m2,z0,xa0,xb0,d0,o0,u1");
+        CHECK(conv.warnings.empty());
+    }
+}

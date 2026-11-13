@@ -23,6 +23,10 @@ namespace Slic3r {
 class DynamicPrintConfig;
 
 // One parsed row of the Snapmaker string. Field meanings follow Snapmaker's struct MixedFilament.
+// Limits: the 3MF is untrusted input. Total slots (physical + converted) never exceed this.
+constexpr size_t kLegacyMixedMaxFilaments = 64;   // physical count above this: nothing is converted
+constexpr size_t kLegacyMixedMaxRows      = 1024; // row strings read from the definitions; the rest are skipped
+
 struct LegacyMixedRow
 {
     unsigned int a = 0;                 // 1-based physical filament
