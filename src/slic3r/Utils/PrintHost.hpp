@@ -89,6 +89,9 @@ public:
 
     static PrintHost* get_print_host(DynamicPrintConfig *config);
     static std::string get_print_host_webui(DynamicPrintConfig *config);
+    // Returns a copy of the config; when print_host is empty it is filled with ip_lookup() (the connected device's address,
+    // empty/ambiguous -> unchanged). The preset itself is never modified.
+    static DynamicPrintConfig with_device_host_fallback(const DynamicPrintConfig &config, const std::function<std::string()> &ip_lookup);
     // Reads the "err" field of a JSON reply, 0 when absent. Returns -1 when the body is not valid JSON.
     static int get_err_code_from_body(const std::string &body);
 

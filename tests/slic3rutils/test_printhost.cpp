@@ -381,3 +381,29 @@ TEST_CASE("A successful upload finishes without an error", "[PrintHost][Lifecycl
     CHECK(run.events == std::vector<LifecycleEvent>{LifecycleEvent::UploadStarted, LifecycleEvent::UploadFinished});
     CHECK(run.codes == std::vector<LifecycleEvtCode>{LifecycleEvtCode::Ok, LifecycleEvtCode::Ok});
 }
+
+TEST_CASE("with_device_host_fallback fills only an empty print_host", "[PrintHost]")
+{
+    DynamicPrintConfig cfg;
+    cfg.set_key_value("print_host", new ConfigOptionString(""));
+
+    SECTION("empty host + a machine -> that ip, original untouched")
+    {
+        auto out = PrintHost::with_device_host_fallback(cfg, [] { return std::string("192.168.1.50"); });
+        CHECK(out.opt_string("print_host") == "192.168.1.50");
+        CHECK(cfg.opt_string("print_host").empty());
+    }
+    SECTION("preset host wins")
+    {
+        cfg.opt_string("print_host") = "10.0.0.1";
+        auto out = PrintHost::with_device_host_fallback(cfg, [] { return std::string("192.168.1.50"); });
+        CHECK(out.opt_string("print_host") == "10.0.0.1");
+    }
+    SECTION("no machine / several machines none selected (lookup empty) -> unchanged")
+    {
+        auto out = PrintHost::with_device_host_fallback(cfg, [] { return std::string(); });
+        CHECK(out.opt_string("print_host").empty());
+        auto out2 = PrintHost::with_device_host_fallback(cfg, nullptr);
+        CHECK(out2.opt_string("print_host").empty());
+    }
+}

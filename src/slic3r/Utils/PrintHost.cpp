@@ -95,6 +95,18 @@ PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config)
     }
 }
 
+DynamicPrintConfig PrintHost::with_device_host_fallback(const DynamicPrintConfig &config, const std::function<std::string()> &ip_lookup)
+{
+    DynamicPrintConfig out = config;
+    const auto *host = out.option<ConfigOptionString>("print_host");
+    if (host != nullptr && host->value.empty() && ip_lookup) {
+        const std::string ip = ip_lookup();
+        if (!ip.empty())
+            out.opt_string("print_host") = ip;
+    }
+    return out;
+}
+
 std::string PrintHost::get_print_host_webui(DynamicPrintConfig* config)
 {
     if (config == nullptr)

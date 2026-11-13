@@ -601,6 +601,9 @@ wxDECLARE_EVENT(EVT_UPDATE_PRESET_CB, SimpleEvent);
 
 
 
+// Address of the selected (or only) connected DeviceManager machine, empty if none/ambiguous.
+std::string device_manager_fallback_ip();
+
 } // GUI
 } //Slic3r
 

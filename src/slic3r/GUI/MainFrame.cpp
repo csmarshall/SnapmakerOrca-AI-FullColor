@@ -4712,25 +4712,27 @@ void MainFrame::load_printer_url(wxString url, wxString apikey)
     wxQueueEvent(this, evt);
 }
 
+std::string device_manager_fallback_ip()
+{
+    auto *device_manager = wxGetApp().getDeviceManager();
+    if (!device_manager)
+        return {};
+    auto *machine = device_manager->get_selected_machine();
+    if (!machine) {
+        auto machines = device_manager->get_my_machine_list(device_manager->get_current_printer_agent_id());
+        if (machines.size() == 1)
+            machine = machines.begin()->second;
+    }
+    return machine ? machine->get_dev_ip() : std::string();
+}
+
 void MainFrame::load_printer_url()
 {
     PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
     if (preset_bundle.use_bbl_device_tab() && !wxGetApp().app_config->get_bool("use_printer_agents"))
         return;
 
-    auto     cfg = preset_bundle.printers.get_edited_preset().config;
-    if (cfg.opt_string("print_host").empty()) {
-        if (auto *device_manager = wxGetApp().getDeviceManager()) {
-            auto *machine = device_manager->get_selected_machine();
-            if (!machine) {
-                auto machines = device_manager->get_my_machine_list(device_manager->get_current_printer_agent_id());
-                if (machines.size() == 1)
-                    machine = machines.begin()->second;
-            }
-            if (machine && !machine->get_dev_ip().empty())
-                cfg.opt_string("print_host") = machine->get_dev_ip();
-        }
-    }
+    auto     cfg = PrintHost::with_device_host_fallback(preset_bundle.printers.get_edited_preset().config, &device_manager_fallback_ip);
     wxString url = from_u8(PrintHost::get_print_host_webui(&cfg));
     wxString apikey;
     const auto host_type = cfg.option<ConfigOptionEnum<PrintHostType>>("host_type")->value;

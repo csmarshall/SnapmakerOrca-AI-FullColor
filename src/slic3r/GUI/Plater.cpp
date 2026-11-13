@@ -21256,8 +21256,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 {
     // if physical_printer is selected, send gcode for this printer
     // DynamicPrintConfig* physical_printer_config = wxGetApp().preset_bundle->physical_printers.get_selected_printer_config();
-    DynamicPrintConfig* physical_printer_config = &Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    if (! physical_printer_config || p->model.objects.empty())
+    // Orca: work on a copy so a device-derived host (U1 presets carry no print_host) never lands in the user's preset.
+    DynamicPrintConfig  legacy_config = PrintHost::with_device_host_fallback(
+        Slic3r::GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config, &device_manager_fallback_ip);
+    DynamicPrintConfig* physical_printer_config = &legacy_config;
+    if (p->model.objects.empty())
         return;
 
     PrintHostJob upload_job(physical_printer_config);
