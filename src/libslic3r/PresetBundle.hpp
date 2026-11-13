@@ -991,6 +991,11 @@ private:
 
 ENABLE_ENUM_BITMASK_OPERATORS(PresetBundle::LoadConfigBundleAttribute)
 
+// Moves the per-slot cells of the receiver's own mixed-filament definitions (engine marker included) from the
+// physical region to tail slots and clears each source. Exposed for tests; used by load_config_model.
+void apply_receiver_mix_relocations(DynamicPrintConfig &config, std::vector<std::vector<std::string>> &ams_multi_color_filment,
+                                    const std::vector<std::pair<size_t, size_t>> &moves);
+
 } // namespace Slic3r
 
 #endif /* slic3r_PresetBundle_hpp_ */

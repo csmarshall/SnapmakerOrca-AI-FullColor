@@ -4006,7 +4006,8 @@ static void load_mixed_filament_settings(DynamicPrintConfig &project_config, App
         Slic3r::sanitize_mixed_gradient_curve_array(vals);
     }
 
-    // Engine rows may contain '|' like the curve, so they are escaped the same way.
+    // Engine rows are comma/semicolon-token strings, but a row's free-text fields could hold any character, so the
+    // array is stored escaped (escape_strings_cstyle), like the curve, not '|'-joined.
     {
         auto &vals = project_config.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
         vals.clear();
@@ -6284,7 +6285,7 @@ static void apply_mixed_config_relocations(DynamicPrintConfig&                  
 // destination never overwrites a later move's still-unread source (sources sit in the physical
 // region and destinations past it, so they cannot overlap, but the snapshot keeps the helper
 // safe for any future reordering).
-static void apply_receiver_mix_relocations(DynamicPrintConfig&                            config,
+void apply_receiver_mix_relocations(DynamicPrintConfig&                            config,
                                            std::vector<std::vector<std::string>>&          ams_multi_color_filment,
                                            const std::vector<std::pair<size_t, size_t>>&  moves)
 {
@@ -7922,6 +7923,9 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                                         if (dst_opt->is_vector() && dst_opt->type() == src_opt->type() &&
                                             slot < static_cast<const ConfigOptionVectorBase*>(dst_opt)->size()) {
                                             static_cast<ConfigOptionVectorBase*>(dst_opt)->set_at(src_opt, slot, entry.slot);
+                                            // A published native mix replaces whatever the receiver slot held: an old
+                                            // engine marker would keep describing the previous mix.
+                                            clear_mixed_engine_marker(this->project_config, slot);
                                             material_applied = true;
                                             continue;
                                         }

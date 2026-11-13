@@ -401,3 +401,142 @@ TEST_CASE("PresetBundle deleting a physical filament remaps engine rows end to e
     CHECK(r[0].component_b == 3);
     CHECK(r[0].stable_id == 9);
 }
+
+TEST_CASE("clear_mixed_engine_marker clears one slot and reports whether it did", "[MixedFilament][EngineConfig]")
+{
+    DynamicPrintConfig c = config_with(4, { {"1,2", kRowA}, {"3,4", kRowB} });
+    CHECK(clear_mixed_engine_marker(c, 4));
+    const auto &rows = c.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
+    CHECK(rows[4].empty());
+    CHECK(rows[5] == kRowB);
+    CHECK_FALSE(clear_mixed_engine_marker(c, 4)); // already empty
+    CHECK_FALSE(clear_mixed_engine_marker(c, 99));
+    CHECK_FALSE(clear_mixed_engine_marker(c, 0));
+}
+
+TEST_CASE("mixed_engine_marker_problem_slots flags a disabled engine, not a native or healthy one", "[MixedFilament][EngineConfig]")
+{
+    std::string why;
+    CHECK(mixed_engine_marker_problem_slots(config_with(4, { {"1,2", ""} }), &why).empty());
+    CHECK(mixed_engine_marker_problem_slots(config_with(4, { {"1,2", kRowA} }), &why).empty());
+    DynamicPrintConfig bad = config_with(4, { {"1,2", kRowA}, {"3,4", "garbage"} });
+    const std::vector<size_t> slots = mixed_engine_marker_problem_slots(bad, &why);
+    CHECK(slots == std::vector<size_t>{ 4, 5 });
+    CHECK_FALSE(why.empty());
+}
+
+TEST_CASE("rotate_new_filament_before_mixed keeps the engine marker on its mixed slot", "[MixedFilament][EngineConfig]")
+{
+    // 4 physical + 2 mixed (marker on the first only), then a new physical slot appended at index 6.
+    DynamicPrintConfig c = config_with(4, { {"1,2", kRowA}, {"3,4", ""} });
+    for (const char *k : { "filament_colour", "filament_mixed_components", "filament_mixed_engine_row" })
+        c.option<ConfigOptionStrings>(k)->values.push_back(std::string(k) == "filament_colour" ? "#FF0000" : "");
+    c.option<ConfigOptionBools>("filament_is_mixed")->values.push_back(0);
+    rotate_new_filament_before_mixed(c, 4, 6);
+
+    const auto &rows  = c.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
+    const auto &flags = c.option<ConfigOptionBools>("filament_is_mixed")->values;
+    REQUIRE(rows.size() == 7);
+    CHECK(rows[4].empty());      // the new physical slot
+    CHECK(rows[5] == kRowA);     // marker moved with its slot
+    CHECK(rows[6].empty());
+    CHECK(flags[4] == 0);
+    CHECK(flags[5] == 1);
+    CHECK(c.option<ConfigOptionStrings>("filament_colour")->values[4] == "#FF0000");
+    MixedEngineSlotsReport rep;
+    CHECK(mixed_engine_from_config(c, &rep).mixed_filaments().size() == 2); // engine stays valid
+    CHECK(rep.valid);
+
+    // No mixed slots: no-op.
+    DynamicPrintConfig n = config_with(4, {});
+    n.option<ConfigOptionStrings>("filament_mixed_engine_row")->values.push_back("");
+    rotate_new_filament_before_mixed(n, 4, 4);
+    CHECK(n.option<ConfigOptionStrings>("filament_mixed_engine_row")->values.size() == 5);
+}
+
+TEST_CASE("Rows without a stable id keep distinct ids through a delete remap", "[MixedFilament][EngineConfig]")
+{
+    const std::string noid1 = "2,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0";
+    const std::string noid2 = "3,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0";
+    const std::vector<unsigned char> is_mixed = {0, 0, 0, 0, 1, 1, 1};
+    std::vector<std::string> rows = {"", "", "", "", noid1, noid2, "2,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u7"};
+    remap_mixed_engine_rows_on_delete(is_mixed, rows, 1);
+    const auto a = parse_mixed_filaments(rows[4], 6);
+    const auto b = parse_mixed_filaments(rows[5], 6);
+    const auto d = parse_mixed_filaments(rows[6], 6);
+    REQUIRE(a.size() == 1);
+    REQUIRE(b.size() == 1);
+    REQUIRE(d.size() == 1);
+    CHECK(d[0].stable_id == 7); // a real id is preserved
+    CHECK(a[0].stable_id != 0);
+    CHECK(b[0].stable_id != 0);
+    CHECK(a[0].stable_id != b[0].stable_id);
+    CHECK(a[0].stable_id != d[0].stable_id);
+    CHECK(b[0].stable_id != d[0].stable_id);
+}
+
+TEST_CASE("from_slots does not reject duplicate stable ids (so the remap must not create them)", "[MixedFilament][EngineConfig]")
+{
+    MixedFilament a, b;
+    a.component_a = b.component_a = 1;
+    a.component_b = b.component_b = 2;
+    a.stable_id = b.stable_id = 5;
+    MixedEngineSlotsReport rep;
+    MixedFilamentEngine::from_slots({ a, b }, 4, &rep);
+    CHECK(rep.valid); // documents current behaviour: no uniqueness check
+}
+
+TEST_CASE("apply_receiver_mix_relocations moves the engine row to the tail and clears the source", "[MixedFilament][EngineConfig][Bundle]")
+{
+    DynamicPrintConfig c = config_with(2, { {"1,2", kRowA} });
+    // Make slot 1 a receiver-owned mix inside the physical region carrying a marker.
+    c.option<ConfigOptionBools>("filament_is_mixed")->values[1]                    = 1;
+    c.option<ConfigOptionStrings>("filament_mixed_engine_row")->values[1]          = kRowB;
+    c.option<ConfigOptionStrings>("filament_mixed_components")->values[1]          = "3,4";
+    std::vector<std::vector<std::string>> ams(3);
+    // Grow by one tail slot for the move target.
+    for (const char *k : { "filament_colour", "filament_mixed_components", "filament_mixed_engine_row" })
+        c.option<ConfigOptionStrings>(k)->values.push_back("");
+    c.option<ConfigOptionBools>("filament_is_mixed")->values.push_back(0);
+    apply_receiver_mix_relocations(c, ams, { { 1, 3 } });
+    const auto &rows = c.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
+    CHECK(rows[3] == kRowB);
+    CHECK(rows[1].empty());
+    CHECK(rows[2] == kRowA);
+    CHECK(c.option<ConfigOptionBools>("filament_is_mixed")->values[1] == 0);
+}
+
+TEST_CASE("sync_ams_list strips and re-appends mixed slots carrying their engine rows", "[MixedFilament][EngineConfig][Bundle]")
+{
+    PresetBundle bundle;
+    bundle.set_num_filaments(3u, std::string("#808080"));
+    bundle.project_config.option<ConfigOptionBools>("filament_is_mixed")->values            = {0, 0, 1};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_components")->values  = {"", "", "1,2"};
+    bundle.project_config.option<ConfigOptionStrings>("filament_mixed_engine_row")->values  = {"", "", kRowA};
+    for (int slot = 0; slot < 3; ++slot) {
+        DynamicPrintConfig config;
+        config.set_key_value("filament_id", new ConfigOptionStrings{"CFS-PETG"});
+        config.set_key_value("filament_colour", new ConfigOptionStrings{"#00FF0" + std::to_string(slot)});
+        config.set_key_value("filament_colour_type", new ConfigOptionStrings{"1"});
+        config.set_key_value("filament_multi_colour", new ConfigOptionStrings{});
+        config.set_key_value("ams_id", new ConfigOptionStrings{"0"});
+        config.set_key_value("slot_id", new ConfigOptionStrings{std::to_string(slot)});
+        config.set_key_value("filament_type", new ConfigOptionStrings{"PETG"});
+        config.set_key_value("filament_slot_placeholder", new ConfigOptionBools{false});
+        bundle.filament_ams_list.emplace(slot, std::move(config));
+    }
+    std::vector<std::pair<DynamicPrintConfig *, std::string>> unknowns;
+    std::map<int, AMSMapInfo> maps;
+    MergeFilamentInfo merge_info;
+    bundle.sync_ams_list(unknowns, false, maps, true, merge_info, false);
+
+    const auto &flags = bundle.project_config.option<ConfigOptionBools>("filament_is_mixed")->values;
+    const auto &rows  = bundle.project_config.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
+    REQUIRE(flags.size() == rows.size());
+    size_t mixed = 0;
+    for (size_t i = 0; i < flags.size(); ++i) {
+        if (flags[i]) { ++mixed; CHECK(rows[i] == kRowA); }
+        else CHECK(rows[i].empty());
+    }
+    CHECK(mixed == 1);
+}

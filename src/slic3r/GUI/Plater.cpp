@@ -293,6 +293,7 @@
 #include "ColorDecomposeSupport.hpp"
 #include "FilamentBitmapUtils.hpp"
 #include "libslic3r/FilamentMixer.hpp"
+#include "libslic3r/MixedFilamentEngine.hpp"
 
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Platform.hpp"
@@ -4420,6 +4421,15 @@ void Sidebar::update_mixed_filament_list()
     std::vector<size_t> broken_slots;
     if (is_mixed_opt && components_opt)
         broken_slots = check_mixed_filament_integrity(is_mixed_opt->values, components_opt->values, num_physical);
+    // An engine marker that disables the engine (malformed row, marker on a physical slot, ...) is flagged too, so the
+    // user sees the engine is off and not only a log line.
+    {
+        std::string why;
+        for (size_t s : mixed_engine_marker_problem_slots(project_config, &why)) {
+            BOOST_LOG_TRIVIAL(warning) << "Mixed filament engine marker problem on slot " << s << ": " << why;
+            broken_slots.push_back(s);
+        }
+    }
     std::set<size_t> broken_set(broken_slots.begin(), broken_slots.end());
 
     // Type consistency check
@@ -5328,6 +5338,8 @@ void Sidebar::edit_mixed_filament(size_t panel_idx)
             comp_str += std::to_string(result.components[i]);
         }
         components_opt->values[cfg_idx] = comp_str;
+        // The user's edit replaces any imported Snapmaker row: the slot is a native mix from here on.
+        clear_mixed_engine_marker(project_config, cfg_idx);
 
         // Serialize ratios
         int ratio_sum = 0;
@@ -6021,35 +6033,8 @@ void Sidebar::add_custom_filament(wxColour new_col, const std::string& preset_na
         auto& project_config = wxGetApp().preset_bundle->project_config;
         auto& ams_mc = wxGetApp().preset_bundle->ams_multi_color_filment;
 
-        auto rotate_strings = [&](const char* key) {
-            if (auto* opt = project_config.option<ConfigOptionStrings>(key))
-                if (opt->values.size() > total)
-                    std::rotate(opt->values.begin() + insert_pos, opt->values.begin() + total, opt->values.end());
-        };
-        auto rotate_ints = [&](const char* key) {
-            if (auto* opt = project_config.option<ConfigOptionInts>(key))
-                if (opt->values.size() > total)
-                    std::rotate(opt->values.begin() + insert_pos, opt->values.begin() + total, opt->values.end());
-        };
-        auto rotate_bools = [&](const char* key) {
-            if (auto* opt = project_config.option<ConfigOptionBools>(key))
-                if (opt->values.size() > total)
-                    std::rotate(opt->values.begin() + insert_pos, opt->values.begin() + total, opt->values.end());
-        };
-
-        rotate_strings("filament_colour");
-        rotate_strings("filament_multi_colour");
-        rotate_strings("filament_colour_type");
-        rotate_ints("filament_map");
-        rotate_ints("filament_nozzle_map");
-        rotate_ints("filament_volume_map");
-        rotate_bools("filament_is_mixed");
-        rotate_strings("filament_mixed_components");
-        rotate_strings("filament_mixed_sublayer_ratios");
-        rotate_bools("filament_mixed_gradient");
-        rotate_strings("filament_mixed_gradient_range");
-        rotate_strings("filament_mixed_gradient_curve");
-        rotate_bools("filament_mixed_gradient_per_part");
+        // Every per-slot project array, filament_mixed_engine_row included (tested in test_mixed_engine_from_config.cpp).
+        rotate_new_filament_before_mixed(project_config, insert_pos, total);
 
         if (ams_mc.size() > total)
             std::rotate(ams_mc.begin() + insert_pos, ams_mc.begin() + total, ams_mc.end());

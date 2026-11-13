@@ -845,6 +845,51 @@ unsigned int mixed_engine_resolve_layer(const MixedFilamentEngine &engine, const
     return engine.resolve(filament_id, num_physical, layer_index, layer_print_z, layer_height, false);
 }
 
+bool clear_mixed_engine_marker(ConfigBase &config, size_t slot)
+{
+    auto *rows = config.option<ConfigOptionStrings>("filament_mixed_engine_row");
+    if (rows == nullptr || slot >= rows->values.size() || rows->values[slot].empty())
+        return false;
+    rows->values[slot].clear();
+    return true;
+}
+
+std::vector<size_t> mixed_engine_marker_problem_slots(const ConfigBase &config, std::string *why)
+{
+    std::vector<size_t> out;
+    const auto *rows = config.option<ConfigOptionStrings>("filament_mixed_engine_row");
+    if (rows == nullptr)
+        return out;
+    MixedEngineSlotsReport rep;
+    const MixedFilamentEngine e = mixed_engine_from_config(config, &rep);
+    if (rep.valid || rep.warnings.empty())
+        return out;
+    for (size_t i = 0; i < rows->values.size(); ++i)
+        if (!rows->values[i].empty())
+            out.push_back(i);
+    if (why != nullptr)
+        *why = rep.warnings.front();
+    return out;
+}
+
+void rotate_new_filament_before_mixed(ConfigBase &config, size_t insert_pos, size_t total)
+{
+    if (insert_pos >= total)
+        return;
+    auto rot = [&](auto *opt) {
+        if (opt != nullptr && opt->values.size() > total)
+            std::rotate(opt->values.begin() + insert_pos, opt->values.begin() + total, opt->values.end());
+    };
+    for (const char *k : { "filament_colour", "filament_multi_colour", "filament_colour_type", "filament_mixed_components",
+                           "filament_mixed_sublayer_ratios", "filament_mixed_gradient_range", "filament_mixed_gradient_curve",
+                           "filament_mixed_engine_row" })
+        rot(config.option<ConfigOptionStrings>(k));
+    for (const char *k : { "filament_map", "filament_nozzle_map", "filament_volume_map" })
+        rot(config.option<ConfigOptionInts>(k));
+    for (const char *k : { "filament_is_mixed", "filament_mixed_gradient", "filament_mixed_gradient_per_part" })
+        rot(config.option<ConfigOptionBools>(k));
+}
+
 void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,
                                        unsigned int del_1based)
 {
@@ -876,6 +921,10 @@ void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixe
             if (names_deleted)
                 mf.manual_pattern.clear();
         }
+        // serialize_mixed_filaments gives a row without a stable id the id 1; done per row that would put the same id on
+        // every such row. Give it the same unique id the legacy conversion would (1000000 + slot), keep any real id.
+        if (mf.stable_id == 0)
+            mf.stable_id = 1000000 + i;
         rows[i] = serialize_mixed_filaments({ mf });
     }
 }

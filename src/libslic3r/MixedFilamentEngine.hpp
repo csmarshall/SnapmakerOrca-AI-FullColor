@@ -190,6 +190,21 @@ MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngi
 void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,
                                        unsigned int del_1based);
 
+// Clears the engine marker of one slot (the slot becomes a native 2.5 mix). Called when the user edits the slot's
+// mix in the UI or a published native mix is applied onto it: the old Snapmaker row no longer describes the slot.
+// Returns true if a non-empty marker was cleared. Out-of-range slots and a missing key are no-ops.
+bool clear_mixed_engine_marker(ConfigBase &config, size_t slot);
+
+// Slots (0-based) whose engine marker is in a state that disables the engine: empty when every marker is empty
+// (native project) or the engine builds cleanly; otherwise every slot carrying a non-empty marker, since
+// mixed_engine_from_config switches the engine off as a whole. why (optional) receives the first warning.
+std::vector<size_t> mixed_engine_marker_problem_slots(const ConfigBase &config, std::string *why = nullptr);
+
+// Moves the last (total - insert_pos) entries of every per-slot filament array to sit at insert_pos, so a physical
+// filament appended at index total is placed before the mixed tail. The one list of per-slot project keys to
+// rotate, including filament_mixed_engine_row, so the engine marker stays on its slot. No-op for arrays <= total.
+void rotate_new_filament_before_mixed(ConfigBase &config, size_t insert_pos, size_t total);
+
 } // namespace Slic3r
 
 #endif
