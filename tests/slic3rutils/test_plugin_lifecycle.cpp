@@ -135,11 +135,7 @@ class LifecycleTestPlugin(orca.base):
 // coverage registers agents manually in a deterministic order instead.
 void install_agent_registry_wiring()
 {
-    static bool installed = false;
-    if (installed)
-        return;
-    installed = true;
-
+    // Called once per test, after ScopedPluginManager: shutdown() clears all subscriptions, so this must resubscribe each time.
     PluginManager& manager = PluginManager::instance();
     manager.subscribe_on_unload_callback(NetworkAgentFactory::deregister_python_plugin);
     manager.subscribe_on_capability_unload_callback([](const PluginCapabilityId& capability) {

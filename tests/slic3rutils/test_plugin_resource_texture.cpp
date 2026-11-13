@@ -87,11 +87,8 @@ struct ScopedPluginManager
 // on the load worker, which is what lets the tests observe the registry right after the wait.
 void install_resource_texture_wiring()
 {
-    static bool installed = false;
-    if (installed)
-        return;
-    installed = true;
-
+    // Every test calls this once, after ScopedPluginManager: PluginManager::shutdown() clears all subscriptions, so a
+    // once-per-process guard would leave every later test without the wiring.
     PluginManager& manager = PluginManager::instance();
     manager.subscribe_on_load_callback([](const std::string& plugin_key) {
         PluginResourceTextures::instance().on_plugin_register(plugin_key);

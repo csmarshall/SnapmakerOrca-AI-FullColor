@@ -9,6 +9,7 @@
 
 #include "catch2/interfaces/catch_interfaces_reporter.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "python_test_support.hpp"
 
 namespace {
 
@@ -21,6 +22,8 @@ class PythonInterpreterRunEnd final : public Catch::EventListenerBase
 {
 public:
     using Catch::EventListenerBase::EventListenerBase;
+
+    void testCaseEnded(const Catch::TestCaseStats&) override { release_test_gil(); }
 
     void testRunEnded(const Catch::TestRunStats&) override
     {
