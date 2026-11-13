@@ -143,6 +143,7 @@ struct Http::priv
     std::string headers;
 	size_t limit;
 	bool follow_redirects = true;
+	bool report_redirects = false; // deliver a 3xx reply to completefn
 	std::atomic_bool cancel;
     std::unique_ptr<form_file> putFile;
 
@@ -523,7 +524,7 @@ void Http::priv::http_perform()
 
 		//BBS check success http status code
 		// A 304 answers a conditional request (If-None-Match): the caller's copy is still current.
-		if ((http_status >= 200 && http_status < 300) || http_status == 304) {
+		if ((http_status >= 200 && http_status < 300) || http_status == 304 || (report_redirects && http_status >= 300 && http_status < 400)) {
 			if (completefn) { completefn(std::move(buffer), http_status); }
 			if (ipresolvefn) {
 				char* ct;
@@ -612,6 +613,15 @@ Http& Http::headers_reset()
 	for (auto it = extra_headers.begin(); it != extra_headers.end(); ++it)
 		this->header(it->first, it->second);
 
+	return *this;
+}
+
+Http& Http::headers_clear()
+{
+	if (!p) { return *this; }
+
+	::curl_slist_free_all(p->headerlist);
+	p->headerlist = curl_slist_append(nullptr, "Expect:");
 	return *this;
 }
 
@@ -790,6 +800,12 @@ Http& Http::on_ip_resolve(IPResolveFn fn)
 Http &Http::follow_redirects(bool follow)
 {
 	if (p) { p->follow_redirects = follow; }
+	return *this;
+}
+
+Http &Http::report_redirects(bool report)
+{
+	if (p) { p->report_redirects = report; }
 	return *this;
 }
 

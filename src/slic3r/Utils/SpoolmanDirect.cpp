@@ -43,9 +43,9 @@ int direct_http_fetch(const std::string &url, std::string &location, std::string
     location.clear();
     auto http = Http::get(url); // GET: there is no body or method parameter anywhere on this path
     // Nothing the app adds globally (extra headers) may reach a user-entered server; no auth is ever set here.
-    for (const auto &kv : Http::get_extra_headers())
-        http.remove_header(kv.first);
-    http.follow_redirects(false)
+    http.headers_clear()
+        .follow_redirects(false)
+        .report_redirects(true)
         .timeout_connect(kDirectConnectTimeoutSeconds)
         .timeout_max(kDirectMaxTimeoutSeconds)
         .size_limit(kDirectMaxResponseBytes)

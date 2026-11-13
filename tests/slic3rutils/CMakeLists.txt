@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
     test_print_preference.cpp
     test_moonraker_printer_agent.cpp
     test_spoolman_join.cpp
+    test_spoolman_direct.cpp
     test_network_discovery.cpp
     test_filament_bitmap_utils.cpp
     test_colour_picker_field.cpp

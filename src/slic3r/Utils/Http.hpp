@@ -109,12 +109,17 @@ public:
 	Http& size_limit(size_t sizeLimit);
 	// Redirects are followed by default; pass false to receive the 3xx reply itself (its Location comes through on_header_callback)
 	Http& follow_redirects(bool follow);
+	// Off by default. When on (with follow_redirects(false)) a 3xx reply is delivered to on_complete with its status, instead of reaching no callback.
+	Http& report_redirects(bool report);
 	// range  of donloaded bytes. example: curl_easy_setopt(curl, CURLOPT_RANGE, "0-199");
 	Http& set_range(const std::string& range);
 	// Sets a HTTP header field.
 	Http& header(std::string name, const std::string &value);
 	// Clears all custom headers and restores default implicit headers.
 	Http& headers_reset();
+	// Drops EVERY custom header including the app-wide extra headers (set_extra_headers) the constructor added; headers_reset() puts those back.
+	// Only the implicit "Expect:" suppression remains. Use for requests to a server the user typed in.
+	Http& headers_clear();
 	// Removes a header field.
 	Http& remove_header(std::string name);
 	// Authorization by HTTP digest, based on RFC2617.
