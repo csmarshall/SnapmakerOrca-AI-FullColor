@@ -7,19 +7,19 @@
 namespace Slic3r::mixed_engine_golden {
 struct Entry { const char *name; uint64_t hash; size_t length; };
 inline const Entry k_entries[] = {
-    { "auto3_cycle", 6126884415891483685ull, 10069 },
-    { "disabled_auto4", 8930381685579549436ull, 16759 },
-    { "deleted3", 14820804298698695394ull, 6730 },
-    { "custom_pattern3", 14841050451362300056ull, 13470 },
-    { "gradient3", 6126884415891483685ull, 10069 },
-    { "gradient3col3", 17924003111970090351ull, 13408 },
-    { "offsets3", 4194795319738686735ull, 10069 },
-    { "ratios_cycle", 17468290812590855710ull, 23428 },
-    { "ratios_dither", 9765895898222373670ull, 23428 },
-    { "ratios_height", 5122055575827056745ull, 23428 },
-    { "ratios_height_wide", 6198973249303526869ull, 23428 },
-    { "ext_pattern12", 9696276272511744336ull, 11044 },
-    { "grad4", 4857605132452904321ull, 10480 },
-    { "ext12_auto", 6022348559496072996ull, 229481 },
+    { "auto3_cycle", 8930644263243297189ull, 19141 },
+    { "disabled_auto4", 5319517063393591536ull, 31879 },
+    { "deleted3", 7477574567163918862ull, 12778 },
+    { "custom_pattern3", 1466427967311227216ull, 25566 },
+    { "gradient3", 8930644263243297189ull, 19141 },
+    { "gradient3col3", 12485374254530766135ull, 25504 },
+    { "offsets3", 14979568263179703283ull, 19141 },
+    { "ratios_cycle", 18436411001707423350ull, 44596 },
+    { "ratios_dither", 17191336327493610726ull, 44596 },
+    { "ratios_height", 9591523507861644137ull, 44596 },
+    { "ratios_height_wide", 4947899550947172309ull, 44596 },
+    { "ext_pattern12", 13876277339341986180ull, 21628 },
+    { "grad4", 8285937833791324249ull, 20008 },
+    { "ext12_auto", 13960070049555595244ull, 439325 },
 };
 }

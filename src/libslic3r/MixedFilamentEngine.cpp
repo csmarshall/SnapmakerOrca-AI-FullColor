@@ -160,11 +160,18 @@ std::vector<std::string> tokenize_pattern_group(const std::string &group)
     return tokens;
 }
 
+// A manual pattern longer than kMaxManualPatternChars is ignored (the row resolves as if it had none).
+const std::string &pattern_of(const MixedFilament &mf)
+{
+    static const std::string k_none;
+    return mf.manual_pattern.size() > kMaxManualPatternChars ? k_none : mf.manual_pattern;
+}
+
 } // namespace
 
 bool is_engine_row(const MixedFilament &row)
 {
-    return !row.manual_pattern.empty() || !row.gradient_component_ids.empty() || !row.gradient_component_weights.empty() ||
+    return !pattern_of(row).empty() || !row.gradient_component_ids.empty() || !row.gradient_component_weights.empty() ||
            row.distribution_mode != int(MixedFilament::Simple) || row.local_z_max_sublayers != 0 || row.gradient_enabled ||
            row.component_a_surface_offset != 0.f || row.component_b_surface_offset != 0.f || row.ui_mode != -1;
 }
@@ -252,7 +259,10 @@ MixedFilamentEngine MixedFilamentEngine::from_slots(const std::vector<MixedFilam
 
     std::vector<MixedFilament> rows = slot_rows;
     size_t forced_enabled = 0;
+    size_t ignored_patterns = 0;
     for (MixedFilament &mf : rows) {
+        if (mf.manual_pattern.size() > kMaxManualPatternChars)
+            ++ignored_patterns;
         if (mf.component_a < 1 || mf.component_a > num_physical || mf.component_b < 1 || mf.component_b > num_physical) {
             rep.warnings.emplace_back("Mixed filament engine: a mixed slot names a physical filament that does not exist; engine disabled.");
             return MixedFilamentEngine();
@@ -265,6 +275,9 @@ MixedFilamentEngine MixedFilamentEngine::from_slots(const std::vector<MixedFilam
     }
     if (forced_enabled > 0)
         rep.warnings.emplace_back(std::to_string(forced_enabled) + " mixed slot row(s) were marked disabled or deleted; a slot that exists is always enabled.");
+    if (ignored_patterns > 0)
+        rep.warnings.emplace_back(std::to_string(ignored_patterns) + " mixed slot row(s) have a manual pattern longer than " +
+                                  std::to_string(kMaxManualPatternChars) + " characters; it is ignored.");
     if (total_slots > kMixedEngineMaxSlots)
         rep.warnings.emplace_back("Mixed filament engine: " + std::to_string(total_slots) + " filament slots exceed the " +
                                   std::to_string(kMixedEngineMaxSlots) + " that painting can address; ids above that cannot be painted.");
@@ -272,7 +285,9 @@ MixedFilamentEngine MixedFilamentEngine::from_slots(const std::vector<MixedFilam
     rep.valid        = true;
     rep.num_physical = num_physical;
     rep.num_mixed    = rows.size();
-    return MixedFilamentEngine(std::move(rows));
+    MixedFilamentEngine engine(std::move(rows));
+    engine.m_num_physical = num_physical;
+    return engine;
 }
 
 void MixedFilamentEngine::normalize_ratio_pair(int &a, int &b)
@@ -469,8 +484,8 @@ unsigned int MixedFilamentEngine::resolve(unsigned int filament_id, size_t num_p
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
 
     // Manual pattern takes precedence when provided.
-    if (!mf.manual_pattern.empty()) {
-        const std::string flattened_pattern = flatten_manual_pattern_groups(mf.manual_pattern);
+    if (!pattern_of(mf).empty()) {
+        const std::string flattened_pattern = flatten_manual_pattern_groups(pattern_of(mf));
         if (!flattened_pattern.empty()) {
             const std::vector<std::string> tokens = split_pattern_group_to_tokens(flattened_pattern, num_physical);
             if (!tokens.empty()) {
@@ -530,8 +545,8 @@ unsigned int MixedFilamentEngine::resolve_perimeter(unsigned int filament_id, si
         return filament_id;
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
-    if (!mf.manual_pattern.empty()) {
-        const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
+    if (!pattern_of(mf).empty()) {
+        const std::vector<std::string> pattern_groups = split_manual_pattern_groups(pattern_of(mf));
         if (!pattern_groups.empty()) {
             const size_t group_idx = size_t(std::max(0, perimeter_index));
             const std::string &group = pattern_groups[std::min(group_idx, pattern_groups.size() - 1)];
@@ -562,18 +577,19 @@ unsigned int MixedFilamentEngine::effective_painted_region_filament_id(unsigned 
     if (mf.distribution_mode == int(MixedFilament::SameLayerPointillisme))
         return filament_id;
 
-    const std::string normalized_pattern = normalize_manual_pattern(mf.manual_pattern);
+    const std::string normalized_pattern = normalize_manual_pattern(pattern_of(mf));
     if (normalized_pattern.find(',') != std::string::npos)
         return filament_id;
 
     const bool is_custom_mixed = mf.custom;
     if (!is_custom_mixed && (layer_height_a > 0.f || layer_height_b > 0.f)) {
         const float safe_base = std::max<float>(0.01f, base_layer_height);
-        // Snapmaker: max(1, lround(h / safe_base)). The quotient is capped so a hostile height cannot reach lround UB.
+        // Snapmaker: max(1, lround(h / safe_base)), a float division (it matters at .5 ties). The quotient is capped
+        // so a hostile height cannot reach lround UB.
         auto ratio_of = [safe_base](float h) {
-            double q = double(h > 0.f ? h : safe_base) / double(safe_base);
-            if (!(q <= 1e6))
-                q = 1e6;
+            float q = (h > 0.f ? h : safe_base) / safe_base;
+            if (!(q <= 1e6f))
+                q = 1e6f;
             return std::max(1, int(std::lround(q)));
         };
         const int ratio_a = ratio_of(layer_height_a);
@@ -599,7 +615,7 @@ float MixedFilamentEngine::component_surface_offset(unsigned int filament_id, si
     if (mixed_row->distribution_mode == int(MixedFilament::SameLayerPointillisme))
         return 0.f;
 
-    const std::string normalized_pattern = normalize_manual_pattern(mixed_row->manual_pattern);
+    const std::string normalized_pattern = normalize_manual_pattern(pattern_of(*mixed_row));
     if (normalized_pattern.find(',') != std::string::npos)
         return 0.f;
 
@@ -625,8 +641,8 @@ std::vector<unsigned int> MixedFilamentEngine::ordered_perimeter_extruders(unsig
     }
 
     const MixedFilament &mf = m_mixed[size_t(mixed_idx)];
-    if (!mf.manual_pattern.empty()) {
-        const std::vector<std::string> pattern_groups = split_manual_pattern_groups(mf.manual_pattern);
+    if (!pattern_of(mf).empty()) {
+        const std::vector<std::string> pattern_groups = split_manual_pattern_groups(pattern_of(mf));
         if (!pattern_groups.empty()) {
             ordered.reserve(pattern_groups.size());
             for (size_t group_idx = 0; group_idx < pattern_groups.size(); ++group_idx) {

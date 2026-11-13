@@ -19,7 +19,12 @@
 //  - every integer read from a pattern/weight token goes through parse_bounded_mixed_token (no strtoul/atoi);
 //  - cadence arithmetic is done in 64 bit and gradient height bounds are clamped to a sane finite range, so a
 //    hostile or NaN value from a project file cannot overflow or reach lround() undefined behaviour. For
-//    in-range inputs the results are identical to Snapmaker's.
+//    in-range inputs the results are identical to Snapmaker's;
+//  - gradient weights: a token of more than 5 digits invalidates the whole list, each weight is clamped to
+//    10000, more than 256 weights is invalid (MixedFilament.hpp); weights up to 10000 match Snapmaker exactly;
+//  - a manual pattern longer than kMaxManualPatternChars (256) is ignored, so ordered_perimeter_extruders
+//    cannot be driven quadratic by a huge pattern;
+//  - the painted-region cadence divides in float, as Snapmaker does (a double division flips .5 ties).
 //
 // Slot-backed view: this build keeps mixed filaments as ordinary tail slots (filament_is_mixed). The engine
 // is built over the rows of those slots with from_slots(); slot id == num_physical + 1 + k, the same numbering
@@ -61,13 +66,23 @@ public:
     // Engine over rows as Snapmaker holds them (disabled / deleted rows allowed and skipped by the numbering).
     explicit MixedFilamentEngine(std::vector<MixedFilament> rows) : m_mixed(std::move(rows)) {}
 
-    // Slot-backed adapter. `slot_rows` holds one row per mixed tail slot, in slot order; `total_slots` is the
-    // filament count of the config (physical + mixed). Disabled/deleted flags on a slot row are ignored with a
-    // warning (a slot that exists is a slot: dropping rows is the importer's job). Invalid when more rows than
-    // slots, no physical slot is left, or a row names a component outside 1..num_physical. More than
+    // Slot-backed adapter. CONTRACT: `slot_rows` holds exactly one row per mixed tail slot of the config, in slot
+    // order, INCLUDING native 2.5 mixed slots (give those a default-constructed row with the right components):
+    // dropping any shifts every later virtual id, because the engine numbers rows, not slots. `total_slots` is
+    // the filament count of the config (physical + mixed); num_physical = total_slots - slot_rows.size(), also
+    // available afterwards as num_physical() and in the report. Disabled/deleted flags on a slot row are ignored
+    // with a warning (a slot that exists is a slot: dropping rows is the importer's job). Invalid when more rows
+    // than slots, no physical slot is left, or a row names a component outside 1..num_physical. More than
     // kMixedEngineMaxSlots total slots is a warning, not an error (Extruder32 cap, painting above it is lossy).
+    // A manual pattern longer than kMaxManualPatternChars is ignored, with a warning.
+    // The view has no ratios of its own: rows keep ratio_a = ratio_b = 1 (strict A,B alternation) until
+    // apply_gradient_settings() is called, which derives them from mix_b_percent.
     static MixedFilamentEngine from_slots(const std::vector<MixedFilament> &slot_rows, size_t total_slots,
                                           MixedEngineSlotsReport *report = nullptr);
+
+    // Physical filament count when built by from_slots(); 0 (unknown) otherwise. The resolve calls still take
+    // num_physical explicitly, as in Snapmaker.
+    size_t num_physical() const { return m_num_physical; }
 
     // ---- Ratio arithmetic ----------------------------------------------------------------------------
     // gradient_mode: 0 layer-cycle weighted, 1 height weighted. Recomputes ratio_a/ratio_b of custom rows.
@@ -119,6 +134,7 @@ private:
     float                      m_height_lower_bound = 0.04f;
     float                      m_height_upper_bound = 0.16f;
     bool                       m_advanced_dithering = false;
+    size_t                     m_num_physical       = 0;
 };
 
 } // namespace Slic3r

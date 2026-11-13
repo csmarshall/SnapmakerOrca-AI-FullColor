@@ -8,6 +8,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <clocale>
+#include <limits>
 
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentLegacy.hpp"
@@ -218,7 +219,10 @@ TEST_CASE("Mixed filament rows: hostile numeric tokens neither wrap nor overflow
     CHECK(normalize_gradient_component_weights("99999999999999999999/1/1", 3).empty());
     CHECK(normalize_gradient_component_weights("2147483648/1/1", 3).empty());
     CHECK(normalize_gradient_component_weights("-5/1/1", 3) == "72/14/14"); // '-' is a separator: tokens 5,1,1
-    CHECK(normalize_gradient_component_weights("nan/inf/1e999", 3).empty());
+    // letters are separators, so "1e999" is the tokens 1 and 999
+    CHECK(normalize_gradient_component_weights("nan/inf/1e999", 3).empty());               // no digit tokens at all: count mismatch
+    CHECK(normalize_gradient_component_weights("1e999/5/5", 4) == "0/99/1/0");             // tokens 1, 999, 5, 5 (largest-remainder rounding)
+    CHECK(normalize_gradient_component_weights("1e999999/5/5", 4).empty());                // 999999 is over-long: the over-long path
     // huge but accepted weights are clamped to 10000 and the sum cannot overflow
     CHECK(normalize_gradient_component_weights("99999/99999/99999", 3) == "34/33/33");
     CHECK(normalize_gradient_component_weights("10000/10000/10000", 3) == "34/33/33");
@@ -232,8 +236,26 @@ TEST_CASE("Mixed filament rows: hostile numeric tokens neither wrap nor overflow
     CHECK(decode_gradient_component_ids(many).size() == 1);
 
     // the slice-1 parser: the same tokens in a row do not wrap into valid ids, and a negative stable id is ignored
-    CHECK(parse_mixed_filaments("1,2,1,1,50,0,g4294967297/2,w,m2,z0,xa0,xb0,d0,o0,u1", 3).size() <= 1);
+    {
+        const std::vector<MixedFilament> wrap = parse_mixed_filaments("1,2,1,1,50,0,g4294967297/2,w,m2,z0,xa0,xb0,d0,o0,u1", 3);
+        REQUIRE(wrap.size() == 1);
+        // the over-long id is dropped, not wrapped to 1: only id 2 survives normalisation
+        CHECK(decode_gradient_component_ids(wrap[0].gradient_component_ids, 3) == std::vector<unsigned>{ 2 });
+    }
+    CHECK(serialize_mixed_filaments(parse_mixed_filaments("1,2,1,1,50,0,g4294967297/2,w,m2,z0,xa0,xb0,d0,o0,u1", 3)).find("g4294967297") == std::string::npos);
     const std::vector<MixedFilament> r = parse_mixed_filaments("1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u-1", 3);
     REQUIRE(r.size() == 1);
     CHECK(r[0].stable_id == 0);
+}
+
+TEST_CASE("Mixed filament rows: a stable id at the 64-bit limit does not wrap the id counter", "[MixedFilament][rows][security]")
+{
+    MixedFilament top;
+    top.stable_id = std::numeric_limits<uint64_t>::max();
+    MixedFilament fresh;           // stable_id 0: needs a new id
+    const std::string s = serialize_mixed_filaments({ top, fresh });
+    // the counter would wrap to 0 and hand the second row id 0 (which means "unassigned"); it restarts at 1 instead
+    CHECK(s.find(",u18446744073709551615;") != std::string::npos);
+    CHECK(s.substr(s.rfind(",u") + 2) == "1");
+    CHECK(s.rfind(",u0") == std::string::npos);
 }

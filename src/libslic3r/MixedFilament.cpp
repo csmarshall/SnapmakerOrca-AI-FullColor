@@ -274,6 +274,8 @@ std::string normalize_manual_pattern(const std::string &pattern)
     std::string normalized;
     bool        group_has_content = false;
     for (size_t i = 0; i < pattern.size(); ++i) {
+        if (normalized.size() > kMaxManualPatternChars)
+            return {};
         const char c = pattern[i];
         if (c >= '1' && c <= '9') {
             normalized.push_back(c);
@@ -305,6 +307,8 @@ std::string normalize_manual_pattern(const std::string &pattern)
             return {};
         }
     }
+    if (normalized.size() > kMaxManualPatternChars)
+        return {};
     return group_has_content ? normalized : std::string();
 }
 
@@ -335,6 +339,8 @@ std::string serialize_mixed_filaments(const std::vector<MixedFilament> &rows)
             mf.stable_id = next_stable_id++;
         else if (mf.stable_id >= next_stable_id)
             next_stable_id = mf.stable_id + 1;
+        if (next_stable_id == 0)
+            next_stable_id = 1; // a row at UINT64_MAX wrapped the counter; 0 means "unassigned", restart at 1
         const std::string normalized_ids = normalize_gradient_component_ids(mf.gradient_component_ids);
         const std::string normalized_weights = normalize_gradient_component_weights(mf.gradient_component_weights, decode_gradient_component_ids(normalized_ids, 0).size());
         ss << mf.component_a << ','

@@ -83,6 +83,17 @@ template<class Mgr> std::string transcript(const Mgr &m, size_t np)
             std::snprintf(buf, sizeof buf, " e=%u e2=%u", m.effective_painted_region_filament_id(id, np, layer, z, h),
                           m.effective_painted_region_filament_id(id, np, layer, z, h, 0.4f, 0.2f, 0.2f));
             out += buf;
+            // float division ties: lround(h / base) at (near) .5 quotients (Snapmaker divides in float; the 2 * 0.02f rows are the
+            // ones where a double division gives a different integer, probed over a 0.02 grid)
+            static const float ties[][3] = { { 0.12f, 0.18f, 0.18f }, { 0.12f, 0.30f, 0.12f }, { 0.08f, 0.20f, 0.08f },
+                                             { 0.06f, 0.09f, 0.06f }, { 0.16f, 0.40f, 0.16f }, { 0.24f, 0.36f, 0.24f },
+                                             { 0.12f, 0.18f, 0.30f }, { 0.2f, 0.3f, 0.5f },
+                                             { 2 * 0.02f, 5 * 0.02f, 2 * 0.02f }, { 2 * 0.02f, 9 * 0.02f, 2 * 0.02f },
+                                             { 2 * 0.02f, 13 * 0.02f, 21 * 0.02f }, { 2 * 0.02f, 23 * 0.02f, 29 * 0.02f } };
+            for (const auto &t : ties) {
+                std::snprintf(buf, sizeof buf, " t=%u", m.effective_painted_region_filament_id(id, np, layer, z, h, t[1], t[2], t[0]));
+                out += buf;
+            }
             std::snprintf(buf, sizeof buf, " off=%.4f o=", double(m.component_surface_offset(id, np, layer, z, h)));
             out += buf;
             for (unsigned e : m.ordered_perimeter_extruders(id, np, layer, z, h)) {

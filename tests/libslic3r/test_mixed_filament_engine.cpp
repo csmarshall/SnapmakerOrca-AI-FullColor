@@ -10,6 +10,7 @@
 // cases are expectations derived by reading Snapmaker's source, or bound / safety checks with no Snapmaker side.
 #include <catch2/catch_all.hpp>
 
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <limits>
@@ -237,61 +238,101 @@ TEST_CASE("Mixed engine: surface offset follows the resolved component", "[Mixed
     CHECK(MixedFilamentEngine::canonical_signed_bias_value(9.f, 0.f) == Catch::Approx(-2.f)); // clamped to +-2
 }
 
+TEST_CASE("Mixed engine: painted-region cadence divides in float like Snapmaker (.5 ties)", "[MixedFilament][engine]")
+{
+    // Snapmaker: ratio = max(1, lround(float h / float base)). Dividing in double instead flips these ties.
+    const float ties[][3] = { { 0.12f, 0.18f, 0.12f }, { 0.12f, 0.30f, 0.12f }, { 0.08f, 0.20f, 0.08f },
+                              { 0.06f, 0.09f, 0.06f }, { 0.16f, 0.40f, 0.16f }, { 0.24f, 0.36f, 0.24f },
+                              // these flip under a double division (float 3, 5, 7, 12 vs double 2, 4, 6, 11); the values are products of
+                              // float 0.02f, as a slicer computes them, not decimal literals (0.04f != 2 * 0.02f)
+                              { 2 * 0.02f, 5 * 0.02f, 2 * 0.02f }, { 2 * 0.02f, 9 * 0.02f, 2 * 0.02f },
+                              { 2 * 0.02f, 13 * 0.02f, 2 * 0.02f }, { 2 * 0.02f, 23 * 0.02f, 2 * 0.02f } };
+    const MixedFilamentEngine e({ row(1, 2, false) });
+    for (const auto &t : ties) {
+        const float base = t[0], ha = t[1], hb = t[2];
+        INFO("base " << base << " a " << ha);
+        const int ratio_a = std::max(1, int(std::lround(ha / base))); // float / float, as in Snapmaker
+        const int ratio_b = std::max(1, int(std::lround(hb / base)));
+        int a_layers = 0;
+        for (int l = 0; l < ratio_a + ratio_b; ++l)
+            a_layers += e.effective_painted_region_filament_id(3, 2, l, 0.f, 0.2f, ha, hb, base) == 1 ? 1 : 0;
+        CHECK(a_layers == ratio_a);
+    }
+    // 5 * 0.02f / (2 * 0.02f) is 3 layers of A (a double division gives 2): A A A B
+    const float u = 0.02f;
+    CHECK(e.effective_painted_region_filament_id(3, 2, 2, 0.f, 0.2f, 5 * u, 2 * u, 2 * u) == 1);
+    CHECK(e.effective_painted_region_filament_id(3, 2, 3, 0.f, 0.2f, 5 * u, 2 * u, 2 * u) == 2);
+}
+
 TEST_CASE("Mixed engine: hostile numeric input is bounded", "[MixedFilament][engine][security]")
 {
     const float inf = std::numeric_limits<float>::infinity();
     const float nan = std::numeric_limits<float>::quiet_NaN();
 
-    // bounds from settings: NaN, inf, huge, negative must not crash or produce absurd cycles
-    for (float lo : { nan, inf, -inf, 1e30f, -5.f, 0.f })
-        for (float hi : { nan, inf, 1e30f, -1.f, 0.f }) {
-            MixedFilamentEngine e({ row(1, 2, true, 33), row(1, 2, true, 99) });
-            e.apply_gradient_settings(1, lo, hi);
-            for (const MixedFilament &mf : e.mixed_filaments()) {
-                CHECK(mf.ratio_a >= 1);
-                CHECK(mf.ratio_b >= 1);
-                CHECK(int64_t(mf.ratio_a) + mf.ratio_b < 100000);
-            }
-            const unsigned r = e.resolve(3, 2, INT_MIN, nan, inf, true);
-            CHECK((r == 1 || r == 2));
-        }
-
-    // ratios and layer index at the integer limits
+    // 64-bit cadence: with INT_MAX:INT_MAX the cycle is 2^32-2 and the first INT_MAX layers are A, the rest B.
+    // A 32-bit sum overflows to -2, takes the cycle<=0 branch and returns A everywhere.
     MixedFilament big = row(1, 2);
     big.ratio_a = INT_MAX;
     big.ratio_b = INT_MAX;
-    MixedFilamentEngine e({ big });
-    for (int layer : { INT_MIN, -1, 0, 1, INT_MAX }) {
-        const unsigned r = e.resolve(3, 2, layer);
-        CHECK((r == 1 || r == 2));
-    }
-    MixedFilamentEngine dither({ big });
+    const MixedFilamentEngine e({ big });
+    CHECK(e.resolve(3, 2, 0) == 1);
+    CHECK(e.resolve(3, 2, 1) == 1);
+    CHECK(e.resolve(3, 2, INT_MAX) == 2);   // pos = INT_MAX, not < ratio_a
+    CHECK(e.resolve(3, 2, -1) == 2);        // pos = 2^32-3
+    CHECK(e.resolve(3, 2, INT_MIN) == 1);   // pos = 2^31-2
+
+    // advanced dithering clamps ratios to 2^20 and uses 64-bit products: over one full cycle exactly ratio_b layers are B
+    MixedFilamentEngine dither({ row(1, 2) });
     dither.apply_gradient_settings(0, 0.04f, 0.16f, true);
     dither.mixed_filaments()[0].ratio_a = INT_MAX; // apply_gradient_settings recomputed them; put the hostile values back
     dither.mixed_filaments()[0].ratio_b = INT_MAX;
-    for (int layer : { INT_MIN, -1, 0, 1, INT_MAX }) {
-        const unsigned r = dither.resolve(3, 2, layer);
-        CHECK((r == 1 || r == 2));
-    }
+    constexpr int k_cycle = 1 << 21;
+    int b_layers = 0;
+    for (int layer = 0; layer < k_cycle; ++layer)
+        b_layers += dither.resolve(3, 2, layer) == 2 ? 1 : 0;
+    CHECK(b_layers == (1 << 20));
+    CHECK((dither.resolve(3, 2, INT_MAX) == 1 || dither.resolve(3, 2, INT_MAX) == 2));
 
-    // painted-region heights
-    MixedFilament a = row(1, 2, false);
-    MixedFilamentEngine pe({ a });
-    for (float h : { nan, inf, 1e30f, -1.f, 0.f })
-        for (int layer : { INT_MIN, -1, 0, INT_MAX }) {
-            const unsigned r = pe.effective_painted_region_filament_id(3, 2, layer, 0.f, 0.2f, h, h, 0.2f);
-            CHECK((r == 1 || r == 2));
+    // height bounds: a 100 mm clamp turns "mix 0 with an enormous upper bound" into exactly 10000:1;
+    // unclamped, lround() of ~1e32 is undefined behaviour
+    MixedFilamentEngine hi({ row(1, 2, true, 0) });
+    hi.apply_gradient_settings(1, 0.01f, 1e30f);
+    CHECK((hi.mixed_filaments()[0].ratio_a == 10000 && hi.mixed_filaments()[0].ratio_b == 1));
+    hi.apply_gradient_settings(1, 0.01f, inf);
+    CHECK((hi.mixed_filaments()[0].ratio_a == 16 && hi.mixed_filaments()[0].ratio_b == 1)); // non-finite -> default 0.16
+    hi.apply_gradient_settings(1, 0.01f, nan);
+    CHECK((hi.mixed_filaments()[0].ratio_a == 16 && hi.mixed_filaments()[0].ratio_b == 1));
+    hi.apply_gradient_settings(1, nan, 0.16f);   // lower bound NaN -> default 0.04
+    CHECK((hi.mixed_filaments()[0].ratio_a == 4 && hi.mixed_filaments()[0].ratio_b == 1));
+    hi.apply_gradient_settings(1, 1e30f, 1e30f); // both clamp to 100: equal heights
+    CHECK((hi.mixed_filaments()[0].ratio_a == 1 && hi.mixed_filaments()[0].ratio_b == 1));
+
+    // painted-region heights: capped at a quotient of 1e6, so 1e30 behaves exactly like 1e6 * base
+    // (base 0.5 so 5e5 / 0.5 is exactly 1e6): layers 0..999999 are A, 1000000 is B
+    const MixedFilamentEngine pe({ row(1, 2, false) });
+    for (float h : { 1e30f, inf, 5e5f })
+        for (int layer : { 0, 1, 999999 }) {
+            INFO("h " << h << " layer " << layer);
+            CHECK(pe.effective_painted_region_filament_id(3, 2, layer, 0.f, 0.2f, h, 0.5f, 0.5f) == 1);
         }
+    for (float h : { 1e30f, inf, 5e5f })
+        CHECK(pe.effective_painted_region_filament_id(3, 2, 1000000, 0.f, 0.2f, h, 0.5f, 0.5f) == 2);
+    // NaN and non-positive heights fall back to the base height (ratio 1)
+    CHECK(pe.effective_painted_region_filament_id(3, 2, 1, 0.f, 0.2f, nan, 0.5f, 0.5f) == 2);
+    CHECK(pe.effective_painted_region_filament_id(3, 2, 1, 0.f, 0.2f, -1.f, 0.5f, 0.5f) == 2);
 
     // hostile pattern and weight tokens (from a project file)
     MixedFilament p = row(1, 2);
     p.manual_pattern = "[99999999999999999999999][18446744073709551616]12";
-    MixedFilamentEngine pp({ p });
+    const MixedFilamentEngine pp({ p });
+    // tokens: the two over-long numbers, then 1, 2. Layer 0 and 1 hit over-long tokens: they do not resolve
+    // (never wrapped into a small id) so the row falls back to component A; layers 2 and 3 are 1 and 2.
     CHECK(pp.resolve(3, 2, 0) == 1);
+    CHECK(pp.resolve(3, 2, 1) == 1);
     CHECK(pp.resolve(3, 2, 2) == 1);
-    CHECK(pp.resolve(3, 2, 3) == 2); // the over-long tokens do not resolve (not wrapped to a small id); the row falls back to component A
-    CHECK(MixedFilamentEngine::physical_filament_from_token("18446744073709551617", p, 99) == 0); // would wrap to 1 with strtoul on 32 bit ids
-    CHECK(MixedFilamentEngine::physical_filament_from_token("4294967297", p, 99) == 0);            // 2^32 + 1
+    CHECK(pp.resolve(3, 2, 3) == 2);
+    CHECK(MixedFilamentEngine::physical_filament_from_token("18446744073709551617", p, 99) == 0);
+    CHECK(MixedFilamentEngine::physical_filament_from_token("4294967297", p, 99) == 0); // 2^32 + 1
     CHECK(MixedFilamentEngine::physical_filament_from_token("-1", p, 99) == 0);
     CHECK(MixedFilamentEngine::physical_filament_from_token("", p, 99) == 0);
     CHECK(decode_gradient_component_weights("99999999999999999999/1/1", 3).empty());
@@ -305,14 +346,76 @@ TEST_CASE("Mixed engine: hostile numeric input is bounded", "[MixedFilament][eng
     CHECK(!parse_bounded_mixed_token("1a", v));
     CHECK(!parse_bounded_mixed_token("+1", v));
 
-    // gradient ids from a file: huge and duplicated ids never index past the physical count
+    // gradient ids from a file: a number that would wrap to 1 is dropped, duplicates collapse, ids stay <= physical
     MixedFilament gr = row(1, 2);
     gr.distribution_mode = int(MixedFilament::LayerCycle);
-    gr.gradient_component_ids = "1/2/99999999999999999999/3/3";
+    gr.gradient_component_ids = "1/2/4294967299/3/3"; // 2^32 + 3 would wrap to 3 with a 32-bit conversion
     gr.gradient_component_weights = "1/1/1";
-    MixedFilamentEngine ge({ gr });
-    for (int l = 0; l < 6; ++l) {
-        const unsigned r = ge.resolve(4, 3, l);
-        CHECK((r >= 1 && r <= 3));
+    const MixedFilamentEngine ge({ gr });
+    std::vector<unsigned> gseq;
+    for (int l = 0; l < 3; ++l)
+        gseq.push_back(ge.resolve(4, 3, l));
+    CHECK(gseq == std::vector<unsigned>({ 1, 2, 3 })); // exactly the ids 1, 2, 3
+}
+
+TEST_CASE("Mixed engine: manual pattern length is capped", "[MixedFilament][engine][security]")
+{
+    // boundary of normalize_manual_pattern
+    CHECK(normalize_manual_pattern(std::string(kMaxManualPatternChars, '1')).size() == kMaxManualPatternChars);
+    CHECK(normalize_manual_pattern(std::string(kMaxManualPatternChars + 1, '1')).empty());
+
+    // 200 KB patterns: flat, and thousands of comma groups (ordered_perimeter_extruders is quadratic over groups)
+    std::string flat, groups;
+    for (int i = 0; i < 100000; ++i) {
+        flat += "12";
+        groups += (i ? ",1" : "1");
     }
+    CHECK(normalize_manual_pattern(flat).empty());
+    CHECK(normalize_manual_pattern(groups).empty());
+
+    const auto t0 = std::chrono::steady_clock::now();
+    for (const std::string *pat : { &flat, &groups }) {
+        MixedFilament mf = row(1, 2);
+        mf.manual_pattern = *pat;
+        const MixedFilamentEngine e({ mf });
+        // an over-long pattern is ignored: the row resolves by its ratio (1:1 default -> A, B)
+        CHECK(e.resolve(3, 2, 0) == 1);
+        CHECK(e.resolve(3, 2, 1) == 2);
+        CHECK(e.ordered_perimeter_extruders(3, 2, 0) == std::vector<unsigned>({ 1 }));
+        CHECK(e.resolve_perimeter(3, 2, 1, 5) == 2);
+        CHECK(e.effective_painted_region_filament_id(3, 2, 0) == 1);
+        CHECK(e.component_surface_offset(3, 2, 0) == 0.f);
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(secs < 1.0);
+
+    // from_slots reports a pattern it ignores, and is_engine_row no longer counts it
+    MixedFilament mf = row(1, 2);
+    mf.manual_pattern = flat;
+    MixedEngineSlotsReport rep;
+    MixedFilamentEngine::from_slots({ mf }, 3, &rep);
+    CHECK(rep.valid);
+    CHECK(rep.warnings.size() == 1);
+}
+
+TEST_CASE("Mixed engine: from_slots without apply_gradient_settings resolves 1:1", "[MixedFilament][engine]")
+{
+    // The engine has no ratio source other than apply_gradient_settings: rows keep the struct default
+    // ratio_a = ratio_b = 1, so a freshly built view alternates A, B whatever mix_b_percent says.
+    MixedEngineSlotsReport rep;
+    const MixedFilamentEngine e = MixedFilamentEngine::from_slots({ row(1, 2, true, 10) }, 3, &rep);
+    REQUIRE(rep.valid);
+    CHECK(rep.num_physical == 2);
+    CHECK(e.num_physical() == 2);
+    CHECK(e.resolve(3, 2, 0) == 1);
+    CHECK(e.resolve(3, 2, 1) == 2);
+    CHECK(e.resolve(3, 2, 2) == 1);
+    CHECK(e.resolve(3, 2, 3) == 2);
+    // after apply_gradient_settings the 10% blend becomes A x9, B x1
+    MixedFilamentEngine applied = e;
+    applied.apply_gradient_settings(0, 0.04f, 0.16f);
+    int b = 0;
+    for (int l = 0; l < 10; ++l) b += applied.resolve(3, 2, l) == 2 ? 1 : 0;
+    CHECK(b == 1);
+    CHECK(MixedFilamentEngine().num_physical() == 0); // unknown outside from_slots
 }

@@ -1,4 +1,5 @@
 #include "MixedFilamentLegacy.hpp"
+#include "MixedFilament.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -132,47 +133,6 @@ std::vector<unsigned int> decode_gradient_ids(const std::string &components)
     return ids;
 }
 
-// Snapmaker normalize_manual_pattern: digits 1-9, "[NN]" for 10..99, "," group separator; empty if invalid.
-std::string normalize_manual_pattern(const std::string &pattern)
-{
-    if (pattern.empty())
-        return {};
-    std::string normalized;
-    bool        group_has_content = false;
-    for (size_t i = 0; i < pattern.size(); ++i) {
-        const char c = pattern[i];
-        if (c >= '1' && c <= '9') {
-            normalized.push_back(c);
-            group_has_content = true;
-        } else if (c == ',') {
-            if (!group_has_content)
-                return {};
-            normalized.push_back(',');
-            group_has_content = false;
-        } else if (c == '[') {
-            size_t j = i + 1;
-            while (j < pattern.size() && pattern[j] >= '0' && pattern[j] <= '9')
-                ++j;
-            if (j == i + 1 || j >= pattern.size() || pattern[j] != ']')
-                return {};
-            const std::string num = pattern.substr(i + 1, j - i - 1);
-            if (num.size() > 2 || (num.size() > 1 && num[0] == '0') || num == "0")
-                return {};
-            if (num.size() == 1) {
-                normalized.push_back(num[0]);
-            } else {
-                normalized.push_back('[');
-                normalized.append(num);
-                normalized.push_back(']');
-            }
-            group_has_content = true;
-            i = j;
-        } else {
-            return {};
-        }
-    }
-    return group_has_content ? normalized : std::string();
-}
 
 std::vector<std::string> split_groups(const std::string &pattern)
 {

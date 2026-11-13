@@ -101,7 +101,12 @@ std::vector<unsigned int> decode_gradient_component_ids(const std::string &compo
 std::string normalize_gradient_component_ids(const std::string &components);
 // Weights to integer percentages summing to 100, "a/b/c"; empty when the count does not match.
 std::string normalize_gradient_component_weights(const std::string &weights, size_t expected_components);
-// Canonical manual pattern (digits 1-9, "[NN]" for 10..99, "," group separator); empty if invalid.
+// Longest manual pattern (normalised form) the engine accepts. Snapmaker has no limit; a pattern from an
+// untrusted project file can be hundreds of KB and ordered_perimeter_extruders is quadratic in its groups.
+// Longer patterns are rejected (normalize_manual_pattern returns empty) and ignored by the engine.
+constexpr size_t kMaxManualPatternChars = 256;
+// Canonical manual pattern (digits 1-9, "[NN]" for 10..99, "," group separator); empty if invalid or longer
+// than kMaxManualPatternChars (deliberate deviation from Snapmaker).
 std::string normalize_manual_pattern(const std::string &pattern);
 // Surface offset as Snapmaker writes it: clamped to +-2, 4 decimals, trailing zeros trimmed, "-0" -> "0".
 std::string format_surface_offset_token(float value);
@@ -113,6 +118,9 @@ constexpr size_t kMaxMixedPhysicalFilaments = 64;
 bool parse_bounded_mixed_token(const std::string &token, int &out);
 // Snapmaker decode_gradient_component_weights: the normalised percentages (sum 100), empty when the count
 // does not match expected_components or the weights are unusable.
+// Deliberate deviations from Snapmaker (strtoul/atoi there): a weight token of more than 5 digits makes the
+// whole list invalid (empty) instead of wrapping or saturating; each weight is clamped to 10000 before
+// normalisation; more than 256 weights is invalid. Weights of 10000 or less behave exactly as in Snapmaker.
 std::vector<int> decode_gradient_component_weights(const std::string &weights, size_t expected_components); // Snapmaker MixedFilamentManager::kMaxPhysicalFilaments
 
 // The row string Snapmaker writes into mixed_filament_definitions: rows joined by ';'. Mirrors
