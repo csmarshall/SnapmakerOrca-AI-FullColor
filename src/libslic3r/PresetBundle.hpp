@@ -478,6 +478,8 @@ public:
     // then move the new slots ahead of the mixed tail, as Sidebar::add_custom_filament does.
     void            set_num_filaments(unsigned int n, std::string new_col = "");
     void         update_num_filaments(unsigned int to_del_flament_id);
+    // Set by update_num_filaments: engine mixed slots that lost their Snapmaker recipe because it used the deleted filament.
+    std::vector<std::string> last_delete_mixed_warnings;
 
     void get_ams_cobox_infos(AMSComboInfo &combox_info);
     unsigned int sync_ams_list(std::vector<std::pair<DynamicPrintConfig *,std::string>> &unknowns, bool use_map, std::map<int, AMSMapInfo> &maps, bool enable_append, MergeFilamentInfo &merge_info, bool color_only = false, SpoolmanTierReport *spoolman_report = nullptr);

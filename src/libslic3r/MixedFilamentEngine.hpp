@@ -182,13 +182,17 @@ unsigned int mixed_engine_resolve_layer(const MixedFilamentEngine &engine, const
 // Never throws on bad input.
 MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngineSlotsReport *report = nullptr);
 
-// Remaps component references inside engine-row strings after a PHYSICAL filament is deleted, the way
-// remap_mixed_components_on_delete does for filament_mixed_components: the deleted id becomes 0 in the row's
-// components (the row then no longer parses, so the engine is disabled with a warning rather than guessing),
-// higher ids shift down by one. A gradient id list or manual pattern that names the deleted id is cleared;
-// otherwise its ids shift. Rows that are empty, on non-mixed slots, or unparseable are left alone.
+// Fixes engine-row strings after a PHYSICAL filament is deleted, following Snapmaker's remove_physical_filament
+// (check order and adjust rules): a manual pattern naming the deleted id (tokens "1"/"2" are the symbolic A/B), or,
+// without a pattern, a gradient id list or a pair naming it, makes Snapmaker DROP the row. We keep the slot (dropping
+// it would renumber every later slot and paint id): its marker is cleared so it becomes a native 2.5 mix, and if
+// `components` is given its string becomes the surviving ids (shifted down; padded with a 0 sentinel to two entries),
+// with a user-facing line pushed to `warnings`. Every other row keeps its meaning: with a pattern the pair is left
+// alone and the gradient ids lose the deleted one; without a pattern the pair and gradient ids shift down.
+// Rows that are empty, on non-mixed slots, or unparseable are left alone.
 void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,
-                                       unsigned int del_1based);
+                                       unsigned int del_1based, std::vector<std::string> *components = nullptr,
+                                       std::vector<std::string> *warnings = nullptr);
 
 // Clears the engine marker of one slot (the slot becomes a native 2.5 mix). Called when the user edits the slot's
 // mix in the UI or a published native mix is applied onto it: the old Snapmaker row no longer describes the slot.
@@ -197,7 +201,7 @@ bool clear_mixed_engine_marker(ConfigBase &config, size_t slot);
 
 // Slots (0-based) whose engine marker is in a state that disables the engine: empty when every marker is empty
 // (native project) or the engine builds cleanly; otherwise every slot carrying a non-empty marker, since
-// mixed_engine_from_config switches the engine off as a whole. why (optional) receives the first warning.
+// a structural problem switches the engine off as a whole. why (optional) receives the first warning.
 std::vector<size_t> mixed_engine_marker_problem_slots(const ConfigBase &config, std::string *why = nullptr);
 
 // Moves the last (total - insert_pos) entries of every per-slot filament array to sit at insert_pos, so a physical

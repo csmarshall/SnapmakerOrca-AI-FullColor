@@ -4562,8 +4562,14 @@ void PresetBundle::update_num_filaments(unsigned int to_del_flament_id)
             bool del_is_physical = (to_del_flament_id >= is_mixed_opt->values.size()
                                     || !is_mixed_opt->values[to_del_flament_id]);
             if (del_is_physical)
+            {
+                last_delete_mixed_warnings.clear();
                 remap_mixed_engine_rows_on_delete(is_mixed_opt->values, engine_row_opt->values,
-                                                  to_del_flament_id + 1);
+                                                  to_del_flament_id + 1, comp_opt ? &comp_opt->values : nullptr,
+                                                  &last_delete_mixed_warnings);
+                for (const std::string &w : last_delete_mixed_warnings)
+                    BOOST_LOG_TRIVIAL(warning) << w;
+            }
         }
         if (is_mixed_opt)
             erase_or_resize(is_mixed_opt->values);

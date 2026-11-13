@@ -6,6 +6,7 @@
 // transcripts of test_mixed_filament_engine.cpp pin the arithmetic, not this plumbing.
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -153,11 +154,6 @@ TEST_CASE("mixed_engine_from_config: inconsistent or malformed input gives an em
         CHECK(rep.warnings.size() >= 1);
     };
 
-    SECTION("malformed row") { expect_disabled(config_with(4, { {"1,2", kRowA}, {"1,3", "not a row"} })); }
-    SECTION("truncated row") { expect_disabled(config_with(4, { {"1,2", "1,2,1"} })); }
-    SECTION("component outside the physical range") { expect_disabled(config_with(4, { {"1,2", "1,9,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1"} })); }
-    SECTION("component zero (deleted sentinel)") { expect_disabled(config_with(4, { {"0,2", "0,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1"} })); }
-    SECTION("several rows in one marker") { expect_disabled(config_with(4, { {"1,2", std::string(std::string(kRowA) + ";" + kRowB).c_str()} })); }
     SECTION("marker on a physical slot")
     {
         DynamicPrintConfig c = config_with(4, { {"1,2", kRowA} });
@@ -190,6 +186,31 @@ TEST_CASE("mixed_engine_from_config: inconsistent or malformed input gives an em
     }
 }
 
+TEST_CASE("mixed_engine_from_config: an unusable row demotes only its own slot to native", "[MixedFilament][EngineConfig]")
+{
+    // Structural problems stay fail-closed (tests above); a bad single row must not switch the good rows off.
+    const std::vector<std::pair<const char *, std::string>> bad = {
+        { "malformed", "not a row" },
+        { "truncated", "1,2,1" },
+        { "component outside the physical range", "1,9,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1" },
+        { "component zero (deleted sentinel)", "0,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1" },
+        { "several rows in one marker", std::string(kRowA) + ";" + kRowB },
+    };
+    for (const auto &[name, text] : bad) {
+        INFO(name);
+        MixedEngineSlotsReport rep;
+        const MixedFilamentEngine e = mixed_engine_from_config(config_with(4, { {"1,2", kRowA}, {"3,4", text.c_str()} }), &rep);
+        CHECK(rep.valid);
+        REQUIRE(e.mixed_filaments().size() == 2);
+        CHECK(e.is_engine_row(0));
+        CHECK_FALSE(e.is_engine_row(1));
+        CHECK(e.mixed_filaments()[1].component_a == 3); // placeholder takes the native components
+        CHECK(e.mixed_filaments()[1].component_b == 4);
+        REQUIRE(rep.warnings.size() == 1);
+        CHECK(rep.warnings[0].find("slot 6") != std::string::npos);
+    }
+}
+
 TEST_CASE("mixed_engine_from_config: hostile strings", "[MixedFilament][EngineConfig]")
 {
     auto build = [](const std::string &row) {
@@ -197,12 +218,13 @@ TEST_CASE("mixed_engine_from_config: hostile strings", "[MixedFilament][EngineCo
         MixedFilamentEngine e = mixed_engine_from_config(config_with(4, { {"1,2", row.c_str()} }), &rep);
         return std::make_pair(rep.valid, e.mixed_filaments().size());
     };
-    CHECK(build(std::string(100000, '1')) == std::make_pair(false, size_t(0)));
-    CHECK(build(std::string(100000, ',')) == std::make_pair(false, size_t(0)));
+    // An unusable row demotes its own slot to native (valid engine, one placeholder row), see the per-row test below.
+    CHECK(build(std::string(100000, '1')) == std::make_pair(true, size_t(1)));
+    CHECK(build(std::string(100000, ',')) == std::make_pair(true, size_t(1)));
     CHECK(build("1,2,1,1,99999999999999999999,0,g,w,m2,z0,xa0,xb0,d0,o0,u1") .second <= 1);
     CHECK(build("1,2,1,1,50,0,g,w,m2,z-5,xa1e999,xb-nan,d0,o0,u18446744073709551616").second <= 1);
     CHECK(build(std::string("1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1,") + std::string(5000, '[') ).second <= 1);
-    CHECK(build(std::string("\0\0\0,1,2", 7)).first == false);
+    CHECK(build(std::string("\0\0\0,1,2", 7)).second <= 1);
     CHECK(build("1,2,1,1,50,0,g1111111111111111111111,w1/1/1,m9,z0,xa0,xb0,d0,o0,u1").second <= 1);
 }
 
@@ -333,44 +355,40 @@ TEST_CASE("Deleting a physical filament remaps component ids inside engine rows"
     const std::string rowD = "2,4,1,1,50,0,g234,w40/30/30,m2,z0,xa0,xb0,d0,o0,u7,3,2,[10]4";
     std::vector<std::string> rows = {"", "", "", "", kRowA, "", rowD};
 
-    SECTION("deleting a filament below the references shifts them down")
+    SECTION("a pair row naming the deleted filament is dropped by Snapmaker; here its slot goes native and the others keep working")
     {
-        remap_mixed_engine_rows_on_delete(is_mixed, rows, 1); // delete filament 1 (0-based 0)
-        CHECK(rows[5].empty());                                // native slot untouched
-        CHECK(rows[4].rfind("0,1,", 0) == 0); // component 1 was the deleted filament -> 0; component 2 shifted to 1
-        CHECK(parse_mixed_filaments(rows[4], 4).empty()); // so the row no longer parses
+        std::vector<std::string> comps = {"", "", "", "", "1,2", "3,4", "2,4"};
+        std::vector<std::string> warn;
+        remap_mixed_engine_rows_on_delete(is_mixed, rows, 1, &comps, &warn); // delete filament 1
+        CHECK(rows[4].empty());      // kRowA used filament 1: marker cleared
+        CHECK(comps[4] == "1,0");    // only old filament 2 (now 1) survives; 0 sentinel
+        CHECK(warn.size() == 1);
+        CHECK(comps[5] == "3,4");    // native slot untouched
     }
     SECTION("references above the deleted id shift down, gradient ids and pattern included")
     {
         remap_mixed_engine_rows_on_delete(is_mixed, rows, 1);
         const std::vector<MixedFilament> d = parse_mixed_filaments(rows[6], 12);
         REQUIRE(d.size() == 1);
-        CHECK(d[0].component_a == 1);
-        CHECK(d[0].component_b == 3);
+        CHECK(d[0].component_a == 2);   // a pattern row: the pair is left alone (Snapmaker), it is not shifted
+        CHECK(d[0].component_b == 4);
         CHECK(d[0].gradient_component_ids == "123");
         CHECK(d[0].gradient_component_weights == "40/30/30");
         CHECK(d[0].manual_pattern == "2,1,93"); // [10] shifts to 9, which is a single-digit token
     }
-    SECTION("a gradient or pattern that names the deleted id is cleared, not corrupted")
+    SECTION("a pattern that names the deleted id drops the row (slot goes native), it is not silently recoloured")
     {
         remap_mixed_engine_rows_on_delete(is_mixed, rows, 3);
-        const std::vector<MixedFilament> d = parse_mixed_filaments(rows[6], 12);
-        REQUIRE(d.size() == 1);
-        CHECK(d[0].component_a == 2);
-        CHECK(d[0].component_b == 3);
-        CHECK(d[0].gradient_component_ids.empty());
-        CHECK(d[0].manual_pattern.empty());
+        CHECK(rows[6].empty());
     }
-    SECTION("a row naming the deleted filament as a component disables the engine with a warning")
+    SECTION("a row naming the deleted filament no longer disables the whole engine")
     {
-        DynamicPrintConfig c = config_with(4, { {"1,2", kRowA} });
+        DynamicPrintConfig c = config_with(4, { {"1,2", kRowA}, {"3,4", kRowB} });
         std::vector<std::string> r = c.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
-        remap_mixed_engine_rows_on_delete(c.option<ConfigOptionBools>("filament_is_mixed")->values, r, 2);
-        c.option<ConfigOptionStrings>("filament_mixed_engine_row")->values = r;
-        MixedEngineSlotsReport rep;
-        CHECK(mixed_engine_from_config(c, &rep).mixed_filaments().empty());
-        CHECK_FALSE(rep.valid);
-        CHECK(rep.warnings.size() == 1);
+        std::vector<std::string> comps = c.option<ConfigOptionStrings>("filament_mixed_components")->values;
+        remap_mixed_engine_rows_on_delete(c.option<ConfigOptionBools>("filament_is_mixed")->values, r, 2, &comps);
+        CHECK(r[4].empty());   // kRowA (1,2) used 2
+        CHECK_FALSE(r[5].empty()); // kRowB (1,3) did not
     }
     SECTION("garbage rows are left alone")
     {
@@ -419,9 +437,13 @@ TEST_CASE("mixed_engine_marker_problem_slots flags a disabled engine, not a nati
     std::string why;
     CHECK(mixed_engine_marker_problem_slots(config_with(4, { {"1,2", ""} }), &why).empty());
     CHECK(mixed_engine_marker_problem_slots(config_with(4, { {"1,2", kRowA} }), &why).empty());
-    DynamicPrintConfig bad = config_with(4, { {"1,2", kRowA}, {"3,4", "garbage"} });
+    // A single garbage row only demotes its own slot; the engine stays on, so nothing is flagged.
+    CHECK(mixed_engine_marker_problem_slots(config_with(4, { {"1,2", kRowA}, {"3,4", "garbage"} }), &why).empty());
+    // A structural problem (marker on a physical slot) switches the engine off: every marker slot is flagged.
+    DynamicPrintConfig bad = config_with(4, { {"1,2", kRowA}, {"3,4", kRowB} });
+    bad.option<ConfigOptionStrings>("filament_mixed_engine_row")->values[0] = kRowC;
     const std::vector<size_t> slots = mixed_engine_marker_problem_slots(bad, &why);
-    CHECK(slots == std::vector<size_t>{ 4, 5 });
+    CHECK(slots == std::vector<size_t>{ 0, 4, 5 });
     CHECK_FALSE(why.empty());
 }
 
@@ -539,4 +561,163 @@ TEST_CASE("sync_ams_list strips and re-appends mixed slots carrying their engine
         else CHECK(rows[i].empty());
     }
     CHECK(mixed == 1);
+}
+
+// ---- Deleting a physical filament: per-layer resolve sequences before and after -----------------------------
+//
+// The expectations come from Snapmaker's remove_physical_filament rules (check order and adjust rules ported
+// verbatim), so these tests prove AGREEMENT with Snapmaker's rules, not that those rules are right: a rule that is
+// wrong in Snapmaker (e.g. a pattern row whose pair is not 1,2 keeps its pair unshifted) is pinned here as it is.
+// They also cannot see a slot the engine and the slicer number differently; that needs a slice.
+namespace {
+
+// Physical ids a mixed slot (0-based k within the mixed tail) resolves to on layers 0..n-1, as the slicer would ask.
+std::vector<unsigned int> resolve_sequence(const ConfigBase &config, size_t k, int n = 24)
+{
+    MixedEngineSlotsReport rep;
+    const MixedFilamentEngine e = mixed_engine_from_config(config, &rep);
+    std::vector<unsigned int> out;
+    if (!rep.valid)
+        return out;
+    const MixedEngineGlobals g = mixed_engine_globals_from_config(config);
+    const size_t np = rep.num_physical;
+    for (int layer = 0; layer < n; ++layer)
+        out.push_back(mixed_engine_resolve_layer(e, g, unsigned(np + 1 + k), np, layer, 0.2f * float(layer + 1), 0.2f, 0.2f));
+    return out;
+}
+
+struct Deleted
+{
+    std::vector<std::vector<unsigned int>> before, after;
+    std::vector<std::string>               rows_after, comps_after;
+    std::vector<std::string>               warnings;
+    bool                                   after_valid = false;
+};
+
+// 5 physical + the given rows (ids 6..); deletes physical `del` (1-based) through PresetBundle::update_num_filaments.
+Deleted delete_physical(const std::vector<SlotSpec> &mixed, unsigned del)
+{
+    Deleted d;
+    const DynamicPrintConfig before_cfg = config_with(5, mixed);
+    for (size_t k = 0; k < mixed.size(); ++k)
+        d.before.push_back(resolve_sequence(before_cfg, k));
+
+    PresetBundle bundle;
+    bundle.set_num_filaments(unsigned(5 + mixed.size()), std::string("#FF0000"));
+    for (const char *key : { "filament_is_mixed", "filament_mixed_components", "filament_mixed_engine_row" })
+        bundle.project_config.set_key_value(key, before_cfg.option(key)->clone());
+    bundle.update_num_filaments(del - 1);
+    d.rows_after  = bundle.project_config.option<ConfigOptionStrings>("filament_mixed_engine_row")->values;
+    d.comps_after = bundle.project_config.option<ConfigOptionStrings>("filament_mixed_components")->values;
+    d.warnings    = bundle.last_delete_mixed_warnings;
+    MixedEngineSlotsReport rep;
+    mixed_engine_from_config(bundle.project_config, &rep);
+    d.after_valid = rep.valid;
+    for (size_t k = 0; k < mixed.size(); ++k)
+        d.after.push_back(resolve_sequence(bundle.project_config, k));
+    return d;
+}
+
+std::vector<unsigned int> shifted_down(std::vector<unsigned int> v, unsigned del)
+{
+    for (unsigned int &x : v)
+        if (x > del)
+            --x;
+    return v;
+}
+
+// pair a,b / enabled / custom / mix% / pattern / gradient ids+weights
+std::string row_text(unsigned a, unsigned b, const std::string &pattern = "0", const std::string &g = "g", const std::string &w = "w", const char *mode = "m2")
+{
+    return std::to_string(a) + "," + std::to_string(b) + ",1,1,50," + pattern + "," + g + "," + w + "," + mode + ",z0,xa0,xb0,d0,o0,u";
+}
+
+} // namespace
+
+TEST_CASE("Deleting a physical filament: resolve sequences of unaffected rows are unchanged (shifted ids only)", "[MixedFilament][EngineConfig][Bundle]")
+{
+    const std::string pair35  = row_text(3, 5) + "1";
+    const std::string pat     = row_text(1, 2, "1244") + "2"; // symbolic 1/2 plus literal 4 and 4
+    const std::string grad    = row_text(1, 2, "0", "g134", "w50/25/25,r1/0.2/0.8", "m0") + "3";
+    const Deleted e = delete_physical({ {"3,5", pair35.c_str()}, {"1,2", pat.c_str()}, {"1,3", grad.c_str()} }, 5);
+    REQUIRE(e.after_valid);
+    // the gradient row really resolves through its ids (3 appears), not just through its pair
+    { std::string dbg; for (auto x : e.before[2]) dbg += std::to_string(x) + " "; INFO(dbg); CHECK(std::count(e.before[2].begin(), e.before[2].end(), 3u) > 0); }
+    // 5 is used by pair35 -> that one is dropped; the other two do not use 5
+    CHECK(e.rows_after[4].empty());
+    for (size_t k : { size_t(1), size_t(2) }) {
+        INFO("row " << k);
+        REQUIRE_FALSE(e.before[k].empty());
+        CHECK(e.after[k] == shifted_down(e.before[k], 5));
+    }
+}
+
+TEST_CASE("Deleting a physical filament: a row using the deleted id is dropped to native, the rest of the engine survives", "[MixedFilament][EngineConfig][Bundle]")
+{
+    const std::string keep = row_text(3, 5) + "1";
+    const std::string keep45 = row_text(4, 5) + "1";
+    SECTION("(a) pair names the deleted id")
+    {
+        const std::string hit = row_text(2, 4) + "2";
+        const Deleted d = delete_physical({ {"3,5", keep.c_str()}, {"2,4", hit.c_str()} }, 2);
+        CHECK(d.after_valid); // used to switch the whole engine off
+        CHECK(d.after[0] == shifted_down(d.before[0], 2));
+        CHECK(d.rows_after[5].empty()); // the slot is kept (6 -> index 4 after the delete) ...
+        CHECK_FALSE(d.rows_after[4].empty());
+        CHECK(d.comps_after[5] == "3,0"); // ... as a native mix: old 4 -> 3, old 2 deleted
+        REQUIRE(d.warnings.size() == 1);
+        CHECK(d.warnings[0].find("Mixed slot 7") != std::string::npos);
+    }
+    SECTION("(c) pattern names the deleted id literally")
+    {
+        const std::string hit = row_text(1, 2, "1244") + "2";
+        const Deleted d = delete_physical({ {"3,5", keep.c_str()}, {"1,2", hit.c_str()} }, 4);
+        CHECK(d.after_valid);
+        CHECK(d.rows_after[5].empty());
+        CHECK(d.after[0] == shifted_down(d.before[0], 4));
+        CHECK(d.comps_after[5] == "1,2"); // survivors of {1,2,4,4} minus 4
+    }
+    SECTION("(c) pattern names the deleted id as symbolic A/B, not as a literal 1/2")
+    {
+        // pair 3,4 with pattern 1122: the symbols mean filaments 3 and 4. Deleting filament 1 or 2 is irrelevant to it.
+        const std::string row = row_text(3, 4, "1122") + "2";
+        const Deleted irrelevant = delete_physical({ {"3,5", keep.c_str()}, {"3,4", row.c_str()} }, 1);
+        CHECK_FALSE(irrelevant.rows_after[5].empty());
+        CHECK(irrelevant.after_valid);
+        const Deleted hit = delete_physical({ {"4,5", keep45.c_str()}, {"3,4", row.c_str()} }, 3);
+        CHECK(hit.rows_after[5].empty()); // symbolic 1 is filament 3
+        CHECK(hit.after_valid);
+    }
+    SECTION("(d) gradient ids name the deleted id and there is no pattern")
+    {
+        const std::string hit = row_text(1, 2, "0", "g134", "w50/25/25,r1/0.2/0.8", "m0") + "2";
+        const Deleted d = delete_physical({ {"4,5", keep45.c_str()}, {"1,2", hit.c_str()} }, 3);
+        CHECK(d.after_valid);
+        CHECK(d.rows_after[5].empty());
+        CHECK(d.comps_after[5] == "1,3"); // 1 and 4 survive, 4 shifts down to 3
+        CHECK(d.after[0] == shifted_down(d.before[0], 3));
+    }
+}
+
+TEST_CASE("Deleting a physical filament: pattern rows keep their pair and lose only the deleted gradient id", "[MixedFilament][EngineConfig][Bundle]")
+{
+    // (b) pattern row: Snapmaker leaves component_a/b alone, whatever their value
+    const std::string row = row_text(1, 2, "1233", "g134", "w50/25/25,r1/0.2/0.8", "m0") + "2";
+    const Deleted d = delete_physical({ {"1,2", row.c_str()} }, 4);
+    REQUIRE(d.after_valid);
+    CHECK(d.after[0] == shifted_down(d.before[0], 4)); // resolve is by the pattern: 1,2,3,3 unchanged
+    const auto r = parse_mixed_filaments(d.rows_after[4], 5);
+    REQUIRE(r.size() == 1);
+    CHECK(r[0].component_a == 1);
+    CHECK(r[0].component_b == 2);
+    CHECK(r[0].manual_pattern == "1233");
+    CHECK(r[0].gradient_component_ids == "13"); // 4 erased; the weights are left as they were (Snapmaker)
+
+    // The pinned Snapmaker quirk: a pattern row whose pair is not 1,2 keeps its pair unshifted.
+    const std::string odd = row_text(4, 5, "1122") + "3";
+    const Deleted q = delete_physical({ {"4,5", odd.c_str()} }, 1);
+    const auto qr = parse_mixed_filaments(q.rows_after[4], 5);
+    REQUIRE(qr.size() == 1);
+    CHECK(qr[0].component_a == 4);
+    CHECK(qr[0].component_b == 5);
 }

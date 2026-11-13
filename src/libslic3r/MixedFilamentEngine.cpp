@@ -693,32 +693,6 @@ std::string pattern_token(unsigned int n)
     return n >= 10 ? "[" + std::to_string(n) + "]" : std::string(1, char('0' + n));
 }
 
-std::string remap_pattern_on_delete(const std::string &pattern, unsigned int del, bool &names_deleted)
-{
-    std::string out;
-    for (size_t i = 0; i < pattern.size(); ++i) {
-        const char c = pattern[i];
-        if (c == ',') {
-            out.push_back(c);
-        } else if (c >= '1' && c <= '9') {
-            const unsigned int id = unsigned(c - '0');
-            if (id == del) { names_deleted = true; return {}; }
-            out.append(pattern_token(id > del ? id - 1 : id));
-        } else if (c == '[') {
-            const size_t j = pattern.find(']', i);
-            int id = 0;
-            if (j == std::string::npos || !parse_bounded_mixed_token(pattern.substr(i + 1, j - i - 1), id))
-                return pattern;
-            if (unsigned(id) == del) { names_deleted = true; return {}; }
-            out.append(pattern_token(unsigned(id) > del ? unsigned(id) - 1 : unsigned(id)));
-            i = j;
-        } else {
-            return pattern;
-        }
-    }
-    return out;
-}
-
 } // namespace
 
 MixedEngineGlobals mixed_engine_globals_from_config(const ConfigBase &config, std::vector<std::string> *warnings)
@@ -789,6 +763,8 @@ MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngi
             return fail("physical slot " + std::to_string(i + 1) + " carries an engine row");
 
     std::vector<MixedFilament> slot_rows;
+    std::vector<std::string>   row_warnings;
+    std::vector<bool>          demoted(num_mixed, false);
     slot_rows.reserve(num_mixed);
     for (size_t i = num_physical; i < total; ++i) {
         const std::string text = i < rows_opt->values.size() ? rows_opt->values[i] : std::string();
@@ -801,10 +777,24 @@ MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngi
             mf.component_a = (c.size() >= 2 && c[0] >= 1 && c[0] <= num_physical) ? c[0] : 1;
             mf.component_b = (c.size() >= 2 && c[1] >= 1 && c[1] <= num_physical) ? c[1] : 1;
         } else {
+            // Per-row failure: one unusable row must not switch the other rows off. The slot falls back to a native
+            // 2.5 mix (placeholder row, marker ignored) and the user is told. Only structural problems (checked
+            // above and in from_slots) disable the whole engine, because they break the slot-id arithmetic.
             LegacyMixedRow r;
-            if (text.size() > 4096 || text.find(';') != std::string::npos || !parse_legacy_mixed_row(text, r))
-                return fail("the engine row of slot " + std::to_string(i + 1) + " is malformed");
-            mf = mixed_filament_from_legacy_row(r);
+            const bool parsed = text.size() <= 4096 && text.find(';') == std::string::npos && parse_legacy_mixed_row(text, r);
+            mf = parsed ? mixed_filament_from_legacy_row(r) : MixedFilament();
+            if (!parsed || mf.component_a < 1 || mf.component_a > num_physical || mf.component_b < 1 || mf.component_b > num_physical) {
+                row_warnings.push_back("Mixed filament engine: the engine row of slot " + std::to_string(i + 1) +
+                                       (parsed ? " names a physical filament that does not exist" : " is malformed") +
+                                       "; the slot is used as a native mix instead.");
+                std::vector<unsigned int> c;
+                if (comps != nullptr && i < comps->values.size())
+                    c = parse_mixed_components(comps->values[i]);
+                mf = MixedFilament();
+                mf.component_a = (c.size() >= 2 && c[0] >= 1 && c[0] <= num_physical) ? c[0] : 1;
+                mf.component_b = (c.size() >= 2 && c[1] >= 1 && c[1] <= num_physical) ? c[1] : 1;
+                demoted[i - num_physical] = true;
+            }
         }
         slot_rows.push_back(std::move(mf));
     }
@@ -814,9 +804,10 @@ MixedFilamentEngine mixed_engine_from_config(const ConfigBase &config, MixedEngi
     rep = inner;
     if (!inner.valid)
         return MixedFilamentEngine();
+    rep.warnings.insert(rep.warnings.end(), row_warnings.begin(), row_warnings.end());
     std::vector<bool> engine_rows(num_mixed, false);
     for (size_t k = 0; k < num_mixed; ++k)
-        engine_rows[k] = num_physical + k < rows_opt->values.size() && !rows_opt->values[num_physical + k].empty();
+        engine_rows[k] = !demoted[k] && num_physical + k < rows_opt->values.size() && !rows_opt->values[num_physical + k].empty();
     engine.set_engine_rows(std::move(engine_rows));
 
     const MixedEngineGlobals g = mixed_engine_globals_from_config(config, &rep.warnings);
@@ -891,8 +882,10 @@ void rotate_new_filament_before_mixed(ConfigBase &config, size_t insert_pos, siz
 }
 
 void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixed, std::vector<std::string> &rows,
-                                       unsigned int del_1based)
+                                       unsigned int del_1based, std::vector<std::string> *components,
+                                       std::vector<std::string> *warnings)
 {
+    constexpr size_t k_max_ids = 99; // the largest id a '[NN]' pattern token can carry
     for (size_t i = 0; i < rows.size() && i < is_mixed.size(); ++i) {
         if (!is_mixed[i] || rows[i].empty())
             continue;
@@ -900,26 +893,82 @@ void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixe
         if (rows[i].size() > 4096 || rows[i].find(';') != std::string::npos || !parse_legacy_mixed_row(rows[i], r))
             continue;
         MixedFilament mf = mixed_filament_from_legacy_row(r);
-        auto remap = [del_1based](unsigned int id) { return id == del_1based ? 0u : (id > del_1based ? id - 1 : id); };
-        mf.component_a = remap(mf.component_a);
-        mf.component_b = remap(mf.component_b);
+        auto down = [del_1based](unsigned int id) { return id > del_1based ? id - 1 : id; };
 
-        if (!mf.gradient_component_ids.empty()) {
-            std::vector<unsigned int> ids = decode_gradient_component_ids(mf.gradient_component_ids, 0);
-            if (std::find(ids.begin(), ids.end(), del_1based) != ids.end()) {
-                mf.gradient_component_ids.clear();
-                mf.gradient_component_weights.clear();
-            } else {
-                for (unsigned int &id : ids)
-                    id = remap(id);
-                mf.gradient_component_ids = encode_gradient_component_ids(ids);
-            }
+        // Snapmaker's MixedFilamentManager::remove_physical_filament, check order and adjust rules as in
+        // MixedFilament.cpp: (1) manual pattern, (2) gradient ids (only without a pattern), (3) pair (only without
+        // a pattern). Tokens "1"/"2" of a pattern are the symbolic A/B, not literal ids.
+        const std::string norm = normalize_manual_pattern(mf.manual_pattern);
+        std::vector<std::string> pattern_groups;
+        std::vector<unsigned int> used; // physical ids the row resolves to, in order, before the delete
+        if (!norm.empty()) {
+            pattern_groups = MixedFilamentEngine::split_pattern_groups(norm);
+            for (const std::string &g : pattern_groups)
+                for (const std::string &t : tokenize_pattern_group(g)) {
+                    const unsigned int id = MixedFilamentEngine::physical_filament_from_token(t, mf, k_max_ids);
+                    if (id != 0)
+                        used.push_back(id);
+                }
         }
-        if (!mf.manual_pattern.empty()) {
-            bool names_deleted = false;
-            mf.manual_pattern  = remap_pattern_on_delete(mf.manual_pattern, del_1based, names_deleted);
-            if (names_deleted)
-                mf.manual_pattern.clear();
+        const std::vector<unsigned int> grad_ids = decode_gradient_component_ids(mf.gradient_component_ids, 0);
+        bool drop = std::find(used.begin(), used.end(), del_1based) != used.end();
+        if (norm.empty()) {
+            used = grad_ids.empty() ? std::vector<unsigned int>{ mf.component_a, mf.component_b } : grad_ids;
+            drop = std::find(grad_ids.begin(), grad_ids.end(), del_1based) != grad_ids.end() ||
+                   mf.component_a == del_1based || mf.component_b == del_1based;
+        }
+
+        if (drop) {
+            // Snapmaker drops the row. Dropping a slot would renumber every later slot and paint id, so the slot is kept
+            // and becomes a native 2.5 mix of the surviving components instead (a single survivor leaves it native
+            // with that one component and a 0 sentinel, which is what remap_mixed_components_on_delete uses).
+            std::vector<unsigned int> survivors;
+            for (unsigned int id : used)
+                if (id != del_1based && id != 0 && std::find(survivors.begin(), survivors.end(), down(id)) == survivors.end())
+                    survivors.push_back(down(id));
+            if (components != nullptr && i < components->size()) {
+                std::string c;
+                for (unsigned int id : survivors)
+                    c += (c.empty() ? "" : ",") + std::to_string(id);
+                if (survivors.size() < 2)
+                    c += (c.empty() ? "0" : ",0");
+                (*components)[i] = c;
+            }
+            if (warnings != nullptr)
+                warnings->push_back("Mixed slot " + std::to_string(i + 1) + " used the deleted filament " + std::to_string(del_1based) +
+                                    "; Snapmaker's recipe for it is gone and the slot is now a native mix of " +
+                                    (survivors.size() >= 2 ? "its remaining filaments." : "one remaining filament (pick a second one)."));
+            rows[i].clear();
+            continue;
+        }
+
+        if (!norm.empty()) {
+            // Pair left alone (A/B are symbolic in a pattern). Every token is adjusted as a literal id, as Snapmaker does.
+            std::string adjusted;
+            for (size_t gi = 0; gi < pattern_groups.size(); ++gi) {
+                if (gi > 0)
+                    adjusted += ',';
+                for (const std::string &t : tokenize_pattern_group(pattern_groups[gi])) {
+                    int id = 0;
+                    if (parse_bounded_mixed_token(t, id) && unsigned(id) > del_1based)
+                        adjusted += pattern_token(unsigned(id) - 1);
+                    else
+                        adjusted += t.size() > 1 ? "[" + t + "]" : t;
+                }
+            }
+            mf.manual_pattern = adjusted;
+        } else {
+            mf.component_a = down(mf.component_a);
+            mf.component_b = down(mf.component_b);
+        }
+        // Gradient ids: with a pattern the deleted id is erased (the pattern is what resolves), then all shift down.
+        if (!mf.gradient_component_ids.empty()) {
+            std::vector<unsigned int> ids = grad_ids;
+            if (!norm.empty())
+                ids.erase(std::remove(ids.begin(), ids.end(), del_1based), ids.end());
+            for (unsigned int &id : ids)
+                id = down(id);
+            mf.gradient_component_ids = encode_gradient_component_ids(ids);
         }
         // serialize_mixed_filaments gives a row without a stable id the id 1; done per row that would put the same id on
         // every such row. Give it the same unique id the legacy conversion would (1000000 + slot), keep any real id.
