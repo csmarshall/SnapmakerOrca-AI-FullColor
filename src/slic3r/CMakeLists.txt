@@ -301,6 +301,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DragDropPanel.hpp
     GUI/CapsuleButton.cpp
     GUI/CapsuleButton.hpp
+    GUI/FilamentSort.cpp
+    GUI/FilamentSort.hpp
     GUI/FilamentMapPanel.cpp
     GUI/FilamentMapPanel.hpp
     GUI/FilamentMapDialog.cpp
