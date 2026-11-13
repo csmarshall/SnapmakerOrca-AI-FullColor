@@ -9434,3 +9434,38 @@ TEST_CASE("The setting_id fallback does not apply to a load that is not a system
     REQUIRE(preset != nullptr);
     CHECK(preset->filament_id.empty());
 }
+
+// filament_is_high_temperature is a filament preset option: it must be in the filament key list (which seeds every filament preset and the
+// project config the 3MF stores), default to false, survive a preset JSON round trip, and reach the full config one value per filament slot.
+// VERIFIED: key list, default, JSON round trip, per-slot full_config. NOT exercised: writing and re-reading an actual .3mf file.
+TEST_CASE("filament_is_high_temperature is carried by filament presets and the full config", "[Preset][Bundle]")
+{
+    const auto &keys = Preset::filament_options();
+    CHECK(std::find(keys.begin(), keys.end(), "filament_is_high_temperature") != keys.end());
+
+    PresetBundle bundle;
+    add_inmemory_preset(bundle.printers, "Test Printer");
+    Preset &plain = add_inmemory_preset(bundle.filaments, "Plain");
+    Preset &hot   = add_inmemory_preset(bundle.filaments, "Hot");
+    REQUIRE(plain.config.option<ConfigOptionBools>("filament_is_high_temperature") != nullptr);
+    CHECK(plain.config.option<ConfigOptionBools>("filament_is_high_temperature")->values == std::vector<unsigned char>{0});
+    hot.config.option<ConfigOptionBools>("filament_is_high_temperature")->values = {1};
+
+    // JSON round trip of the preset
+    ScopedSlic3rTemporaryDir dir("orca_high_temp");
+    hot.file = (dir.path() / "hot.json").string();
+    DynamicPrintConfig parent_cfg = bundle.filaments.default_preset().config;
+    hot.save(&parent_cfg);
+    DynamicPrintConfig loaded = DynamicPrintConfig::full_print_config();
+    std::map<std::string, std::string> kv;
+    std::string reason;
+    loaded.load_from_json(hot.file, ForwardCompatibilitySubstitutionRule::Disable, kv, reason);
+    CHECK(loaded.option<ConfigOptionBools>("filament_is_high_temperature")->values == std::vector<unsigned char>{1});
+
+    bundle.printers.select_preset_by_name("Test Printer", true);
+    bundle.filaments.select_preset_by_name("Hot", true);
+    bundle.filament_presets = {"Plain", "Hot"};
+    const DynamicPrintConfig full = bundle.full_config();
+    REQUIRE(full.option<ConfigOptionBools>("filament_is_high_temperature") != nullptr);
+    CHECK(full.option<ConfigOptionBools>("filament_is_high_temperature")->values.size() == 2);
+}
