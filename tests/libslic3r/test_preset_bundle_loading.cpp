@@ -5925,6 +5925,7 @@ TEST_CASE("Loading a project preserves existing mixed filament definitions", "[P
     config.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values = { "", "", "0,100" };
     config.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values = { "", "", "0,0.1|1,0.9" };
     config.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values = { false, false, true };
+    config.option<ConfigOptionStrings>("filament_mixed_engine_row")->values = { "", "", "" };
     Preset::normalize(config);
     const auto original = config;
 
