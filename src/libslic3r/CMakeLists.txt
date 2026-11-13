@@ -199,6 +199,8 @@ set(lisbslic3r_sources
     Fill/Lightning/TreeNode.cpp
     Fill/Lightning/TreeNode.hpp
     FilamentMixer.cpp
+    MixedFilament.cpp
+    MixedFilament.hpp
     MixedFilamentLegacy.cpp
     MixedFilamentLegacy.hpp
     FilamentMixer.hpp
