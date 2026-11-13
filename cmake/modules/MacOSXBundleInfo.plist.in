@@ -32,10 +32,10 @@
     <array>
       <dict>
         <key>CFBundleURLName</key>
-        <string>OrcaSlicer Downloads</string>
+        <string>OpenSnorca Downloads</string>
         <key>CFBundleURLSchemes</key>
         <array>
-          <string>orcaslicer</string>
+          <string>opensnorca</string>
         </array>
       </dict>
     </array>

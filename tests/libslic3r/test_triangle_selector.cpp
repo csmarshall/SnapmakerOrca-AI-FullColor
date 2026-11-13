@@ -206,3 +206,73 @@ TEST_CASE("A truncated or malformed paint stream drops only the damaged triangle
     REQUIRE_FALSE(recomputed.update_used_states(0));
     REQUIRE(std::none_of(recomputed.used_states.begin(), recomputed.used_states.end(), [](bool used) { return used; }));
 }
+
+// Nibbles of a leaf behind the "11" prefix, written the way Snapmaker's serializer does it:
+// k nibbles of 0b1111, then one nibble r < 15, with state = r + 15 * k + 3.
+// NOTE: fixtures derived from Snapmaker's encoding (read from its source, not from a real Snapmaker 3MF)
+// prove that our decoder agrees with that reading of the format, not that the reading is correct.
+static std::vector<int> snapmaker_leaf_nibbles(int state)
+{
+    const int v = state - 3;
+    std::vector<int> out { 0b1100 };
+    out.insert(out.end(), size_t(v / 15), 0b1111);
+    out.push_back(v % 15);
+    return out;
+}
+
+TEST_CASE("Snapmaker's leaf encoding matches ours for states 3 to ExtruderMax", "[TriangleSelector]")
+{
+    const TriangleMesh mesh = test_mesh();
+    for (int state = 3; state <= int(EnforcerBlockerType::ExtruderMax); ++state) {
+        INFO("state " << state);
+        TriangleSelector expected(mesh);
+        expected.set_facet(0, EnforcerBlockerType(state));
+
+        TriangleSelector::TriangleSplittingData data;
+        data.triangles_to_split.emplace_back(0, 0);
+        data.bitstream = pack_nibbles(snapmaker_leaf_nibbles(state));
+        TriangleSelector restored(mesh);
+        restored.deserialize(data);
+        REQUIRE(restored.over_cap_leaf_count() == 0);
+        REQUIRE(restored.serialize() == expected.serialize());
+        REQUIRE(TriangleSelector::has_facets(data, EnforcerBlockerType(state)));
+    }
+}
+
+TEST_CASE("A Snapmaker state above ExtruderMax becomes NONE without desyncing its siblings", "[TriangleSelector][Regression]")
+{
+    // 3-side split root; children read in order: state 33 (1111,1111,0000), state 34, Extruder2, Extruder1.
+    std::vector<int> nibbles { 0b0011 };
+    for (int s : { 33, 34 }) {
+        const auto leaf = snapmaker_leaf_nibbles(s);
+        nibbles.insert(nibbles.end(), leaf.begin(), leaf.end());
+    }
+    nibbles.push_back(0b1000); // Extruder2
+    nibbles.push_back(0b0100); // Extruder1
+    REQUIRE(snapmaker_leaf_nibbles(33) == std::vector<int>({ 0b1100, 0xF, 0xF, 0x0 }));
+
+    const TriangleMesh mesh = test_mesh();
+    TriangleSelector::TriangleSplittingData data;
+    data.triangles_to_split.emplace_back(0, 0);
+    data.bitstream = pack_nibbles(nibbles);
+
+    TriangleSelector restored(mesh);
+    REQUIRE_NOTHROW(restored.deserialize(data));
+    CHECK(restored.over_cap_leaf_count() == 2);
+    CHECK(restored.num_facets(EnforcerBlockerType::Extruder2) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::Extruder1) == 1);
+    CHECK(restored.num_facets(EnforcerBlockerType::ExtruderMax) == 0);
+
+    // A following root triangle must also still decode (stream in sync across roots).
+    TriangleSelector::TriangleSplittingData two = data;
+    two.triangles_to_split.emplace_back(1, int(two.bitstream.size()));
+    const std::vector<bool> second = pack_nibbles({ 0b1100, 0x1 }); // state 4
+    two.bitstream.insert(two.bitstream.end(), second.begin(), second.end());
+    TriangleSelector restored2(mesh);
+    restored2.deserialize(two);
+    CHECK(restored2.num_facets(EnforcerBlockerType::Extruder4) == 1);
+
+    // The scan helpers survive the chain too.
+    CHECK(TriangleSelector::has_facets(data, EnforcerBlockerType::Extruder1));
+    CHECK(data.update_used_states(0));
+}

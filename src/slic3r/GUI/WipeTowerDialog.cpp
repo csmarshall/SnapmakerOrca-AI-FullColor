@@ -418,7 +418,7 @@ wxString WipingDialog::BuildTextObjStr(bool multi_language)
     const std::string extruder_name_1 = DevPrinterConfigUtil::get_toolhead_display_name(pt, MAIN_EXTRUDER_ID, ToolHeadComponent::Extruder, ToolHeadNameCase::SentenceCase);
 
     if (multi_language) {
-        auto_flush_tip = _L("Orca would re-calculate your flushing volumes everytime the filaments color changed or filaments changed. You could disable the auto-calculate in Orca Slicer > Preferences");
+        auto_flush_tip = _L("Orca would re-calculate your flushing volumes everytime the filaments color changed or filaments changed. You could disable the auto-calculate in OpenSnorca > Preferences");
         volume_desp_panel = _L("Flushing volume (mm³) for each filament pair.");
         volume_range_panel = wxString::Format(_L("Suggestion: Flushing Volume in range [%d, %d]"), 0, 700);
         multiplier_range_panel = wxString::Format(_L("The multiplier should be in range [%.2f, %.2f]."), 0., 3.);

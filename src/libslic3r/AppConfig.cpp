@@ -1926,6 +1926,38 @@ std::string AppConfig::config_path(const std::string &data_dir, EAppMode mode)
     return (boost::filesystem::path(data_dir) / (std::string(name) + extension)).make_preferred().string();
 }
 
+std::string AppConfig::migrate_legacy_config(const std::string &data_dir)
+{
+#ifdef USE_JSON_CONFIG
+    namespace fs = boost::filesystem;
+    if (data_dir.empty())
+        return {};
+    try {
+        const fs::path target = config_path(data_dir, EAppMode::Editor);
+        boost::system::error_code ec;
+        if (fs::exists(target, ec))
+            return {};
+        for (const char *legacy_name : {"OrcaSlicer.conf", "Snapmaker_Orca.conf"}) {
+            const fs::path legacy = fs::path(data_dir) / legacy_name;
+            if (legacy == target || !fs::is_regular_file(legacy, ec))
+                continue;
+            // Copy through a temporary name so an interrupted copy never leaves a truncated OpenSnorca.conf behind.
+            fs::path tmp = target;
+            tmp += ".migrating";
+            fs::copy_file(legacy, tmp, fs::copy_options::overwrite_existing);
+            fs::rename(tmp, target);
+            BOOST_LOG_TRIVIAL(info) << "Copied legacy configuration " << legacy.string() << " to " << target.string();
+            return legacy.string();
+        }
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "Legacy configuration copy-forward failed: " << ex.what();
+    }
+#else
+    (void) data_dir;
+#endif
+    return {};
+}
+
 std::string AppConfig::config_path()
 {
     return config_path(Slic3r::data_dir(), m_mode);
@@ -1933,6 +1965,7 @@ std::string AppConfig::config_path()
 
 bool AppConfig::peek_bool(const std::string &data_dir, const std::string &key)
 {
+    migrate_legacy_config(data_dir);
     try {
         boost::nowide::ifstream ifs(config_path(data_dir, EAppMode::Editor));
         if (!ifs.is_open())

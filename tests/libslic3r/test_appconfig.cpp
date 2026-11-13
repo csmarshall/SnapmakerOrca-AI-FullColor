@@ -4,6 +4,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Thread.hpp"
+#include "libslic3r/libslic3r.h" // SLIC3R_APP_KEY
 #include "../slic3rutils/plugin_test_utils.hpp"
 #include "test_utils.hpp"
 
@@ -11,6 +12,7 @@
 
 #include <fstream>
 #include <ios>
+#include <iterator>
 #include <string>
 
 using namespace Slic3r;
@@ -287,6 +289,68 @@ TEST_CASE("The update-check and profile-sync feeds are empty by default", "[AppC
     // An explicit setting is still honoured, so a private mirror can be configured later.
     config.set("version_check_url", "https://example.invalid/latest");
     CHECK(config.version_check_url() == "https://example.invalid/latest");
+}
+
+// --- OpenSnorca rebrand: one-shot copy-forward of the pre-rename config file ---
+
+namespace {
+std::string slurp(const boost::filesystem::path &p)
+{
+    std::ifstream in(p.string(), std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+void spit(const boost::filesystem::path &p, const std::string &s) { std::ofstream(p.string(), std::ios::binary) << s; }
+} // namespace
+
+TEST_CASE("The pre-rename OrcaSlicer.conf is copied forward once and never overwritten", "[AppConfig][Rebrand]")
+{
+    namespace fs = boost::filesystem;
+    ScopedDataDir data_dir("legacy-config");
+    const std::string dd = data_dir.dir.string();
+    const fs::path target = AppConfig::config_path(dd, AppConfig::EAppMode::Editor);
+    CHECK(target.filename().string() == std::string(SLIC3R_APP_KEY) + ".conf");
+    const fs::path orca = data_dir.dir / "OrcaSlicer.conf";
+    const fs::path snap = data_dir.dir / "Snapmaker_Orca.conf";
+
+    SECTION("nothing to copy: no file is created") {
+        CHECK(AppConfig::migrate_legacy_config(dd).empty());
+        CHECK_FALSE(fs::exists(target));
+    }
+    SECTION("OrcaSlicer.conf is copied; the original stays in place") {
+        spit(orca, R"({"app":{"k":"orca"}})");
+        CHECK(fs::path(AppConfig::migrate_legacy_config(dd)).filename() == "OrcaSlicer.conf");
+        CHECK(slurp(target) == R"({"app":{"k":"orca"}})");
+        CHECK(slurp(orca) == R"({"app":{"k":"orca"}})");
+        CHECK_FALSE(fs::exists(target.string() + ".migrating"));
+        // The copy loads as a normal config.
+        AppConfig config;
+        CHECK(config.load().empty());
+        CHECK(config.get("k") == "orca");
+    }
+    SECTION("OrcaSlicer.conf wins over Snapmaker_Orca.conf") {
+        spit(orca, "orca");
+        spit(snap, "snap");
+        AppConfig::migrate_legacy_config(dd);
+        CHECK(slurp(target) == "orca");
+    }
+    SECTION("Snapmaker_Orca.conf is used when it is the only legacy file") {
+        spit(snap, "snap");
+        CHECK(fs::path(AppConfig::migrate_legacy_config(dd)).filename() == "Snapmaker_Orca.conf");
+        CHECK(slurp(target) == "snap");
+    }
+    SECTION("an existing new-name config is never overwritten") {
+        spit(target, "new");
+        spit(orca, "orca");
+        CHECK(AppConfig::migrate_legacy_config(dd).empty());
+        CHECK(slurp(target) == "new");
+    }
+    SECTION("running it twice changes nothing") {
+        spit(orca, "orca");
+        AppConfig::migrate_legacy_config(dd);
+        spit(orca, "orca-edited-later");
+        CHECK(AppConfig::migrate_legacy_config(dd).empty());
+        CHECK(slurp(target) == "orca");
+    }
 }
 
 #ifdef _WIN32

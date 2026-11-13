@@ -1831,8 +1831,15 @@ void TriangleSelector::deserialize(const TriangleSplittingData &data,
                                    EnforcerBlockerType          to_delete_filament,
                                    EnforcerBlockerType          replace_filament)
 {
-    if (needs_reset)
+    if (needs_reset) {
         reset(); // dump any current state
+        m_over_cap_leaves = 0;
+    }
+    const size_t over_cap_before = m_over_cap_leaves;
+    struct OverCapReport {
+        const size_t &now; size_t before;
+        ~OverCapReport() { if (now > before) BOOST_LOG_TRIVIAL(warning) << "TriangleSelector::deserialize: " << (now - before) << " painted triangle(s) use a filament state above " << int(EnforcerBlockerType::ExtruderMax) << " and were left unpainted"; }
+    } over_cap_report { m_over_cap_leaves, over_cap_before };
     for (auto [triangle_id, ibit] : data.triangles_to_split) {
         if (triangle_id >= int(m_triangles.size())) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "array bound:error:triangle_id >= int(m_triangles.size())";
@@ -1869,9 +1876,18 @@ void TriangleSelector::deserialize(const TriangleSplittingData &data,
         };
         // Decode a leaf state stored behind the "11" prefix: one nibble of (state-3) for states
         // 3..17, or 0b1111 followed by a nibble of (state-18) above that.
-        auto decode_leaf_state = [&next_nibble]() {
-            const int nibble = next_nibble();
-            return EnforcerBlockerType(nibble == 0b1111 ? next_nibble() + 18 : nibble + 3);
+        // Longer 0b1111 chains (Snapmaker states > 33) are consumed in full; states above ExtruderMax become NONE.
+        auto decode_leaf_state = [&data, &ibit = ibit, &corrupt, this]() {
+            int state = 0;
+            if (! data.read_leaf_state(ibit, state)) {
+                corrupt = true;
+                return EnforcerBlockerType::NONE;
+            }
+            if (state > int(EnforcerBlockerType::ExtruderMax)) {
+                ++m_over_cap_leaves;
+                return EnforcerBlockerType::NONE;
+            }
+            return EnforcerBlockerType(state);
         };
 
         parents.clear();
@@ -1986,17 +2002,12 @@ bool TriangleSelector::TriangleSplittingData::update_used_states(const size_t bi
             int facet_state = code >> 2;
             if (facet_state == 0b11) {
                 // Leaf behind the "11" prefix: one nibble of (state-3), or 0b1111 + (state-18).
-                int nibble;
-                if (!this->read_nibble(ibit, nibble))
+                if (!this->read_leaf_state(ibit, facet_state))
                     return false;
-                facet_state = nibble + 3;
-                if (nibble == 0b1111) {
-                    if (!this->read_nibble(ibit, nibble))
-                        return false;
-                    facet_state = nibble + 18;
-                }
             }
-            states |= uint64_t(1) << facet_state;
+            // States above ExtruderMax (Snapmaker chains) decode to NONE, so they set no bit.
+            if (facet_state <= int(EnforcerBlockerType::ExtruderMax))
+                states |= uint64_t(1) << facet_state;
         }
     } while (static_cast<size_t>(ibit) < this->bitstream.size());
 
@@ -2026,7 +2037,7 @@ bool TriangleSelector::has_facets(const TriangleSplittingData &data, const Enfor
         };
         // < 0 -> negative of a number of children
         // >= 0 -> state
-        auto num_children_or_state = [&next_nibble]() -> int {
+        auto num_children_or_state = [&next_nibble, &data, &ibit = ibit, &truncated]() -> int {
             int code               = next_nibble();
             int num_of_split_sides = code & 0b11;
             if (num_of_split_sides != 0)
@@ -2034,8 +2045,10 @@ bool TriangleSelector::has_facets(const TriangleSplittingData &data, const Enfor
             if ((code & 0b1100) != 0b1100)
                 return code >> 2;
             // Leaf behind the "11" prefix: one nibble of (state-3), or 0b1111 + (state-18).
-            const int nibble = next_nibble();
-            return nibble == 0b1111 ? next_nibble() + 18 : nibble + 3;
+            int state = 0;
+            if (! data.read_leaf_state(ibit, state))
+                truncated = true;
+            return state;
         };
 
         int state = num_children_or_state();

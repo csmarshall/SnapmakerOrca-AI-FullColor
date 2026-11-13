@@ -749,7 +749,7 @@ nlohmann::json PluginsDialog::localized_strings() const
         {"permissions_readwrite_unavailable", _u8L("Read and write permissions are unavailable.")},
         {"permissions_filesystem_read_name", _u8L("File system: Read")},
         {"permissions_filesystem_readwrite_name", _u8L("File system: Read and write")},
-        {"permissions_full_access_help", _u8L("Full access bypasses permission checks. The plugin can read and write most files you can access; modifying startup or application files can let code run outside these checks. Direct Python access to OrcaSlicer's configuration, secret, certificate and install-state paths stays blocked, but subprocesses are not restricted.")},
+        {"permissions_full_access_help", _u8L("Full access bypasses permission checks. The plugin can read and write most files you can access; modifying startup or application files can let code run outside these checks. Direct Python access to OpenSnorca's configuration, secret, certificate and install-state paths stays blocked, but subprocesses are not restricted.")},
         {"permissions_full_access_editor_disabled", _u8L("Permission list editing is disabled while full access is on.")},
         {"permissions_full_access_unavailable", _u8L("Full access status is unavailable.")},
         {"permissions_values_empty", _u8L("No values added.")},
@@ -968,7 +968,7 @@ void PluginsDialog::prompt_for_missing_plugins()
     }
 
     const int result = wxMessageBox(
-        wxString::Format(_L("The following installed plugins were not found on disk:\n%s\n\nRemove them from OrcaSlicer?"), names),
+        wxString::Format(_L("The following installed plugins were not found on disk:\n%s\n\nRemove them from OpenSnorca?"), names),
         _L("Missing Plugins"), wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this);
     restore_z_order();
 
@@ -993,8 +993,8 @@ bool PluginsDialog::prompt_enable_full_access(const std::string& plugin_key)
                "Full access turns off permission auditing for this plugin: its file system, network, "
                "process, thread and event permissions are no longer checked. The plugin can read and "
                "write most files your user account can access, including startup scripts, SSH keys "
-               "and a writable OrcaSlicer installation. Modifying startup or application files can "
-               "let code run outside these checks. Direct Python access to OrcaSlicer's "
+               "and a writable OpenSnorca installation. Modifying startup or application files can "
+               "let code run outside these checks. Direct Python access to OpenSnorca's "
                "configuration, secret, certificate and install-state paths stays blocked, but "
                "subprocesses are not restricted. Full access is not a sandbox.\n\n"
                "Only enable this for a plugin you trust."),

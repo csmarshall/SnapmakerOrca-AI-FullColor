@@ -296,7 +296,7 @@ function verify_python_runtime() {
     fi
     echo "  Verifying bundled Python runtime in $(basename "$app")..."
     local bad
-    bad=$(otool -arch all -L "$pybin" "$app/Contents/MacOS/OrcaSlicer" | grep "libpython" | grep -v "@rpath/" || true)
+    bad=$(otool -arch all -L "$pybin" "$app/Contents/MacOS/OpenSnorca" | grep "libpython" | grep -v "@rpath/" || true)
     if [ -n "$bad" ]; then
         echo "ERROR: a bundled binary references libpython by absolute path (relocation regression):" >&2
         echo "$bad" >&2
@@ -304,8 +304,8 @@ function verify_python_runtime() {
     fi
     # otool -L shows load commands only; assert the consumer rpath separately.
     # Its loss is masked on the build host by CMake's absolute build-tree rpath.
-    if ! otool -arch all -l "$app/Contents/MacOS/OrcaSlicer" | grep -q "path @executable_path/python/lib "; then
-        echo "ERROR: OrcaSlicer lacks the @executable_path/python/lib rpath (relocation regression)" >&2
+    if ! otool -arch all -l "$app/Contents/MacOS/OpenSnorca" | grep -q "path @executable_path/python/lib "; then
+        echo "ERROR: OpenSnorca lacks the @executable_path/python/lib rpath (relocation regression)" >&2
         exit 1
     fi
     if ! "$pybin" -c "import ssl"; then
@@ -365,18 +365,18 @@ function build_slicer() {
             mkdir -p OrcaSlicer
             cd OrcaSlicer
             # remove previously built app
-            rm -rf ./OrcaSlicer.app
+            rm -rf ./OpenSnorca.app
             # fully copy newly built app
-            cp -pR "../src$BUILD_DIR_CONFIG_SUBDIR/OrcaSlicer.app" ./OrcaSlicer.app
+            cp -pR "../src$BUILD_DIR_CONFIG_SUBDIR/OpenSnorca.app" ./OpenSnorca.app
             # fix resources
-            resources_path=$(readlink ./OrcaSlicer.app/Contents/Resources)
-            rm ./OrcaSlicer.app/Contents/Resources
-            cp -R "$resources_path" ./OrcaSlicer.app/Contents/Resources
-            relocate_python_runtime ./OrcaSlicer.app
+            resources_path=$(readlink ./OpenSnorca.app/Contents/Resources)
+            rm ./OpenSnorca.app/Contents/Resources
+            cp -R "$resources_path" ./OpenSnorca.app/Contents/Resources
+            relocate_python_runtime ./OpenSnorca.app
             # delete .DS_Store file
-            find ./OrcaSlicer.app/ -name '.DS_Store' -delete
+            find ./OpenSnorca.app/ -name '.DS_Store' -delete
 
-            verify_python_runtime ./OrcaSlicer.app
+            verify_python_runtime ./OpenSnorca.app
             
             # Copy OrcaSlicer_profile_validator.app if it exists
             if [ -f "../src$BUILD_DIR_CONFIG_SUBDIR/OrcaSlicer_profile_validator.app/Contents/MacOS/OrcaSlicer_profile_validator" ]; then
@@ -398,7 +398,7 @@ function build_slicer() {
         #     ver=${ver}_dev
         # fi
 
-        # zip -FSr OrcaSlicer${ver}_Mac_${_ARCH}.zip OrcaSlicer.app
+        # zip -FSr OrcaSlicer${ver}_Mac_${_ARCH}.zip OpenSnorca.app
 
     fi
     done
@@ -430,17 +430,17 @@ function build_universal() {
     echo "Building universal binary..."
 
     PROJECT_BUILD_DIR="$PROJECT_DIR/build/$ARCH"
-    ARM64_APP="$PROJECT_DIR/build/arm64/OrcaSlicer/OrcaSlicer.app"
-    X86_64_APP="$PROJECT_DIR/build/x86_64/OrcaSlicer/OrcaSlicer.app"
+    ARM64_APP="$PROJECT_DIR/build/arm64/OrcaSlicer/OpenSnorca.app"
+    X86_64_APP="$PROJECT_DIR/build/x86_64/OrcaSlicer/OpenSnorca.app"
 
     mkdir -p "$PROJECT_BUILD_DIR/OrcaSlicer"
-    UNIVERSAL_APP="$PROJECT_BUILD_DIR/OrcaSlicer/OrcaSlicer.app"
+    UNIVERSAL_APP="$PROJECT_BUILD_DIR/OrcaSlicer/OpenSnorca.app"
     rm -rf "$UNIVERSAL_APP"
     cp -R "$ARM64_APP" "$UNIVERSAL_APP"
 
-    echo "Creating universal binaries for OrcaSlicer.app..."
+    echo "Creating universal binaries for OpenSnorca.app..."
     lipo_dir "$UNIVERSAL_APP" "$X86_64_APP"
-    echo "Universal OrcaSlicer.app created at $UNIVERSAL_APP"
+    echo "Universal OpenSnorca.app created at $UNIVERSAL_APP"
     verify_python_runtime "$UNIVERSAL_APP"
 
     # Create universal binary for profile validator if it exists

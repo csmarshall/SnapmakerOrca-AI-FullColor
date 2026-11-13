@@ -62,6 +62,9 @@ struct ParentCandidate
     // The preset's own compatible_printers names the target printer (an explicit listing, e.g. "Snapmaker ABS @U1 0.4 nozzle"), as opposed
     // to an empty list that matches every printer (the OrcaFilamentLibrary "... @System" presets). Set by build_parent_candidates.
     bool        printer_listed = false;
+    // filament_id of each ancestor in the inherits chain (nearest first). The profile loader gives system leaves filament_id = setting_id,
+    // so the OFD id / generic_id of a Generic profile only survives on its (hidden) @base ancestor.
+    std::vector<std::string> inherited_filament_ids;
 };
 
 struct ParentChoice

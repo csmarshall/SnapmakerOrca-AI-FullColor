@@ -11,6 +11,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Spoolman/SpoolmanLink.hpp"
 #include "libslic3r/Spoolman/SpoolmanPresets.hpp"
+#include "libslic3r/Spoolman/SpoolmanParent.hpp"
 #include "test_utils.hpp"
 
 #include <algorithm>
@@ -1019,4 +1020,28 @@ TEST_CASE("Spoolman presets: printer limits come from the printer preset's machi
     Fixture  f;
     auto     r = f.run({hot}, l);
     CHECK(std::any_of(r.rejected.begin(), r.rejected.end(), [](const auto &x) { return x.key_or_field == "hot_plate_temp" && x.value == "105"; }));
+}
+
+// REAL OrcaFilamentLibrary profiles (resources/profiles), not hand-made presets: the loader gives every leaf filament_id = setting_id, so the OFD
+// generic_id (the @base filament_id) only matches through the inherits chain. NOT shown: Snapmaker vendor profiles, GUI-time bundle state.
+TEST_CASE("Spoolman presets: OFD generic_id resolves through the inherited base filament_id on the real OrcaFilamentLibrary", "[Spoolman]")
+{
+    PresetBundle bundle;
+    bundle.load_vendor_configs_from_json(PROFILES_DIR, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+    const Preset *leaf = bundle.filaments.find_preset("Generic PLA Matte @System", false);
+    REQUIRE(leaf != nullptr);
+    CHECK(leaf->setting_id == "RFs9eCKYOMUSmvZf");
+
+    const auto cands = build_parent_candidates(bundle.filaments, nullptr);
+    REQUIRE(cands.size() > 100);
+
+    Filament f;
+    f.id       = 1;
+    f.name     = "Zzz Unmatchable Spool";
+    f.material = "PLA";
+    f.extras["slicer_settings_orcaslicer"] = R"({"generic_id":"OFmY0l6t"})";
+    const ParentChoice c = choose_parent(f, cands);
+    REQUIRE(c.chosen != nullptr);
+    CHECK(c.chosen->name == "Generic PLA Matte @System");
 }

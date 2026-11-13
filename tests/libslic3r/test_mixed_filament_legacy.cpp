@@ -15,6 +15,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/MixedFilamentLegacy.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Zipper.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "mixed_filament_golden.hpp"
@@ -410,6 +411,9 @@ TEST_CASE("Legacy mixed rows: bounds on untrusted input", "[MixedFilament][legac
         CHECK(p.parsed == kLegacyMixedMaxRows);
         CHECK(p.rows.size() <= kLegacyMixedMaxRows);
         CHECK(p.skipped >= 5000 - kLegacyMixedMaxRows);
+    }
+    SECTION("the conversion cap equals the paint cap") {
+        CHECK(kLegacyMixedMaxFilaments == size_t(EnforcerBlockerType::ExtruderMax));
     }
     SECTION("slots added never take the project past the limit") {
         const size_t n = 20; // auto rows: C(20,2) = 190 pairs

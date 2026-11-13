@@ -714,6 +714,8 @@ std::vector<std::string> PluginAuditManager::default_denied_filenames()
     // the tests seed from the same list and cannot drift apart.
     return {
         SLIC3R_APP_KEY ".conf",
+        "OrcaSlicer.conf", // pre-rename name, still copied forward from; keep it denied
+        "Snapmaker_Orca.conf",
         GCODEVIEWER_APP_KEY ".conf",
         SLIC3R_APP_KEY ".ini",
         GCODEVIEWER_APP_KEY ".ini",

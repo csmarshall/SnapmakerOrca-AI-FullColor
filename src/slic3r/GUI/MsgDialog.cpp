@@ -715,7 +715,7 @@ wxBoxSizer *Newer3mfVersionDialog::get_msg_sizer()
     wxBoxSizer *     horizontal_sizer = new wxBoxSizer(wxHORIZONTAL);
     wxString    msg_str;
     if (file_version_newer) { 
-        text1 = new wxStaticText(this, wxID_ANY, _L("The 3MF file version is in Beta and it is newer than the current OrcaSlicer version."));
+        text1 = new wxStaticText(this, wxID_ANY, _L("The 3MF file version is in Beta and it is newer than the current OpenSnorca version."));
         wxStaticText *   text2       = new wxStaticText(this, wxID_ANY, _L("If you would like to try Orca Slicer Beta, you may click to"));
         // ORCA standardized HyperLink
         HyperLink *      github_link = new HyperLink(this, _L("Download Beta Version"), "https://github.com/SoftFever/OrcaSlicer/releases");
@@ -723,8 +723,8 @@ wxBoxSizer *Newer3mfVersionDialog::get_msg_sizer()
         horizontal_sizer->Add(github_link, 0, wxEXPAND | wxLEFT, 5);
         
     } else {
-        text1 = new wxStaticText(this, wxID_ANY, _L("The 3MF file version is newer than the current OrcaSlicer version."));
-        wxStaticText *text2 = new wxStaticText(this, wxID_ANY, _L("Updating your OrcaSlicer could enable all functionality in the 3MF file."));
+        text1 = new wxStaticText(this, wxID_ANY, _L("The 3MF file version is newer than the current OpenSnorca version."));
+        wxStaticText *text2 = new wxStaticText(this, wxID_ANY, _L("Updating your OpenSnorca could enable all functionality in the 3MF file."));
         horizontal_sizer->Add(text2, 0, wxEXPAND, 0);
     }
     Semver        app_version = *(Semver::parse(SLIC3R_VERSION));

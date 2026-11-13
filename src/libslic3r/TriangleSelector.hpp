@@ -414,6 +414,24 @@ public:
             return true;
         }
 
+        // Read the leaf state behind a "11" prefix: one nibble n < 15 gives state n+3; every leading 0b1111
+        // nibble adds 15, so k chain nibbles then n give n + 15*k + 3 (k=1 is our own 18..33 encoding).
+        // Snapmaker writes states above 33 with longer chains. The whole chain is always consumed so the
+        // stream stays in sync; the state is unbounded here, the caller clamps it.
+        // Returns false if the stream ends first.
+        bool read_leaf_state(int &ibit, int &state) const {
+            int nibble = 0, chain = 0;
+            while (true) {
+                if (! read_nibble(ibit, nibble))
+                    return false;
+                if (nibble != 0b1111)
+                    break;
+                ++chain;
+            }
+            state = nibble + 15 * chain + 3;
+            return true;
+        }
+
     private:
         friend class cereal::access;
         template<class Archive> void serialize(Archive &ar) { ar(triangles_to_split, bitstream, used_states); }
@@ -499,6 +517,10 @@ public:
     // Store the division trees in compact form (a long stream of bits for each triangle of the original mesh).
     // First vector contains pairs of (triangle index, first bit in the second vector).
     TriangleSplittingData serialize() const;
+
+    // Number of leaves whose decoded state exceeded ExtruderMax (e.g. a Snapmaker 3MF with state > 32) and
+    // were set to NONE by deserialize(); accumulates until the next deserialize() with needs_reset.
+    size_t over_cap_leaf_count() const { return m_over_cap_leaves; }
 
     // Load serialized data. Assumes that correct mesh is loaded.
     void deserialize(const TriangleSplittingData& data,
@@ -639,6 +661,7 @@ protected:
     // Number of original vertices and triangles.
     int m_orig_size_vertices = 0;
     int m_orig_size_indices = 0;
+    size_t m_over_cap_leaves = 0;
 
     std::unique_ptr<Cursor> m_cursor;
     // Zero indicates an uninitialized state.

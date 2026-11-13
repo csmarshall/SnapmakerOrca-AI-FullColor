@@ -22,17 +22,16 @@
   <string>????</string>
   <key>CFBundleVersion</key>
   <string>@SLIC3R_BUILD_ID@</string>
-  <key>CFBundleURLTypes</key>
   <key>ATSApplicationFontsPath</key>
   <string>fonts/</string>
+  <key>CFBundleURLTypes</key>
   <array>
     <dict>
       <key>CFBundleURLName</key>
-      <string>orcasliceropen url</string>
+      <string>opensnorca url</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>orcasliceropen</string>
-        <string>orcaslicer</string>
+        <string>opensnorca</string>
       </array>
     </dict>
   </array>

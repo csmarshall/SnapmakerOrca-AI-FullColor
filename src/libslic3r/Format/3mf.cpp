@@ -2633,7 +2633,7 @@ ModelVolumeType type_from_string(const std::string &s)
             // Orca: PRIVACY: do not store creation & modification date in 3mf
             stream << " <" << METADATA_TAG << " name=\"CreationDate\">" << "</" << METADATA_TAG << ">\n";
             stream << " <" << METADATA_TAG << " name=\"ModificationDate\">" << "</" << METADATA_TAG << ">\n";
-            stream << " <" << METADATA_TAG << " name=\"Application\">" << SLIC3R_APP_KEY << "-" << SLIC3R_VERSION << "</" << METADATA_TAG << ">\n";
+            stream << " <" << METADATA_TAG << " name=\"Application\">" << "OrcaSlicer" /* generator tag stays Orca-style so Orca/Snapmaker/Bambu readers keep recognising the project */ << "-" << SLIC3R_VERSION << "</" << METADATA_TAG << ">\n";
             stream << " <" << RESOURCES_TAG << ">\n";
             std::string buf = stream.str();
             if (! buf.empty() && ! mz_zip_writer_add_staged_data(&context, buf.data(), buf.size())) {

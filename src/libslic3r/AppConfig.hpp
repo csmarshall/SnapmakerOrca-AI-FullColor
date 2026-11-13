@@ -361,6 +361,10 @@ public:
 	static std::string	config_path(const std::string &data_dir, EAppMode mode);
 	// Lock file guarding config_path() against other running instances; empty without a data dir.
 	std::string			lock_path();
+	// One-shot copy-forward for the OrcaSlicer -> OpenSnorca rename: when data_dir has no <SLIC3R_APP_KEY>.conf but has
+	// OrcaSlicer.conf (or else Snapmaker_Orca.conf), copy that file to the new name. Copies only; never moves, overwrites
+	// or deletes, so the legacy file stays as the rollback. Returns the legacy file that was copied, or an empty string.
+	static std::string	migrate_legacy_config(const std::string &data_dir);
 
 	// Returns true if the user's data directory comes from before Slic3r 1.40.0 (no updating)
 	bool 				legacy_datadir() const { return m_legacy_datadir; }

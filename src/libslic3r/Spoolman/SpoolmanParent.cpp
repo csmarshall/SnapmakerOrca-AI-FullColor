@@ -178,6 +178,11 @@ std::string base_name(const std::string &name)
     return b;
 }
 
+bool has_inherited(const ParentCandidate &c, const std::string &id)
+{
+    return std::find(c.inherited_filament_ids.begin(), c.inherited_filament_ids.end(), id) != c.inherited_filament_ids.end();
+}
+
 ParentChoice found(const std::vector<ParentCandidate> &cands, size_t i, std::string rule, std::string reason)
 {
     ParentChoice r;
@@ -317,7 +322,7 @@ ParentChoice choose_parent(const Filament &f, const std::vector<ParentCandidate>
                 };
                 const std::string id = str("id"), pn = str("profile_name"), gid = str("generic_id");
                 if (!id.empty()) {
-                    auto hits = collect([&](const ParentCandidate &c, size_t) { return c.setting_id == id || c.filament_id == id; });
+                    auto hits = collect([&](const ParentCandidate &c, size_t) { return c.setting_id == id || c.filament_id == id || has_inherited(c, id); });
                     if (resolve(cands, hits, "OFD slicer settings: id", "id " + id, token, out))
                         return out;
                 }
@@ -327,7 +332,7 @@ ParentChoice choose_parent(const Filament &f, const std::vector<ParentCandidate>
                         return out;
                 }
                 if (!gid.empty()) {
-                    auto hits = collect([&](const ParentCandidate &c, size_t) { return c.filament_id == gid; });
+                    auto hits = collect([&](const ParentCandidate &c, size_t) { return c.filament_id == gid || has_inherited(c, gid); });
                     if (resolve(cands, hits, "OFD slicer settings: generic_id", "generic_id " + gid, token, out))
                         return out;
                 }

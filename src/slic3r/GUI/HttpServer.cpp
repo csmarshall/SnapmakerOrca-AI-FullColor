@@ -251,8 +251,8 @@ std::shared_ptr<HttpServer::Response> HttpServer::auth_handle_request(const std:
 
         const std::string title = login_ok ? _u8L("Authentication complete") : _u8L("Authentication failed");
         const std::string message = login_ok
-            ? _u8L("You can return to OrcaSlicer. This window will close automatically.")
-            : _u8L("Something went wrong. Please return to OrcaSlicer and try again.");
+            ? _u8L("You can return to OpenSnorca. This window will close automatically.")
+            : _u8L("Something went wrong. Please return to OpenSnorca and try again.");
         const std::string html =
             "<html><head><meta charset=\"utf-8\">"
             "<style>body{font-family:Arial,sans-serif;background:#f7f7f7;color:#222;margin:32px;}"
@@ -436,7 +436,7 @@ void HttpServer::ResponseRedirect::write_response(std::stringstream& ssOut)
         "a.button{display:inline-block;padding:10px 16px;margin-top:12px;background:#0f8bff;color:#fff;text-decoration:none;border-radius:6px;}"
         "</style></head><body><div class=\"container\">"
         "<h2>" + _u8L("Authentication complete") + "</h2>"
-        "<p>" + _u8L("You can return to OrcaSlicer. If your browser does not redirect automatically, use the button below.") + "</p>"
+        "<p>" + _u8L("You can return to OpenSnorca. If your browser does not redirect automatically, use the button below.") + "</p>"
         "<a class=\"button\" href=\"" + location_str + "\">" + _u8L("Continue") + "</a>"
         "<script>setTimeout(function(){try{window.close();}catch(e){}},1500);</script>"
         "</div></body></html>";

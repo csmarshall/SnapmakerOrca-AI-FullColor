@@ -435,7 +435,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             app_config->set("desktop_integration_app_viewer_path", desktop_path);
         else {
             BOOST_LOG_TRIVIAL(error) << "Performing desktop integration failed - could not create Gcodeviewer desktop file";
-            show_error(nullptr, _L("Performing desktop integration failed - could not create Gcodeviewer desktop file. OrcaSlicer desktop file was probably created successfully."));
+            show_error(nullptr, _L("Performing desktop integration failed - could not create Gcodeviewer desktop file. OpenSnorca desktop file was probably created successfully."));
         }
     }
     

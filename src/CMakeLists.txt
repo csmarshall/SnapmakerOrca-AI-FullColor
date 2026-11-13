@@ -144,6 +144,10 @@ if (WIN32)
 else ()
     add_executable(OrcaSlicer OrcaSlicer.cpp OrcaSlicer.hpp)
 endif ()
+if (APPLE OR WIN32)
+    # The target keeps its historical name; the produced binary / bundle is <SLIC3R_APP_KEY> (OpenSnorca.app).
+    set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "${SLIC3R_APP_KEY}")
+endif ()
 
 if (MINGW)
     target_link_options(OrcaSlicer PUBLIC "-Wl,-allow-multiple-definition")
@@ -169,8 +173,8 @@ endif ()
 
 if (NOT WIN32 AND NOT APPLE)
     # Binary name on unix like systems (Linux, Unix)
-    set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "orca-slicer")
-    set(SLIC3R_APP_CMD "orca-slicer")
+    set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "opensnorca")
+    set(SLIC3R_APP_CMD "opensnorca")
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/unix/build_linux_image.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_linux_image.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif ()
 
@@ -323,7 +327,7 @@ else ()
     if (APPLE AND NOT CMAKE_MACOSX_BUNDLE)
         # On OSX, the name of the binary matches the name of the Application.
         add_custom_command(TARGET OrcaSlicer POST_BUILD
-            COMMAND ln -sf OrcaSlicer orca-slicer
+            COMMAND ln -sf ${SLIC3R_APP_KEY} opensnorca
             WORKING_DIRECTORY "$<TARGET_FILE_DIR:OrcaSlicer>"
             VERBATIM)
     endif ()
@@ -338,14 +342,14 @@ else ()
     endif ()
     if (CMAKE_MACOSX_BUNDLE)
         if (CMAKE_CONFIGURATION_TYPES)
-            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/OrcaSlicer.app/Contents/Resources")
-            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/OrcaSlicer.app/Contents/MacOS")
+            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${SLIC3R_APP_KEY}.app/Contents/Resources")
+            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/${SLIC3R_APP_KEY}.app/Contents/MacOS")
         else()
-            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.app/Contents/Resources")
-            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.app/Contents/MacOS")
+            set(BIN_RESOURCES_DIR "${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}.app/Contents/Resources")
+            set(BIN_DIR "${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}.app/Contents/MacOS")
         endif()
         set(MACOSX_BUNDLE_ICON_FILE Icon.icns)
-        set(MACOSX_BUNDLE_BUNDLE_NAME "OrcaSlicer")
+        set(MACOSX_BUNDLE_BUNDLE_NAME "${SLIC3R_APP_NAME}")
         set(MACOSX_BUNDLE_GUI_IDENTIFIER "${ORCA_BUNDLE_ID}")   # read by cmake/modules/MacOSXBundleInfo.plist.in
         set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${SoftFever_VERSION})
         set(MACOSX_BUNDLE_COPYRIGHT "Copyright(C) 2022-2024 Li Jiang All Rights Reserved")
