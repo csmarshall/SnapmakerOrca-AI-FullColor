@@ -241,8 +241,12 @@ std::vector<ParentCandidate> build_parent_candidates(const PresetCollection &fil
             continue;
         if (printer && !is_compatible_with_printer(filaments.get_preset_with_vendor_profile(p), PresetWithVendorProfile(*printer, printer->vendor)))
             continue;
+        bool listed = false;
+        if (printer)
+            if (const auto *cp = dynamic_cast<const ConfigOptionStrings *>(p.config.option("compatible_printers")))
+                listed = std::find(cp->values.begin(), cp->values.end(), printer->name) != cp->values.end();
         out.push_back({p.name, p.alias, first_string(p.config, "filament_type"), first_string(p.config, "filament_vendor"), p.setting_id,
-                       p.filament_id});
+                       p.filament_id, listed});
     }
     return out;
 }
@@ -271,7 +275,8 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
 
     const std::vector<ParentCandidate> candidates = build_parent_candidates(filaments, ctx.printer);
     ParentOptions                      popts;
-    popts.preferred_token = ctx.preferred_token;
+    popts.preferred_token = !ctx.preferred_token.empty() || !ctx.printer ? ctx.preferred_token :
+                                                                           preferred_token_for_printer(ctx.printer->name, candidates);
 
     auto linked_names = [&](int id) {
         std::vector<std::string> v;

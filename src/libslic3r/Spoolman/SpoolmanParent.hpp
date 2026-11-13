@@ -20,6 +20,11 @@
 // Rules 3-5 first compare the '+' marker exactly ("PLA+" vs "PLA"); only if nothing matches is it ignored, with a note, so eSUN "PLA" never
 // silently becomes "eSUN PLA+" while a Generic PLA exists. Flags come from the name AND from the material / filament_type suffix
 // ("PLA-CF" = PLA + cf, "Silk PLA" = PLA + silk), on both sides.
+// Rules 4/5 tiers, first non-empty wins: (a) vendor-specific (the Spoolman vendor); (b) Generic AND printer_listed ("Generic PETG @U1 0.4
+// nozzle"); (c) printer_listed of another vendor, not Generic (the printer vendor's own "Snapmaker ABS @U1 0.4 nozzle"); (d) Generic that
+// is not printer_listed ("Generic ABS @System", empty compatible_printers = every printer, with that library's temperatures). (c) is only tried when a (d) candidate exists (it never turns "no candidate" into a choice) and then comes before
+// (d): a library preset made for every printer must not beat one the printer's vendor lists for this printer (a U1 rejects the 105 C plate
+// temperature "Generic ABS @System" brings). When no candidate has printer_listed set, (b) and (d) are the old single Generic tier.
 // Two equally good candidates in one rule/tier give no choice ("ambiguous: ..."); list order never decides. Only a same-family twin
 // ("Generic PETG @U1 0.4 nozzle" vs "Generic PETG @System") is separated, by ParentOptions::preferred_token. Nothing found gives no
 // choice and NEVER an arbitrary preset. Spoolman `material` is used for matching only. `external_id` never drives the choice; a colour
@@ -54,6 +59,9 @@ struct ParentCandidate
     std::string filament_vendor;
     std::string setting_id;
     std::string filament_id;
+    // The preset's own compatible_printers names the target printer (an explicit listing, e.g. "Snapmaker ABS @U1 0.4 nozzle"), as opposed
+    // to an empty list that matches every printer (the OrcaFilamentLibrary "... @System" presets). Set by build_parent_candidates.
+    bool        printer_listed = false;
 };
 
 struct ParentChoice
@@ -76,6 +84,12 @@ struct ParentOptions
 ParentChoice choose_parent(const Filament &filament, const std::vector<ParentCandidate> &candidates, const ParentOptions &options = {});
 
 // The vocabularies, exposed so tests and docs can list them (sorted).
+// The '@' suffix token to prefer for `printer_name` (a printer preset name such as "Snapmaker U1 (0.4 nozzle)"), derived from the data: the
+// longest '@' suffix of a candidate name ("U1 0.4 nozzle" of "Generic PETG @U1 0.4 nozzle") whose letters and digits, lower-cased, occur in the
+// printer name's letters and digits ("snapmakeru10.4nozzle" contains "u10.4nozzle"; "System" does not). Returns "@<suffix>" or empty
+// (no preference). No printer-specific knowledge: a vendor whose suffixes do not echo the printer name gets no preference.
+std::string preferred_token_for_printer(const std::string &printer_name, const std::vector<ParentCandidate> &candidates);
+
 std::vector<std::string> colour_words();
 std::vector<std::string> flag_words();
 std::vector<std::string> stop_words();

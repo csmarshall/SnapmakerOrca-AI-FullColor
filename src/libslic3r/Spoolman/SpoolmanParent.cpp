@@ -251,6 +251,31 @@ std::vector<std::string> colour_words() { return {kColours.begin(), kColours.end
 std::vector<std::string> flag_words() { return {kFlags.begin(), kFlags.end()}; }
 std::vector<std::string> stop_words() { return {kStopWords.begin(), kStopWords.end()}; }
 
+std::string preferred_token_for_printer(const std::string &printer_name, const std::vector<ParentCandidate> &candidates)
+{
+    auto squash = [](const std::string &s) {
+        std::string r;
+        for (char ch : s)
+            if (std::isalnum((unsigned char) ch) || ch == '.')
+                r += char(std::tolower((unsigned char) ch));
+        return r;
+    };
+    const std::string printer = squash(printer_name);
+    std::string       best, best_squashed;
+    for (const ParentCandidate &c : candidates) {
+        const size_t at = c.name.find('@');
+        if (at == std::string::npos)
+            continue;
+        std::string suffix = c.name.substr(at + 1);
+        const std::string sq = squash(suffix);
+        if (sq.size() > best_squashed.size() && printer.find(sq) != std::string::npos) {
+            best          = suffix;
+            best_squashed = sq;
+        }
+    }
+    return best.empty() ? std::string() : "@" + best;
+}
+
 ParentChoice choose_parent(const Filament &f, const std::vector<ParentCandidate> &cands, const ParentOptions &opts)
 {
     ParentChoice out;
@@ -389,15 +414,33 @@ ParentChoice choose_parent(const Filament &f, const std::vector<ParentCandidate>
                 return true;
             }
         }
-        for (int tier = 0; tier < 2 && blend.empty(); ++tier) {
+        // Tier 2 (the printer vendor's own preset, listed for the printer) is only an alternative to a Generic library preset that is NOT
+        // listed for the printer: it never turns a "no candidate" into a choice (a Glow PLA from another vendor stays unmatched).
+        auto family = [&](size_t i, bool generic_unlisted) {
+            const Cls &k = cc[i];
+            return k.type_ok && plus_ok(k) && k.c.flags == want.flags && k.c.rest.empty() &&
+                   (generic_unlisted ? (k.generic && !k.vendor_ok && !cands[i].printer_listed) :
+                                       (!k.generic && !k.vendor_ok && cands[i].printer_listed));
+        };
+        bool has_unlisted_generic = false;
+        for (size_t i = 0; i < cands.size(); ++i)
+            has_unlisted_generic = has_unlisted_generic || family(i, true);
+        for (int tier = 0; tier < 4 && blend.empty(); ++tier) {
+            if (tier == 2 && !has_unlisted_generic)
+                continue;
             auto hits = collect([&](const ParentCandidate &, size_t i) {
                 const Cls &k = cc[i];
                 return k.type_ok && plus_ok(k) && k.c.flags == want.flags && k.c.rest.empty() &&
-                       (tier == 0 ? k.vendor_ok : (k.generic && !k.vendor_ok));
+                       (tier == 0 ? k.vendor_ok :
+                        tier == 1 ? (k.generic && !k.vendor_ok && cands[i].printer_listed) :
+                        tier == 2 ? (!k.generic && !k.vendor_ok && cands[i].printer_listed) :
+                                    (k.generic && !k.vendor_ok && !cands[i].printer_listed));
             });
             const std::string rule = by_material_only ? "material alone" : "material family with flags";
             const std::string why  = "material " + f.material + (want.flags.empty() ? " (no flag requested)" : ", flags " + join(want.flags)) +
-                                    (tier == 0 ? ", vendor-specific" : ", Generic");
+                                    (tier == 0 ? ", vendor-specific" :
+                                     tier == 1 ? ", Generic, listed for the printer" :
+                                     tier == 2 ? ", the printer vendor's, listed for the printer" : ", Generic");
             if (resolve(cands, hits, rule, why, token, out)) {
                 if (out.chosen && by_material_only)
                     out.notes.push_back("choice by material only");

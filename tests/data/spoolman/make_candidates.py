@@ -8,13 +8,17 @@ Candidates = every instantiated filament preset that
   - lives in resources/profiles/OrcaFilamentLibrary/filament and has an empty compatible_printers (visible on every printer),
 with filament_type, filament_vendor, compatible_printers, alias, setting_id and filament_id resolved through `inherits` (child wins; the
 first element of a list value is used, as for a single-extruder preset).
-NOTE: this is an APPROXIMATION of Orca's preset lookup. setting_id is taken from the child file only (inherits is not resolved for it), and
+NOTE: the checked-in candidates_u1_0.4.tsv is a FROZEN snapshot of an earlier run (7th column and the Snapmaker ABS row added by hand);
+regenerating it against the current tree changes ~50 expectations (the tree has since gained '@Snapmaker U1' Polymaker/Snapmaker presets and
+renamed 'Snapmaker PETG HF'), a separate review. This is an APPROXIMATION of Orca's preset lookup. setting_id is taken from the child file only (inherits is not resolved for it), and
 the same-library parent is preferred over the other library when a name exists in both; real Orca resolves per loaded bundle. Columns, tab separated, no header:
-name, alias, filament_type, filament_vendor, setting_id, filament_id. Sorted by name so the file is stable.
+name, alias, filament_type, filament_vendor, setting_id, filament_id, printer_listed (1 when the resolved compatible_printers names
+Snapmaker U1 (0.4 nozzle), else 0). Sorted by name so the file is stable.
 """
 import json, os, sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "resources", "profiles")
+PRINTER = "Snapmaker U1 (0.4 nozzle)"
 DIRS = ["Snapmaker/filament", "OrcaFilamentLibrary/filament"]
 
 
@@ -66,7 +70,8 @@ def main():
                 if cp:
                     continue
             rows.append([name, first(resolve(j, d, by_name, "alias")), first(resolve(j, d, by_name, "filament_type")),
-                         first(resolve(j, d, by_name, "filament_vendor")), first(j.get("setting_id")), first(resolve(j, d, by_name, "filament_id"))])
+                         first(resolve(j, d, by_name, "filament_vendor")), first(j.get("setting_id")), first(resolve(j, d, by_name, "filament_id")),
+                         "1" if PRINTER in (resolve(j, d, by_name, "compatible_printers") or []) else "0"])
     for r in sorted(rows):
         sys.stdout.write("\t".join(r) + "\n")
 

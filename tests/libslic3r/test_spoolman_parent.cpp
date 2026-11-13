@@ -96,8 +96,9 @@ const std::vector<ParentCandidate> &real_candidates()
             std::string c;
             while (std::getline(ss, c, '\t'))
                 col.push_back(c);
-            col.resize(6);
+            col.resize(7);
             v.push_back(cand(col[0], col[2], col[3], col[4], col[5], col[1]));
+            v.back().printer_listed = col[6] == "1";
         }
     }
     REQUIRE(v.size() > 300);
@@ -401,11 +402,17 @@ TEST_CASE("Spoolman parent: twins @<printer> and @System: the printer-specific o
     };
     for (const Row &r : rows) {
         INFO(r.name << " / " << r.material);
-        auto with = choose_parent(fil(r.name, r.vendor, r.material), c, kU1);
+        // the printer_listed flag would separate the twins on its own, so it is cleared here: this checks the token mechanism
+        std::vector<ParentCandidate> unlisted = c;
+        for (ParentCandidate &u : unlisted)
+            u.printer_listed = false;
+        auto with = choose_parent(fil(r.name, r.vendor, r.material), unlisted, kU1);
         CHECK(chosen_name(with) == r.expect);
         CHECK(has_note(with, "twin"));
+        // with the flag and no token the twins are also separated (the listed one is the Generic-listed tier)
+        CHECK(chosen_name(choose_parent(fil(r.name, r.vendor, r.material), c)) == r.expect);
         // without the token the same input is ambiguous between the twins (never decided by list order)
-        auto without = choose_parent(fil(r.name, r.vendor, r.material), c);
+        auto without = choose_parent(fil(r.name, r.vendor, r.material), unlisted);
         CHECK(without.chosen == nullptr);
         CHECK(without.reason.rfind("ambiguous: ", 0) == 0);
     }
@@ -572,7 +579,7 @@ TEST_CASE("Spoolman parent: real-data sweep, 22 fixtures and invented names agai
         {"Carbon Fiber PETG", "Hatchbox", "PETG-CF", "Generic PETG-CF @U1 0.4 nozzle", RF},
         {"PLA-CF Black", "Snapmaker", "PLA-CF", "Snapmaker PLA-CF @U1 0.4 nozzle", R3},
         {"Red", "Hatchbox", "PLA", "Generic PLA @U1 0.4 nozzle", RM},
-        {"ABS Red", "Hatchbox", "ABS", "Generic ABS @System", RM},
+        {"ABS Red", "Hatchbox", "ABS", "Snapmaker ABS @U1 0.4 nozzle", RM}, // CHANGED (was Generic ABS @System): the printer vendor's U1 preset
         {"Matte PLA Red", "Overture", "PLA", "Overture Matte PLA @System", R3},
         {"Silk PLA Blue", "Overture", "PLA", "Overture Silk PLA @System", R3},
         {"PETG HF", "Elegoo", "PETG", "Elegoo PETG HF @System", R3},
@@ -685,4 +692,43 @@ TEST_CASE("Spoolman parent: blends of several materials give none in the family 
     // a vendor preset with exactly those words is still found by rule 3
     std::vector<ParentCandidate> v = {cand("Acme PC-ABS @System", "PC", "Acme")};
     CHECK(chosen_name(choose_parent(fil("PC-ABS", "Acme", "PC"), v)) == "Acme PC-ABS @System");
+}
+
+// #31x: a Polymaker ABS on a U1 must not inherit "Generic ABS @System" (empty compatible_printers: every printer, with that library's 105 C
+// plate temperature, which the U1 rejects) while the printer vendor lists "Snapmaker ABS @U1 0.4 nozzle" for the printer.
+TEST_CASE("Spoolman parent: a printer-listed vendor preset beats a Generic library preset listed for every printer", "[Spoolman]")
+{
+    Slic3r::Spoolman::Filament f;
+    f.name = "PolyLite(TM) ABS Light Grey";
+    f.material = "ABS";
+    f.vendor = Slic3r::Spoolman::Vendor{};
+    f.vendor->name = "Polymaker";
+    auto listed = [](ParentCandidate c) { c.printer_listed = true; return c; };
+    std::vector<ParentCandidate> c = {cand("Generic ABS @System", "ABS", "Generic"), listed(cand("Snapmaker ABS @U1 0.4 nozzle", "ABS", "Snapmaker"))};
+    auto r = choose_parent(f, c);
+    REQUIRE(r.chosen);
+    CHECK(r.chosen->name == "Snapmaker ABS @U1 0.4 nozzle");
+    CHECK(r.reason.find("printer vendor's, listed for the printer") != std::string::npos);
+    // the other order gives the same answer
+    std::reverse(c.begin(), c.end());
+    CHECK(chosen_name(choose_parent(f, c)) == "Snapmaker ABS @U1 0.4 nozzle");
+    // a Generic preset listed for the printer still beats the printer vendor's (existing behaviour, PETG/TPU)
+    std::vector<ParentCandidate> g = {listed(cand("Snapmaker ABS @U1 0.4 nozzle", "ABS", "Snapmaker")), listed(cand("Generic ABS @U1 0.4 nozzle", "ABS", "Generic"))};
+    CHECK(chosen_name(choose_parent(f, g)) == "Generic ABS @U1 0.4 nozzle");
+    // two printer-vendor presets are still ambiguous
+    std::vector<ParentCandidate> a = {listed(cand("Snapmaker ABS @U1 0.4 nozzle", "ABS", "Snapmaker")), listed(cand("Snapmaker ABS Pro @U1 0.4 nozzle", "ABS", "Snapmaker"))};
+    a[1].name = "Snapmaker ABS @U1 0.4 nozzle B";
+    CHECK_FALSE(choose_parent(f, a).chosen);
+    // nothing listed: the old Generic tier
+    std::vector<ParentCandidate> n = {cand("Generic ABS @System", "ABS", "Generic")};
+    CHECK(chosen_name(choose_parent(f, n)) == "Generic ABS @System");
+}
+
+TEST_CASE("Spoolman parent: the preferred token comes from the data, not from a printer name list", "[Spoolman]")
+{
+    const auto &c = real_candidates();
+    CHECK(preferred_token_for_printer("Snapmaker U1 (0.4 nozzle)", c) == "@U1 0.4 nozzle");
+    CHECK(preferred_token_for_printer("Snapmaker U1 (0.6 nozzle)", c).find("0.4") == std::string::npos);
+    CHECK(preferred_token_for_printer("Some Other Printer", c).empty());
+    CHECK(preferred_token_for_printer("", c).empty());
 }
