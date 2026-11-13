@@ -1391,6 +1391,12 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         };
 
         static const std::vector<std::pair<GCodeProcessor::EProducer, std::string>> Producers;
+    public:
+        // True when a G-code comment (without the leading ';') names an Orca-family producer
+        // (this app, stock OrcaSlicer, Snapmaker Orca, BambuStudio).
+        static bool is_orca_family_comment(std::string_view comment);
+    private:
+        static EProducer producer_from_comment(std::string_view comment);
         EProducer m_producer;
 
         TimeProcessor m_time_processor;

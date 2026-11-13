@@ -255,6 +255,49 @@ TEST_CASE("Volumetric per-extruder exclusions survive a 3MF round-trip", "[3mf][
     CHECK(legacy->serialize() == "0x0,10x0,10x10,0x10");
 }
 
+TEST_CASE("A project saved by this app is recognised as an Orca-style 3MF on reload", "[3mf][Regression]")
+{
+    // OpenSnorca rebrand: the writer deliberately keeps the Orca-style Application tag so Orca, Snapmaker Orca and
+    // Bambu readers still recognise the file; the reader must accept it and report the generator version.
+    ScopedSlic3rTemporaryDir temporary_dir("orca_app_tag");
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10.0, 10.0, 10.0));
+    object->add_instance();
+    DynamicPrintConfig source;
+    model.set_backup_path((temporary_dir.path() / "source_backup").string());
+
+    const std::string path_string = (temporary_dir.path() / "app_tag.3mf").string();
+    auto plate = std::make_unique<PlateData>();
+    plate->plate_index = 0;
+    StoreParams store_params;
+    store_params.path = path_string.c_str();
+    store_params.model = &model;
+    store_params.config = &source;
+    store_params.plate_data_list.push_back(plate.get());
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model reloaded_model;
+    DynamicPrintConfig reloaded;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    PlateDataPtrs reloaded_plates;
+    std::vector<Preset *> project_presets;
+    bool is_bbl_3mf = false;
+    bool is_orca_3mf = false;
+    Semver file_version;
+    const bool loaded = load_bbs_3mf(
+        path_string.c_str(), &reloaded, &substitutions, &reloaded_model, &reloaded_plates,
+        &project_presets, &is_bbl_3mf, &is_orca_3mf, &file_version, nullptr,
+        LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    release_PlateData_list(reloaded_plates);
+
+    REQUIRE(loaded);
+    CHECK(is_bbl_3mf);
+    CHECK(file_version.valid());
+}
+
 SCENARIO("Mirrored instance transforms survive 3mf round trips", "[3mf][Regression]") {
     const bool bbs_format = GENERATE(false, true);
 
