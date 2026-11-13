@@ -58,8 +58,11 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
-static const std::string VERSION_CHECK_URL = "https://check-version.orcaslicer.com/latest";
-static const std::string PROFILE_UPDATE_URL = "https://check-version.orcaslicer.com/profile";
+// OpenSnorca is LAN-only: no default update-check or profile-sync feed. The upstream feed
+// (check-version.orcaslicer.com) would receive an install id on every launch and could offer a stock release
+// or replace the Snapmaker vendor profiles. An explicit "version_check_url" / "orca_updater_url" setting still works.
+static const std::string VERSION_CHECK_URL = "";
+static const std::string PROFILE_UPDATE_URL = "";
 
 constexpr const char* CONFIG_ORCA_UPDATER_URL = "orca_updater_url";
 

@@ -1723,6 +1723,11 @@ void PresetUpdater::priv::check_new_vendors(const std::set<std::string>& system_
 void PresetUpdater::check_new_vendors(const std::set<std::string>& system_vendors,
                                        std::function<void(std::vector<std::string>, bool)> callback)
 {
+    // No profile feed configured (the default): nothing to ask, report "no new vendors" without any request.
+    if (!p->enabled_config_update) {
+        if (callback) callback({}, false);
+        return;
+    }
     p->check_new_vendors(system_vendors, std::move(callback));
 }
 

@@ -277,6 +277,18 @@ TEST_CASE("A configuration without the checksum line loads", "[AppConfig][Regres
     CHECK(config.get("k") == "v");
 }
 
+TEST_CASE("The update-check and profile-sync feeds are empty by default", "[AppConfig][Rebrand]")
+{
+    AppConfig config;
+    config.set_defaults();
+    CHECK(config.version_check_url().empty());
+    CHECK(config.profile_update_url().empty());
+
+    // An explicit setting is still honoured, so a private mirror can be configured later.
+    config.set("version_check_url", "https://example.invalid/latest");
+    CHECK(config.version_check_url() == "https://example.invalid/latest");
+}
+
 #ifdef _WIN32
 // Only Windows saves the checksum line, and a backup to restore a corrupted configuration from.
 TEST_CASE("A corrupted configuration is restored from a backup whose checksum matches", "[AppConfig]")
