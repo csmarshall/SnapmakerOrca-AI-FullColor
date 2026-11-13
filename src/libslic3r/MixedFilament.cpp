@@ -23,8 +23,15 @@ constexpr size_t kMaxTokenDigits      = 5;     // longer tokens are rejected, no
 constexpr int    kMaxWeight           = 10000; // per-weight clamp
 constexpr size_t kMaxWeightTokens     = 256;   // more weights than this is not a mixed filament
 
-// Digits-only token to a value in [0, 99999]; false when it has more than kMaxTokenDigits digits.
 bool parse_bounded_token(const std::string &token, int &out)
+{
+    return parse_bounded_mixed_token(token, out);
+}
+
+} // namespace
+
+// Digits-only token to a value in [0, 99999]; false when it has more than kMaxTokenDigits digits.
+bool parse_bounded_mixed_token(const std::string &token, int &out)
 {
     if (token.empty() || token.size() > kMaxTokenDigits)
         return false;
@@ -37,6 +44,8 @@ bool parse_bounded_token(const std::string &token, int &out)
     out = int(v);
     return true;
 }
+
+namespace {
 
 // Non-digits separate tokens. Returns an empty vector (invalid) on an over-long token or too many tokens.
 std::vector<int> parse_gradient_weight_tokens(const std::string &weights)
@@ -242,6 +251,20 @@ std::string normalize_gradient_component_weights(const std::string &weights, siz
         ss << normalized[i];
     }
     return ss.str();
+}
+
+std::vector<int> decode_gradient_component_weights(const std::string &weights, size_t expected_components)
+{
+    if (expected_components == 0)
+        return {};
+    std::vector<int> parsed = parse_gradient_weight_tokens(weights);
+    if (parsed.size() != expected_components)
+        return {};
+    std::vector<int> normalized = normalize_weight_vector_to_percent(parsed);
+    int sum = 0;
+    for (const int v : normalized)
+        sum += v;
+    return (sum > 0) ? normalized : std::vector<int>();
 }
 
 std::string normalize_manual_pattern(const std::string &pattern)

@@ -106,7 +106,14 @@ std::string normalize_manual_pattern(const std::string &pattern);
 // Surface offset as Snapmaker writes it: clamped to +-2, 4 decimals, trailing zeros trimmed, "-0" -> "0".
 std::string format_surface_offset_token(float value);
 
-constexpr size_t kMaxMixedPhysicalFilaments = 64; // Snapmaker MixedFilamentManager::kMaxPhysicalFilaments
+constexpr size_t kMaxMixedPhysicalFilaments = 64;
+
+// Digits-only token (1 to 5 digits) to [0, 99999]; false for anything else. The one range-checked integer
+// parser for tokens read from untrusted project files (no atoi/strtoul on file data).
+bool parse_bounded_mixed_token(const std::string &token, int &out);
+// Snapmaker decode_gradient_component_weights: the normalised percentages (sum 100), empty when the count
+// does not match expected_components or the weights are unusable.
+std::vector<int> decode_gradient_component_weights(const std::string &weights, size_t expected_components); // Snapmaker MixedFilamentManager::kMaxPhysicalFilaments
 
 // The row string Snapmaker writes into mixed_filament_definitions: rows joined by ';'. Mirrors
 // serialize_custom_entries (pointillism forced off, ids/weights/pattern normalised, stable ids filled).

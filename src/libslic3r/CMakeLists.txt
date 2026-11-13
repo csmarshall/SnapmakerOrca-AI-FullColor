@@ -201,6 +201,8 @@ set(lisbslic3r_sources
     FilamentMixer.cpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentEngine.cpp
+    MixedFilamentEngine.hpp
     MixedFilamentLegacy.cpp
     MixedFilamentLegacy.hpp
     FilamentMixer.hpp
