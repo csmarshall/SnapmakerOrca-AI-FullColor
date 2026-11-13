@@ -14072,7 +14072,8 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
     }
 
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
-    if (preset_bundle.use_bbl_network() || wxGetApp().app_config->get_bool("use_printer_agents")) {
+    if (NetworkAgentFactory::use_bambu_send_dialog(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"),
+            wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent")))) {
         open_machine_select_dialog(partplate_list.get_curr_plate_index());
     } else {
         q->send_gcode_legacy(PLATE_CURRENT_IDX, nullptr);
@@ -14202,7 +14203,8 @@ void Plater::priv::on_action_print_all(SimpleEvent&)
     }
 
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
-    if (preset_bundle.use_bbl_network() || wxGetApp().app_config->get_bool("use_printer_agents")) {
+    if (NetworkAgentFactory::use_bambu_send_dialog(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"),
+            wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent")))) {
         open_machine_select_dialog(PLATE_ALL_IDX);
     } else {
         q->send_gcode_legacy(PLATE_ALL_IDX, nullptr);

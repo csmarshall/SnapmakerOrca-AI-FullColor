@@ -31,3 +31,27 @@ TEST_CASE("Snapmaker print preference toggles are offered only to the Snapmaker 
     CHECK_FALSE(NetworkAgentFactory::printer_agent_supports_snapmaker_print_preferences("crealityprint"));
     CHECK_FALSE(NetworkAgentFactory::printer_agent_supports_snapmaker_print_preferences(""));
 }
+
+// #84: which dialog the Print plate / Print all action opens. Snapmaker Orca opens the Bambu-style SelectMachineDialog only for
+// use_bbl_network() and sends every other printer through send_gcode_legacy (Plater.cpp:15689-15706 in 3-snapmaker-main).
+// Our stack also opened it for every printer once use_printer_agents was on, which gave the U1 one "Ext" filament tile.
+// The choice is now by agent capability (printer_agent_supports_bambu_print_options), never by printer model (ADR 0003).
+// This checks the predicate's own table; it cannot show what the live dialog looks like.
+TEST_CASE("Print plate opens the Bambu dialog only for Bambu-network or Bambu-agent printers", "[SendDialog][Routing]")
+{
+    // Bambu network printer: always the Bambu dialog, whatever the agents switch says.
+    CHECK(NetworkAgentFactory::use_bambu_send_dialog(true, false, BBL_PRINTER_AGENT_ID));
+    CHECK(NetworkAgentFactory::use_bambu_send_dialog(true, true, BBL_PRINTER_AGENT_ID));
+    // Bambu agent in agents mode.
+    CHECK(NetworkAgentFactory::use_bambu_send_dialog(false, true, BBL_PRINTER_AGENT_ID));
+    // Agents mode off and not a Bambu network: legacy, as Snapmaker.
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, false, BBL_PRINTER_AGENT_ID));
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, false, MOONRAKER_PRINTER_AGENT_ID));
+
+    // Agents mode on, non-Bambu agents: legacy send dialog.
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, true, MOONRAKER_PRINTER_AGENT_ID));
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, true, SNAPMAKER_PRINTER_AGENT_ID));
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, true, ORCA_PRINTER_AGENT_ID));
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, true, "qidi"));
+    CHECK_FALSE(NetworkAgentFactory::use_bambu_send_dialog(false, true, "crealityprint"));
+}

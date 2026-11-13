@@ -106,6 +106,11 @@ bool NetworkAgentFactory::printer_agent_supports_bambu_print_options(const std::
     return id.empty() || id == BBL_PRINTER_AGENT_ID;
 }
 
+bool NetworkAgentFactory::use_bambu_send_dialog(bool use_bbl_network, bool use_printer_agents, const std::string& agent_id)
+{
+    return use_bbl_network || (use_printer_agents && printer_agent_supports_bambu_print_options(agent_id));
+}
+
 bool NetworkAgentFactory::printer_agent_supports_snapmaker_print_preferences(const std::string& id)
 {
     return id == SNAPMAKER_PRINTER_AGENT_ID;

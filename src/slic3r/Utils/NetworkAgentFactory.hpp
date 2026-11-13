@@ -115,6 +115,14 @@ public:
     static bool printer_agent_supports_bambu_print_options(const std::string& id);
 
     /**
+     * Which dialog the Print plate / Print all action opens: true = the Bambu-style SelectMachineDialog, false = the plain
+     * print-host send dialog (Plater::send_gcode_legacy). Snapmaker Orca picks the Bambu dialog only for use_bbl_network()
+     * (Plater.cpp:15689-15706); we additionally keep it in agents mode for a Bambu agent, and send every other agent
+     * (Moonraker, Snapmaker, Creality, Qidi, ...) through the legacy dialog. Pass the resolved agent id.
+     */
+    static bool use_bambu_send_dialog(bool use_bbl_network, bool use_printer_agents, const std::string& agent_id);
+
+    /**
      * Whether the Send/Print dialog offers Time-lapse, Auto Bed Leveling and Flow Calibration as real toggles: they are sent as
      * SET_PRINT_PREFERENCE lines before the print starts (SnapmakerPrintPreference.hpp). Only the Snapmaker agent does this.
      */
