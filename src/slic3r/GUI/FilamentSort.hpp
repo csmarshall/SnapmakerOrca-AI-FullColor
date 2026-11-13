@@ -131,7 +131,7 @@ struct AllowListCopy
 };
 
 /** @brief Names the allow-list copy PresetUpdater must deploy for @p vendor, or nothing when the vendor is not
- *         Snapmaker or the source file does not exist. Creates the target's parent directory when it names a copy. */
+ *         Snapmaker or the source file does not exist. Pure: touches nothing, so it is safe at update-scan time. */
 std::optional<AllowListCopy> allow_list_deployment(const std::filesystem::path &source_root,
                                                    const std::filesystem::path &target_root,
                                                    const std::string           &vendor);

@@ -55,6 +55,7 @@
 #include "slic3r/Utils/bambu_networking.hpp"
 #include "slic3r/Config/Version.hpp"
 #include "slic3r/GUI/MarkdownTip.hpp"
+#include "slic3r/GUI/FilamentSort.hpp"
 #include "libslic3r/miniz_extension.hpp"
 
 using json = nlohmann::json;
@@ -145,6 +146,9 @@ struct Update
         if (is_directory) {
             copy_directory_recursively(source, target, file_filter);
         } else {
+            // The target's directory may have been removed by an earlier .opc install in the same batch.
+            boost::system::error_code mkdir_ec;
+            fs::create_directories(target.parent_path(), mkdir_ec);
             copy_file_fix(source, target);
 
             // A vendor must be installed in exactly one form. Remove the
@@ -1040,6 +1044,15 @@ bool PresetUpdater::priv::install_bundles_rsrc(const std::vector<std::string>& b
 		return false;
 	}
 
+	// The Snapmaker filament allow-list is deployment data, not a preset: a vendor installed from its .opc
+	// cache has no profile directory beside it, so lay the file down explicitly. The running GUI reads the
+	// order once, so a changed file takes effect after the next restart.
+	for (const std::string &bundle : bundles) {
+		if (GUI::allow_list_deployment(std::filesystem::path(rsrc_path.string()), std::filesystem::path(vendor_path.string()), bundle)
+		    && !GUI::deploy_allow_list(std::filesystem::path(rsrc_path.string()), std::filesystem::path(vendor_path.string()), bundle))
+			BOOST_LOG_TRIVIAL(warning) << "Failed to deploy filament_allow_list.json for " << bundle;
+	}
+
 	// Snapshot logic is currently commented out in perform_updates, so we don't need to handle it here
 	// If snapshot logic is needed in the future, it can be added here
 
@@ -1251,6 +1264,11 @@ Updates PresetUpdater::priv::get_config_updates(const Semver &old_slic3r_version
 					    vendor_path / vendor_name, Version(), vendor_name,
 					    "", "", force_update, true);
 				}
+				// Deployment data beside the profile; installed last because an .opc install above removes the vendor directory.
+				if (auto allow_list = GUI::allow_list_deployment(std::filesystem::path(cache_profile_path.string()),
+				                                                 std::filesystem::path(vendor_path.string()), vendor_name))
+					updates.updates.emplace_back(fs::path(allow_list->source.string()), fs::path(allow_list->target.string()),
+					                             Version(), vendor_name, "", "", force_update, false);
 			} else {
 				BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:cached settings for " << vendor_name
 				                        << " are not newer than installed version, installed " << vendor_ver.to_string()

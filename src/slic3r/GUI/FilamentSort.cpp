@@ -296,7 +296,6 @@ std::optional<AllowListCopy> allow_list_deployment(const std::filesystem::path &
     std::error_code ec;
     if (!std::filesystem::is_regular_file(copy.source, ec))
         return std::nullopt;
-    std::filesystem::create_directories(copy.target.parent_path(), ec);
     return copy;
 }
 
@@ -308,6 +307,7 @@ bool deploy_allow_list(const std::filesystem::path &source_root,
     if (!copy)
         return false;
     std::error_code ec;
+    std::filesystem::create_directories(copy->target.parent_path(), ec);
     return std::filesystem::copy_file(copy->source, copy->target, std::filesystem::copy_options::overwrite_existing, ec) && !ec;
 }
 

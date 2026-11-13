@@ -346,7 +346,7 @@ const char *k_other_json = R"({"schema_version": 1, "sections": {"filament_order
 
 // ---- slice 2: updater deployment helper ----
 
-TEST_CASE("allow_list_deployment names the vendor file and creates the target directory", "[GUI][FilamentSort]")
+TEST_CASE("allow_list_deployment names the vendor file and touches nothing", "[GUI][FilamentSort]")
 {
     ScratchDir scratch("filament_sort_deploy_test");
     const auto src = scratch.path / "rsrc";
@@ -359,7 +359,7 @@ TEST_CASE("allow_list_deployment names the vendor file and creates the target di
         REQUIRE(copy.has_value());
         CHECK(copy->source == src / "Snapmaker" / "filament" / "filament_allow_list.json");
         CHECK(copy->target == dst / "Snapmaker" / "filament" / "filament_allow_list.json");
-        CHECK(std::filesystem::is_directory(copy->target.parent_path()));
+        CHECK_FALSE(std::filesystem::exists(dst)); // naming a copy must not create directories
     }
     SECTION("other vendors get nothing")
     {
@@ -384,8 +384,12 @@ TEST_CASE("deploy_allow_list copies and replaces a stale deployed copy", "[GUI][
     write_file(deployed, k_other_json);
 
     REQUIRE(deploy_allow_list(src, dst, "Snapmaker"));
-    const FilamentOrder order = FilamentOrder::from_file(deployed);
-    CHECK(order.rank("Snapmaker", "PLA Matte") == 0);
+    CHECK(FilamentOrder::from_file(deployed).rank("Snapmaker", "PLA Matte") == 0); // stale copy replaced
+
+    // A target directory that does not exist yet is created.
+    std::filesystem::remove_all(dst);
+    REQUIRE(deploy_allow_list(src, dst, "Snapmaker"));
+    CHECK(FilamentOrder::from_file(deployed).rank("Snapmaker", "PLA Matte") == 0);
     CHECK_FALSE(deploy_allow_list(src, dst, "Generic"));
 }
 
