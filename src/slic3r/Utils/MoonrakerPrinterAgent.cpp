@@ -402,6 +402,15 @@ MoonrakerPrinterAgent::CameraReply MoonrakerPrinterAgent::parse_camera_monitor_r
 }
 
 namespace {
+// The app's preset bundle, or null when there is no GUI_App (unit tests drive the agent headless; wxGetApp() dereferences a null
+// instance there).
+PresetBundle* app_preset_bundle()
+{
+    return wxTheApp ? GUI::wxGetApp().preset_bundle : nullptr;
+}
+} // namespace
+
+namespace {
 // One request/reply on a fresh plain websocket, everything (resolve included) bounded by `total`. Returns whether the printer
 // answered "success".
 using ReplyParser = std::function<MoonrakerPrinterAgent::CameraReply(const std::string&, int, nlohmann::json&)>;
@@ -925,7 +934,7 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
 
 bool MoonrakerPrinterAgent::accepts_3mf() const
 {
-    const PresetBundle*     bundle  = GUI::wxGetApp().preset_bundle;
+    const PresetBundle*     bundle  = app_preset_bundle();
     const ConfigOptionBool* use_3mf = bundle ? bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("use_3mf") : nullptr;
     return use_3mf != nullptr && use_3mf->value;
 }
@@ -1239,7 +1248,7 @@ std::string MoonrakerPrinterAgent::map_filament_type_to_generic_id(const std::st
     if (it == type_to_ofl_family.end())
         return UNKNOWN_FILAMENT_ID;
 
-    if (auto* bundle = GUI::wxGetApp().preset_bundle) {
+    if (auto* bundle = app_preset_bundle()) {
         const Preset* preset = bundle->filaments.find_preset("Generic " + it->second + " @System");
         if (preset != nullptr && preset->is_system && !preset->filament_id.empty())
             return preset->filament_id;
@@ -1269,7 +1278,7 @@ bool MoonrakerPrinterAgent::fetch_creality_cfs_data(std::vector<AmsTrayData>& tr
 
     trays.clear();
     max_lane_index = 0;
-    auto* bundle = GUI::wxGetApp().preset_bundle;
+    auto* bundle = app_preset_bundle();
     for (const auto& slot : slots) {
         AmsTrayData data;
         data.slot_index = slot.slot_index;
@@ -1583,7 +1592,7 @@ bool MoonrakerPrinterAgent::fetch_moonraker_filament_data(std::vector<AmsTrayDat
         // and falls back to the material type when no compatible preset carries it. Only a string
         // counts: Happy Hare writes Spoolman's numeric filament record id under the same key.
         tray.tray_info_idx = safe_json_string(lane_obj, "filament_id");
-        auto* bundle = GUI::wxGetApp().preset_bundle;
+        auto* bundle = app_preset_bundle();
         if (tray.tray_info_idx.empty())
             tray.tray_info_idx = bundle
                 ? bundle->filaments.filament_id_by_type(tray.tray_type)
@@ -1712,7 +1721,7 @@ bool MoonrakerPrinterAgent::fetch_hh_filament_info(std::vector<AmsTrayData>& tra
         tray.bed_temp = 0;  // HH doesn't provide bed temp in gate arrays
         tray.has_filament = true;
 
-        auto* bundle = GUI::wxGetApp().preset_bundle;
+        auto* bundle = app_preset_bundle();
         tray.tray_info_idx = bundle
             ? bundle->filaments.filament_id_by_type(tray.tray_type)
             : map_filament_type_to_generic_id(tray.tray_type);
@@ -1839,7 +1848,7 @@ int MoonrakerPrinterAgent::handle_request(const std::string& dev_id, const std::
 bool MoonrakerPrinterAgent::init_device_info(const std::string& dev_id, const std::string& dev_ip, const std::string& username, const std::string& password, bool use_ssl, const std::string& port)
 {
     device_info         = MoonrakerDeviceInfo{};
-    auto* preset_bundle = GUI::wxGetApp().preset_bundle;
+    auto* preset_bundle = app_preset_bundle();
     if (!preset_bundle) {
         return false;
     }
@@ -2743,7 +2752,7 @@ nlohmann::json MoonrakerPrinterAgent::build_print_payload_locked() const
     payload["print"]["nozzle_temp_range"] = {100, 370}; // Typical Klipper range
     payload["print"]["bed_temp_range"]    = {0, 120};   // Typical bed range
     // The printer preset's own maximums (machine_max_*_temperature, 0 = unset) replace the placeholders above when set.
-    if (const PresetBundle* bundle = GUI::wxGetApp().preset_bundle) {
+    if (const PresetBundle* bundle = app_preset_bundle()) {
         const Spoolman::PrinterLimits limits = Spoolman::printer_limits_from_config(bundle->printers.get_selected_preset().config);
         if (limits.max_bed_temp)
             payload["print"]["bed_temp_range"] = {0, *limits.max_bed_temp};
