@@ -506,9 +506,9 @@ TEST_CASE("Spoolman direct redirects", "[Spoolman]")
     SECTION("same origin is followed (path-absolute and absolute), at most 2 hops")
     {
         FakeDirect fake;
-        fake.routes["http://h:7912/api/v1/vendor"]  = {301, "/api/v1/vendor/", ""};
-        fake.routes["http://h:7912/api/v1/vendor/"] = {308, "http://H:7912/api/v1/vendor2", ""};
-        fake.routes["http://H:7912/api/v1/vendor2"] = {200, "", "[1]"};
+        fake.routes["http://h:7912/api/v1/vendor"]  = {301, "/api/v1/filament", ""};
+        fake.routes["http://h:7912/api/v1/filament"] = {308, "http://H:7912/api/v1/spool?allow_archived=false", ""};
+        fake.routes["http://H:7912/api/v1/spool?allow_archived=false"] = {200, "", "[1]"};
         CHECK(make_direct_http_get("http://h:7912", fake.fn())("/v1/vendor", "", body) == 200);
         CHECK(body == "[1]");
         CHECK(fake.calls.size() == 3);
@@ -517,6 +517,19 @@ TEST_CASE("Spoolman direct redirects", "[Spoolman]")
         CHECK(make_direct_http_get("http://h", loop.fn())("/v1/vendor", "", body) == 302);
         CHECK(loop.calls.size() == 3); // original + 2 hops
     }
+}
+
+TEST_CASE("Spoolman redirect hops may only land on a catalog endpoint", "[Spoolman]")
+{
+    const std::string cur = "http://h:7912/api/v1/vendor";
+    for (const char *ok : {"/api/v1/vendor", "/api/v1/filament", "/api/v1/spool?allow_archived=false", "http://h:7912/api/v1/filament",
+                           "/sp/api/v1/spool?allow_archived=false"})
+        CHECK(same_origin_redirect(cur, ok).has_value());
+    for (const char *bad : {"/printer/gcode/script?script=M112", "/printer/emergency_stop", "/", "/api/v1/spool", "/api/v1/spool?allow_archived=true",
+                            "/api/v1/spool?allow_archived=false&x=1", "/api/v1/vendor?x=1", "/api/v1/filament?allow_archived=false", "/api/v1/vendor/",
+                            "/api/v1/spool/1", "/api/v1/vendor#f", "/x/../api/v1/vendor", "/api/v1/export/spools", "/api/v1/vendors",
+                            "/api/v1/%76endor", "http://h:7912/printer/info", "http://h:7912"})
+        CHECK_FALSE(same_origin_redirect(cur, bad).has_value());
 }
 
 TEST_CASE("Spoolman direct path keeps the caps and the gate", "[Spoolman]")

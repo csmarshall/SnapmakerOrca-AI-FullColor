@@ -371,6 +371,32 @@ std::string direct_request_url(const std::string &validated_base, const std::str
     return base + kSpoolmanApiPrefix + path + (query.empty() ? std::string() : "?" + query);
 }
 
+namespace {
+// A redirect hop may only land on one of the three catalog endpoints, with the query hop 0 uses (spool: allow_archived=false; others: none).
+bool is_catalog_target(const std::string &url)
+{
+    if (url.find('#') != std::string::npos)
+        return false;
+    const size_t q     = url.find('?');
+    const std::string path  = url.substr(0, q);
+    const std::string query = q == std::string::npos ? std::string() : url.substr(q + 1);
+    const size_t auth_begin = url.find("://") + 3;
+    const size_t path_begin = path.find('/', auth_begin);
+    if (path_begin == std::string::npos)
+        return false;
+    const std::string p = path.substr(path_begin);
+    if (p.find("/../") != std::string::npos || p.find("/./") != std::string::npos || p.find('%') != std::string::npos)
+        return false;
+    const auto ends_with = [&](const std::string &suffix) { return p.size() >= suffix.size() && p.compare(p.size() - suffix.size(), suffix.size(), suffix) == 0; };
+    const std::string prefix = kSpoolmanApiPrefix;
+    if (ends_with(prefix + "/v1/vendor") || ends_with(prefix + "/v1/filament"))
+        return query.empty();
+    if (ends_with(prefix + "/v1/spool"))
+        return query == "allow_archived=false";
+    return false;
+}
+} // namespace
+
 std::optional<std::string> same_origin_redirect(const std::string &current, const std::string &location)
 {
     ParsedUrl cur;
@@ -382,17 +408,22 @@ std::optional<std::string> same_origin_redirect(const std::string &current, cons
             return std::nullopt;
     if (location.empty())
         return std::nullopt;
+    std::string result;
     if (location[0] == '/' && (location.size() == 1 || location[1] != '/')) {
         const size_t auth_begin = current.find("://") + 3;
         const size_t auth_end   = current.find('/', auth_begin);
-        return current.substr(0, auth_end == std::string::npos ? current.size() : auth_end) + location; // same authority, new path
+        result = current.substr(0, auth_end == std::string::npos ? current.size() : auth_end) + location; // same authority, new path
+    } else {
+        ParsedUrl tgt;
+        if (location.find("://") == std::string::npos || !parse_url_lenient(location, tgt, dummy))
+            return std::nullopt; // protocol-relative ("//host"), other relative forms and unparsable targets are refused
+        if (origin_key(tgt) != origin_key(cur))
+            return std::nullopt;
+        result = location;
     }
-    ParsedUrl tgt;
-    if (location.find("://") == std::string::npos || !parse_url_lenient(location, tgt, dummy))
-        return std::nullopt; // protocol-relative ("//host"), other relative forms and unparsable targets are refused
-    if (origin_key(tgt) != origin_key(cur))
+    if (!is_catalog_target(result))
         return std::nullopt;
-    return location;
+    return result;
 }
 
 HttpGet make_direct_http_get(const std::string &validated_base, DirectFetch fetch)
