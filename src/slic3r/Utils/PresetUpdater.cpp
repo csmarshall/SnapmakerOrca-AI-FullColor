@@ -1037,20 +1037,24 @@ void PresetUpdater::priv::sync_printer_config(std::string http_url)
 
 bool PresetUpdater::priv::install_bundles_rsrc(const std::vector<std::string>& bundles, bool snapshot) const
 {
-	// Use the Core library function to install bundles
-	// This function is now in libslic3r so both Core and GUI can use it
-	if (!Slic3r::install_vendor_bundles_from_resources(bundles)) {
+	// The Snapmaker filament allow-list is deployment data, not a preset: a vendor installed from its .opc
+	// cache has no profile directory beside it, so lay the file down explicitly, and do it even when some
+	// bundle failed (the others still installed, and an .opc install removes the Snapmaker directory).
+	// The running GUI reads the order once, so a changed file takes effect after the next restart.
+	size_t deploy_failures = 0;
+	const bool installed = GUI::install_then_deploy(
+		bundles,
+		[](const std::vector<std::string> &b) {
+			// Use the Core library function to install bundles
+			// This function is now in libslic3r so both Core and GUI can use it
+			return Slic3r::install_vendor_bundles_from_resources(b);
+		},
+		std::filesystem::path(rsrc_path.string()), std::filesystem::path(vendor_path.string()), &deploy_failures);
+	if (deploy_failures > 0)
+		BOOST_LOG_TRIVIAL(warning) << "Failed to deploy filament_allow_list.json for " << deploy_failures << " bundle(s)";
+	if (!installed) {
 		BOOST_LOG_TRIVIAL(error) << "Failed to install bundles from resources";
 		return false;
-	}
-
-	// The Snapmaker filament allow-list is deployment data, not a preset: a vendor installed from its .opc
-	// cache has no profile directory beside it, so lay the file down explicitly. The running GUI reads the
-	// order once, so a changed file takes effect after the next restart.
-	for (const std::string &bundle : bundles) {
-		if (GUI::allow_list_deployment(std::filesystem::path(rsrc_path.string()), std::filesystem::path(vendor_path.string()), bundle)
-		    && !GUI::deploy_allow_list(std::filesystem::path(rsrc_path.string()), std::filesystem::path(vendor_path.string()), bundle))
-			BOOST_LOG_TRIVIAL(warning) << "Failed to deploy filament_allow_list.json for " << bundle;
 	}
 
 	// Snapshot logic is currently commented out in perform_updates, so we don't need to handle it here

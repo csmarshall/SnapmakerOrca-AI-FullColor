@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <optional>
@@ -140,6 +141,20 @@ std::optional<AllowListCopy> allow_list_deployment(const std::filesystem::path &
 bool deploy_allow_list(const std::filesystem::path &source_root,
                        const std::filesystem::path &target_root,
                        const std::string           &vendor);
+
+/** @brief Deploys the allow-list for every bundle that has one; returns how many deployments failed. */
+size_t deploy_allow_lists(const std::filesystem::path       &source_root,
+                          const std::filesystem::path       &target_root,
+                          const std::vector<std::string>    &bundles);
+
+/** @brief Runs @p install, then deploys the allow-lists whether or not it succeeded (a partial install may still
+ *         have replaced vendor directories); returns the install result and, when
+ *         @p deploy_failures is given, stores how many deployments failed there. */
+bool install_then_deploy(const std::vector<std::string>                              &bundles,
+                         const std::function<bool(const std::vector<std::string> &)> &install,
+                         const std::filesystem::path                                  &source_root,
+                         const std::filesystem::path                                  &target_root,
+                         size_t                                                       *deploy_failures = nullptr);
 
 /** @brief Result of locating and reading the allow-list order. */
 struct FilamentOrderLoad

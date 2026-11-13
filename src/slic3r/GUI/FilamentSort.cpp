@@ -311,6 +311,30 @@ bool deploy_allow_list(const std::filesystem::path &source_root,
     return std::filesystem::copy_file(copy->source, copy->target, std::filesystem::copy_options::overwrite_existing, ec) && !ec;
 }
 
+size_t deploy_allow_lists(const std::filesystem::path    &source_root,
+                          const std::filesystem::path    &target_root,
+                          const std::vector<std::string> &bundles)
+{
+    size_t failed = 0;
+    for (const std::string &bundle : bundles)
+        if (allow_list_deployment(source_root, target_root, bundle) && !deploy_allow_list(source_root, target_root, bundle))
+            ++failed;
+    return failed;
+}
+
+bool install_then_deploy(const std::vector<std::string>                              &bundles,
+                         const std::function<bool(const std::vector<std::string> &)> &install,
+                         const std::filesystem::path                                  &source_root,
+                         const std::filesystem::path                                  &target_root,
+                         size_t                                                       *deploy_failures)
+{
+    const bool   installed = install(bundles);
+    const size_t failed    = deploy_allow_lists(source_root, target_root, bundles);
+    if (deploy_failures)
+        *deploy_failures = failed;
+    return installed;
+}
+
 FilamentOrderLoad load_filament_order(const std::filesystem::path &data_dir, const std::filesystem::path &resources_dir)
 {
     const std::filesystem::path user_path = data_dir / "system" / g_snapmaker_vendor / "filament" / g_allow_list_file_name;
@@ -323,6 +347,14 @@ FilamentOrderLoad load_filament_order(const std::filesystem::path &data_dir, con
     FilamentOrderLoad result;
     result.path  = choose_allow_list_copy(user_path, shipped_path, user_exists);
     result.order = FilamentOrder::from_file(result.path, &result.failure);
+    if (user_exists && result.order.empty() && !std::filesystem::equivalent(user_path, shipped_path, ec)) {
+        // The deployed copy is unusable: fall back to the shipped one before giving up.
+        FilamentOrderLoad shipped;
+        shipped.path  = shipped_path;
+        shipped.order = FilamentOrder::from_file(shipped.path, &shipped.failure);
+        if (!shipped.order.empty())
+            return shipped;
+    }
     return result;
 }
 

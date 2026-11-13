@@ -413,6 +413,64 @@ TEST_CASE("load_filament_order prefers the deployed copy and falls back to the s
     CHECK(deployed.order.rank("Snapmaker", "PETG HF") == 0);
 }
 
+TEST_CASE("load_filament_order falls back to the shipped copy when the deployed one is corrupt", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_load_corrupt_test");
+    const auto data = scratch.path / "data";
+    const auto res  = scratch.path / "res";
+    const auto shipped_path = res / "profiles" / "Snapmaker" / "filament" / "filament_allow_list.json";
+    write_file(shipped_path, k_order_json);
+    write_file(data / "system" / "Snapmaker" / "filament" / "filament_allow_list.json", "{ not json");
+
+    const FilamentOrderLoad load = load_filament_order(data, res);
+    CHECK(load.path == shipped_path);
+    CHECK(load.failure.empty());
+    CHECK(load.order.rank("Snapmaker", "PLA Matte") == 0);
+
+    // Both unusable: report the failure, empty order.
+    write_file(shipped_path, "also not json");
+    const FilamentOrderLoad none = load_filament_order(data, res);
+    CHECK(none.order.empty());
+    CHECK_FALSE(none.failure.empty());
+}
+
+TEST_CASE("deploy_allow_lists deploys every bundle and counts failures", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_deploy_many_test");
+    const auto src = scratch.path / "rsrc";
+    const auto dst = scratch.path / "data" / "system";
+    write_file(src / "Snapmaker" / "filament" / "filament_allow_list.json", k_order_json);
+
+    CHECK(deploy_allow_lists(src, dst, {"BBL", "Snapmaker"}) == 0); // BBL has nothing to deploy: not a failure
+    CHECK(std::filesystem::exists(dst / "Snapmaker" / "filament" / "filament_allow_list.json"));
+
+    // Source present but target unwritable: a file where the vendor directory must go.
+    std::filesystem::remove_all(dst);
+    write_file(dst / "Snapmaker", "blocker");
+    CHECK(deploy_allow_lists(src, dst, {"Snapmaker"}) == 1);
+}
+
+TEST_CASE("install_then_deploy still deploys the allow-list when a bundle install fails", "[GUI][FilamentSort]")
+{
+    ScratchDir scratch("filament_sort_install_fail_test");
+    const auto src = scratch.path / "rsrc";
+    const auto dst = scratch.path / "data" / "system";
+    const auto deployed = dst / "Snapmaker" / "filament" / "filament_allow_list.json";
+    write_file(src / "Snapmaker" / "filament" / "filament_allow_list.json", k_order_json);
+
+    const std::vector<std::string> bundles = {"BBL", "Snapmaker"};
+    std::vector<std::string> seen;
+    const auto failing = [&](const std::vector<std::string> &b) { seen = b; return false; };
+    CHECK_FALSE(install_then_deploy(bundles, failing, src, dst));
+    CHECK(seen == bundles);
+    CHECK(std::filesystem::exists(deployed));
+
+    std::filesystem::remove_all(dst);
+    const auto ok = [](const std::vector<std::string> &) { return true; };
+    CHECK(install_then_deploy(bundles, ok, src, dst));
+    CHECK(std::filesystem::exists(deployed));
+}
+
 TEST_CASE("load_filament_order reports why nothing loaded", "[GUI][FilamentSort]")
 {
     ScratchDir scratch("filament_sort_load_missing_test");
@@ -512,4 +570,36 @@ TEST_CASE("system comparator is a strict weak ordering over mixed input", "[GUI]
                     CHECK(cmp(a, c));
         }
     }
+}
+
+TEST_CASE("system comparator sorts with std::sort when rows share a rank and vendors differ in case", "[GUI][FilamentSort]")
+{
+    const FilamentOrder order = parse_order(k_order_json);
+    // Two printer variants of one product share a configured rank; "snapmaker" arrives in lower case.
+    const std::vector<SystemFilamentRow> rows = {
+        make_row("Snapmaker PLA Matte @U1", "Snapmaker", "PLA", 0), make_row("Snapmaker PLA Matte @J1", "Snapmaker", "PLA", 1),
+        make_row("Snapmaker PETG HF", "snapmaker", "PETG", 2),      make_row("Snapmaker ABS", "SNAPMAKER", "ABS", 3),
+        make_row("Bambu PLA Basic", "Bambu", "PLA", 4),             make_row("Generic PLA", "generic", "PLA", 5),
+        make_row("Other PLA", "Other", "PLA", 6)};
+    const SystemFilamentComparator cmp(order);
+    for (const auto &a : rows) {
+        CHECK_FALSE(cmp(a, a));
+        for (const auto &b : rows) {
+            if (cmp(a, b))
+                CHECK_FALSE(cmp(b, a));
+            for (const auto &c : rows) {
+                if (cmp(a, b) && cmp(b, c))
+                    CHECK(cmp(a, c));
+                // Equivalence must be transitive too.
+                if (!cmp(a, b) && !cmp(b, a) && !cmp(b, c) && !cmp(c, b))
+                    CHECK((!cmp(a, c) && !cmp(c, a)));
+            }
+        }
+    }
+    auto sorted_a = rows;
+    auto sorted_b = std::vector<SystemFilamentRow>(rows.rbegin(), rows.rend());
+    std::sort(sorted_a.begin(), sorted_a.end(), cmp);
+    std::sort(sorted_b.begin(), sorted_b.end(), cmp);
+    for (size_t i = 0; i < rows.size(); ++i)
+        CHECK(sorted_a[i].item.display_name == sorted_b[i].item.display_name); // input order does not leak in
 }
