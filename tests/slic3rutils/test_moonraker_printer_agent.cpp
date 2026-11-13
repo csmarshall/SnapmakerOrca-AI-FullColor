@@ -914,6 +914,41 @@ TEST_CASE("Print preferences are sent as one script before the print starts", "[
     CHECK(scripts[1] == "SDCARD_PRINT_FILE FILENAME=\"ignored.gcode\"");
 }
 
+TEST_CASE("The extruder map is sent before the preferences and the print", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    PrintParams params = preference_params(file, true, false, true);
+    params.ams_mapping = "[2,0]";
+    REQUIRE(agent.start_local_print(params, nullptr, nullptr) == BAMBU_NETWORK_SUCCESS);
+    const auto scripts = printer.scripts();
+    REQUIRE(scripts.size() == 3);
+    CHECK(scripts[0] == "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=2\nSET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=1 MAP_EXTRUDER=0\n"
+                        "SET_PRINT_USED_EXTRUDERS EXTRUDERS=2,0");
+    CHECK(scripts[1] == build_snapmaker_print_preference_script(true, false, true));
+    CHECK(scripts[2] == "SDCARD_PRINT_FILE FILENAME=\"ignored.gcode\"");
+}
+
+TEST_CASE("An invalid extruder mapping stops the print before anything is sent", "[MoonrakerPrinterAgent][PrintPreference][ExtruderMap]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    const auto  file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+
+    for (const char* bad : {"[0,-1]", "[7]", "not json"}) {
+        PrintParams params = preference_params(file, true, false, true);
+        params.ams_mapping = bad;
+        CHECK(agent.start_local_print(params, nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);
+    }
+    CHECK(printer.scripts().empty());
+}
+
 TEST_CASE("A print whose preferences are refused does not start", "[MoonrakerPrinterAgent][PrintPreference]")
 {
     TempDir     dir;

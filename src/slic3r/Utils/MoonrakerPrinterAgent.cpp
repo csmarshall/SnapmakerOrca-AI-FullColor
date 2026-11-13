@@ -921,6 +921,22 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
         preferences_known_unsupported)
         BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: the printer has no SET_PRINT_PREFERENCE command, time-lapse / bed-leveling / flow-calibration choices are not applied";
     if (supports_print_preferences() && !preferences_known_unsupported) {
+        // The filament-to-extruder map goes before the preferences, as on Snapmaker's page (#118). An empty mapping sends no map lines.
+        std::vector<int> extruder_mapping;
+        if (!parse_snapmaker_ams_mapping(params.ams_mapping, extruder_mapping)) {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: the filament-to-extruder mapping is not valid, the print is not started";
+            return false;
+        }
+        const SnapmakerExtruderMapResult extruder_map = build_snapmaker_extruder_map_script(extruder_mapping);
+        if (!extruder_map.ok()) {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: " << extruder_map.error << ", the print is not started";
+            return false;
+        }
+        if (!extruder_map.script.empty() &&
+            (!is_snapmaker_extruder_map_script(extruder_map.script) || !send_gcode_sync(device_info.dev_id, extruder_map.script))) {
+            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: extruder map not applied, the print is not started";
+            return false;
+        }
         const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
                                                                                 params.task_bed_leveling);
         if (!is_snapmaker_print_preference_script(preferences) || !send_gcode_sync(device_info.dev_id, preferences)) {
