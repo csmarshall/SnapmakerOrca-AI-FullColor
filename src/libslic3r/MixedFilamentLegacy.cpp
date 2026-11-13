@@ -54,7 +54,7 @@ bool parse_int_token(const std::string &tok, int &out)
 bool parse_uint64_token(const std::string &tok, uint64_t &out)
 {
     const std::string t = trim_copy(tok);
-    if (t.empty())
+    if (t.empty() || t[0] == '-') // stoull would wrap a negative value
         return false;
     try {
         size_t consumed = 0;
@@ -102,7 +102,10 @@ std::vector<unsigned int> decode_gradient_ids(const std::string &components)
         auto flush = [&]() {
             if (token.empty())
                 return;
-            const unsigned int id = unsigned(std::strtoul(token.c_str(), nullptr, 10));
+            // untrusted: digits only, at most 5 of them, so the value can neither wrap nor be saturated
+            unsigned int id = 0;
+            if (!token.empty() && token.size() <= 5 && token.find_first_not_of("0123456789") == std::string::npos)
+                id = unsigned(std::strtoul(token.c_str(), nullptr, 10));
             if (id >= 1 && seen.insert(id).second)
                 ids.emplace_back(id);
             token.clear();

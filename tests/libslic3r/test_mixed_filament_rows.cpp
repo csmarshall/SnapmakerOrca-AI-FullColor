@@ -204,3 +204,36 @@ TEST_CASE("Mixed filament rows: rows the parser rejects are absent, not half-par
     CHECK(parse_mixed_filaments("garbage", 3).empty());
     CHECK(parse_mixed_filaments(k_auto3, 1).empty());       // fewer than two physical filaments
 }
+
+TEST_CASE("Mixed filament rows: hostile numeric tokens neither wrap nor overflow", "[MixedFilament][rows][security]")
+{
+    // an id that would wrap to 1 (or 2) through a 32-bit truncation is not an id
+    CHECK(decode_gradient_component_ids("4294967297/2/3").size() == 2);
+    CHECK(decode_gradient_component_ids("4294967297/2/3") == std::vector<unsigned>{ 2, 3 });
+    CHECK(decode_gradient_component_ids("99999999999999999999/2") == std::vector<unsigned>{ 2 });
+    CHECK(decode_gradient_component_ids("-1/2") == std::vector<unsigned>{ 2 });
+    CHECK(normalize_gradient_component_ids("4294967297/2").find('1') == std::string::npos);
+
+    // weights: out-of-range tokens make the whole list invalid rather than UB
+    CHECK(normalize_gradient_component_weights("99999999999999999999/1/1", 3).empty());
+    CHECK(normalize_gradient_component_weights("2147483648/1/1", 3).empty());
+    CHECK(normalize_gradient_component_weights("-5/1/1", 3) == "72/14/14"); // '-' is a separator: tokens 5,1,1
+    CHECK(normalize_gradient_component_weights("nan/inf/1e999", 3).empty());
+    // huge but accepted weights are clamped to 10000 and the sum cannot overflow
+    CHECK(normalize_gradient_component_weights("99999/99999/99999", 3) == "34/33/33");
+    CHECK(normalize_gradient_component_weights("10000/10000/10000", 3) == "34/33/33");
+
+    // thousands of weights: bounded work, empty result
+    std::string many;
+    for (int i = 0; i < 20000; ++i)
+        many += (i ? "/1" : "1");
+    CHECK(normalize_gradient_component_weights(many, 3).empty());
+    CHECK(normalize_gradient_component_weights(many, 20000).empty());
+    CHECK(decode_gradient_component_ids(many).size() == 1);
+
+    // the slice-1 parser: the same tokens in a row do not wrap into valid ids, and a negative stable id is ignored
+    CHECK(parse_mixed_filaments("1,2,1,1,50,0,g4294967297/2,w,m2,z0,xa0,xb0,d0,o0,u1", 3).size() <= 1);
+    const std::vector<MixedFilament> r = parse_mixed_filaments("1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u-1", 3);
+    REQUIRE(r.size() == 1);
+    CHECK(r[0].stable_id == 0);
+}

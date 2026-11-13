@@ -18,23 +18,54 @@ int clamp_int(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
 float clamp_surface_offset(float v) { return std::clamp(v, -2.f, 2.f); }
 
+// The project string is untrusted input: every numeric token is range-checked before it is converted.
+constexpr size_t kMaxTokenDigits      = 5;     // longer tokens are rejected, not wrapped or clamped
+constexpr int    kMaxWeight           = 10000; // per-weight clamp
+constexpr size_t kMaxWeightTokens     = 256;   // more weights than this is not a mixed filament
+
+// Digits-only token to a value in [0, 99999]; false when it has more than kMaxTokenDigits digits.
+bool parse_bounded_token(const std::string &token, int &out)
+{
+    if (token.empty() || token.size() > kMaxTokenDigits)
+        return false;
+    long v = 0;
+    for (const char c : token) {
+        if (c < '0' || c > '9')
+            return false;
+        v = v * 10 + (c - '0');
+    }
+    out = int(v);
+    return true;
+}
+
+// Non-digits separate tokens. Returns an empty vector (invalid) on an over-long token or too many tokens.
 std::vector<int> parse_gradient_weight_tokens(const std::string &weights)
 {
     std::vector<int> out;
     std::string token;
+    bool        valid = true;
+    auto flush = [&]() {
+        if (token.empty())
+            return;
+        int v = 0;
+        if (!parse_bounded_token(token, v) || out.size() >= kMaxWeightTokens)
+            valid = false;
+        else
+            out.emplace_back(std::min(v, kMaxWeight));
+        token.clear();
+    };
     for (const char c : weights) {
         if (c >= '0' && c <= '9') {
-            token.push_back(c);
+            if (token.size() <= kMaxTokenDigits) // keep the buffer bounded; an over-long token is already invalid
+                token.push_back(c);
             continue;
         }
-        if (!token.empty()) {
-            out.emplace_back(std::max(0, std::atoi(token.c_str())));
-            token.clear();
-        }
+        flush();
+        if (!valid)
+            return {};
     }
-    if (!token.empty())
-        out.emplace_back(std::max(0, std::atoi(token.c_str())));
-    return out;
+    flush();
+    return valid ? out : std::vector<int>();
 }
 
 std::vector<int> normalize_weight_vector_to_percent(const std::vector<int> &weights)
@@ -42,22 +73,22 @@ std::vector<int> normalize_weight_vector_to_percent(const std::vector<int> &weig
     std::vector<int> out(weights.size(), 0);
     if (weights.empty())
         return out;
-    int sum = 0;
+    int64_t sum = 0;
     for (const int w : weights)
-        sum += std::max(0, w);
+        sum += std::clamp(w, 0, kMaxWeight);
     if (sum <= 0)
         return out;
 
     std::vector<double> remainders(weights.size(), 0.);
     int assigned = 0;
     for (size_t i = 0; i < weights.size(); ++i) {
-        const double exact = 100.0 * double(std::max(0, weights[i])) / double(sum);
+        const double exact = std::clamp(100.0 * double(std::clamp(weights[i], 0, kMaxWeight)) / double(sum), 0.0, 100.0);
         out[i] = int(std::floor(exact));
         remainders[i] = exact - double(out[i]);
         assigned += out[i];
     }
     int missing = std::max(0, 100 - assigned);
-    while (missing > 0) {
+    for (size_t guard = 0; missing > 0 && guard < weights.size(); ++guard) {
         size_t best_idx = 0;
         double best_rem = -1.0;
         for (size_t i = 0; i < remainders.size(); ++i) {
@@ -157,7 +188,8 @@ std::vector<unsigned int> decode_gradient_component_ids(const std::string &compo
         auto flush = [&]() {
             if (token.empty())
                 return;
-            const unsigned int id = unsigned(std::strtoul(token.c_str(), nullptr, 10));
+            int parsed = 0;
+            const unsigned int id = parse_bounded_token(token, parsed) ? unsigned(parsed) : 0u;
             if (id >= 1 && (!validate || id <= num_physical) && seen.insert(id).second)
                 ids.emplace_back(id);
             token.clear();
