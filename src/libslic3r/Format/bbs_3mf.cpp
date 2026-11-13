@@ -6,6 +6,7 @@
 #include "../Utils.hpp"
 #include "../LocalesUtils.hpp"
 #include "../FilamentMixer.hpp"
+#include "../MixedFilamentLegacy.hpp"
 #include "../GCode.hpp"
 #include "../Geometry.hpp"
 #include "../GCode/ThumbnailData.hpp"
@@ -1327,6 +1328,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_is_snapmaker_orca { false };
         // filament_flow_support from a Snapmaker Orca project file, which this build does not define
         std::vector<std::string> m_project_flow_support;
+        // mixed_filament_definitions from a Snapmaker Orca project file (not an option of this build)
+        std::string m_legacy_mixed_definitions;
+        std::vector<std::string> m_legacy_mixed_warnings;
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
@@ -1602,6 +1606,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         //m_sla_support_points.clear();
         m_curr_metadata_name.clear();
         m_curr_characters.clear();
+        m_legacy_mixed_definitions.clear();
+        m_legacy_mixed_warnings.clear();
         //BBS: plater data init
         m_plater_data.clear();
         m_curr_instance.object_id = -1;
@@ -2475,6 +2481,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             ++object_idx;
         }
 
+        // A Snapmaker mixed-filament project: append its mixed rows as slots first, so their ids
+        // count toward max_filament_id below and the objects' extruder ids survive.
+        if (m_load_config && !m_legacy_mixed_definitions.empty()) {
+            LegacyMixedConversion converted = convert_legacy_mixed_filaments(config, m_legacy_mixed_definitions);
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Snapmaker mixed filament definitions converted, slots added " << converted.slots_added;
+            for (const std::string& w : converted.warnings)
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << w;
+            m_legacy_mixed_warnings = std::move(converted.warnings);
+        }
+
         const ConfigOptionStrings* filament_ids_opt = config.option<ConfigOptionStrings>("filament_settings_id");
         int max_filament_id = filament_ids_opt ? filament_ids_opt->size() : std::numeric_limits<int>::max();
         for (ModelObject* mo : m_model->objects) {
@@ -2600,6 +2616,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 inst->loaded_id = map_it->second.second;
                 map_it++;
             }
+        }
+
+        if (plate_data_list.size() > 0 && !m_legacy_mixed_warnings.empty()) {
+            for (PlateData* plate : plate_data_list)
+                if (plate != nullptr)
+                    for (const std::string& w : m_legacy_mixed_warnings) {
+                        GCodeProcessorResult::SliceWarning sw;
+                        sw.level = 1;
+                        sw.msg   = w;
+                        plate->warnings.push_back(sw);
+                    }
         }
 
         if ((plate_id > 0) && (plate_id <= m_plater_data.size())) {
@@ -2921,6 +2948,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     for (const auto &v : *it)
                         if (v.is_string())
                             m_project_flow_support.push_back(v.get<std::string>());
+                const auto mixed_it = j.find("mixed_filament_definitions");
+                if (mixed_it != j.end() && mixed_it->is_string())
+                    m_legacy_mixed_definitions = mixed_it->get<std::string>();
             } catch (const std::exception &e) {
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read filament_flow_support: " << e.what();
                 m_project_flow_support.clear();
