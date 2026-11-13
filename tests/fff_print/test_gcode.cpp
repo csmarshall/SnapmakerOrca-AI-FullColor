@@ -252,9 +252,11 @@ TEST_CASE("The G-code header names the first object's filament when printing by 
     CHECK(header_value("first_layer_temperature") == 250);
 }
 
-// A filament that starts above the first layer, such as a support interface, never touches the bed. Heating the
-// bed to its temperature would soften the filament the part stands on, so only first layer filaments count.
-TEST_CASE("The highest temperature bed formula ignores filaments that start above the first layer", "[GCode]")
+// Snapmaker takes the bed temperature as the max over every extruder the print uses (ADR 0004, issue #119), so a hot-bed filament
+// that first appears above the first layer, here a support interface, still sets the bed from the start. (This case used to
+// require the opposite, first layer filaments only, from the #99 work; that is superseded.) Expectation read from Snapmaker's
+// GCode.cpp get_bed_temperature_max, not run against a Snapmaker slice.
+TEST_CASE("The highest temperature bed formula counts every used filament, including ones that start above the first layer", "[GCode]")
 {
     // Filament 1: bed 65 on the first layer, 60 after it. Filament 2: bed 100. A 30 mm cap on a 10 mm tall stem prints
     // with filament 1 and is supported from the bed, the support with filament 1 and its interface under the cap
@@ -295,9 +297,40 @@ TEST_CASE("The highest temperature bed formula ignores filaments that start abov
             bed_temps.push_back(std::stoi(line.substr(6)));
     INFO("bed temperatures: " << Catch::Detail::stringify(bed_temps));
     REQUIRE_FALSE(bed_temps.empty());
-    CHECK(bed_temps.front() == 65);
-    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) != bed_temps.end());
-    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 100) == bed_temps.end());
+    CHECK(bed_temps.front() == 100);
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 65) == bed_temps.end());
+    CHECK(std::find(bed_temps.begin(), bed_temps.end(), 60) == bed_temps.end());
+}
+
+// The printer-level bed ceiling still applies when the hot-bed filament is only used above the first layer: the max over all used
+// extruders is taken after the user's 105 is lowered to the 100 limit (the U1 behaviour, issue #99 / #119).
+TEST_CASE("The all-extruder bed maximum is still clamped to the printer's bed limit", "[GCode][MachineTempLimit]")
+{
+    TriangleMesh mesh = make_cube(10, 10, 10);
+    mesh.translate(10, 10, 0);
+    TriangleMesh cap = make_cube(30, 30, 2);
+    cap.translate(0, 0, 10);
+    mesh.merge(cap);
+    DynamicPrintConfig config = Test::multifilament_config(2, {
+        {"bed_temperature_formula", "by_highest_temp"},
+        {"enable_prime_tower", 0},
+        {"enable_support", 1},
+        {"support_filament", 1},
+        {"support_interface_filament", 2},
+        {"curr_bed_type", "High Temp Plate"},
+        {"hot_plate_temp_initial_layer", "65,105"},
+        {"hot_plate_temp", "60,105"},
+        {"machine_max_bed_temperature", "100"},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+    });
+    const std::string gcode = Test::slice({mesh}, config);
+    REQUIRE(gcode.find("\nT1") != std::string::npos);
+    std::smatch m;
+    REQUIRE(std::regex_search(gcode, m, std::regex(R"(M190 S(\d+))")));
+    CHECK(std::stoi(m[1]) == 100);
+    CHECK(gcode.find("M190 S105") == std::string::npos);
+    CHECK(gcode.find("M140 S105") == std::string::npos);
 }
 
 TEST_CASE("Object label comments number each object and copy with or without exclude object", "[GCode]")
