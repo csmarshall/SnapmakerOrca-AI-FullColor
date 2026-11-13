@@ -1346,34 +1346,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
 
-    // Printer-level temperature ceilings (0 = none). Clamped here, once, so every emitting consumer (G-code, placeholders) sees the same value;
-    // GCode::append_full_config writes the recorded user values back into the config block.
     m_temperature_clamps.clear();
-    {
-        const int max_bed    = new_full_config.opt_int("machine_max_bed_temperature");
-        const int max_nozzle = new_full_config.opt_int("machine_max_nozzle_temperature");
-        auto clamp_key = [&](const std::string &key, int limit, bool bed) {
-            if (limit <= 0 || key.empty())
-                return;
-            auto *opt = new_full_config.option<ConfigOptionInts>(key);
-            if (opt == nullptr)
-                return;
-            for (size_t i = 0; i < opt->values.size(); ++i)
-                if (opt->values[i] > limit) {
-                    m_temperature_clamps.push_back({ key, bed, int(i), opt->values[i], limit });
-                    opt->values[i] = limit;
-                }
-        };
-        if (max_bed > 0) {
-            // Only the active plate: the others are not printed on, and their values stay as the user wrote them.
-            const auto *bt = new_full_config.option<ConfigOptionEnum<BedType>>("curr_bed_type");
-            const BedType bed_type = bt ? bt->value : btPC;
-            clamp_key(get_bed_temp_key(bed_type), max_bed, true);
-            clamp_key(get_bed_temp_1st_layer_key(bed_type), max_bed, true);
-        }
-        clamp_key("nozzle_temperature", max_nozzle, false);
-        clamp_key("nozzle_temperature_initial_layer", max_nozzle, false);
-    }
 
     // BBS
     std::vector <unsigned int> used_filaments = this->extruders(true);
@@ -1492,6 +1465,47 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         {
             print_variant_index[e_index] = e_index;
         }
+    }
+
+    // Printer-level temperature ceilings (0 = none). Applied AFTER the per-extruder/variant expansion above, so a record names the final
+    // slot of the vector the G-code reads (GCode::append_full_config restores the user's value there, Print::validate warns about it).
+    // m_ori_full_print_config (the unexpanded snapshot the engine write-back re-expands from) is clamped row by row, silently, so it stays consistent.
+    {
+        const int max_bed    = new_full_config.opt_int("machine_max_bed_temperature");
+        const int max_nozzle = new_full_config.opt_int("machine_max_nozzle_temperature");
+        const auto *bt       = new_full_config.option<ConfigOptionEnum<BedType>>("curr_bed_type");
+        // Only the active plate: the others are not printed on, and their values stay as the user wrote them.
+        const BedType bed_type = bt ? bt->value : btPC;
+        // A slot past the filament count (a filament that prints through several variants) belongs to the filament filament_self_index names.
+        const auto *self_index = new_full_config.option<ConfigOptionInts>("filament_self_index");
+        const auto *ids        = new_full_config.option<ConfigOptionStrings>("filament_settings_id");
+        const size_t n_filaments = ids ? ids->values.size() : 0;
+        auto filament_of_slot = [&](size_t slot) {
+            if (slot >= n_filaments && self_index && slot < self_index->values.size() && self_index->values[slot] >= 1)
+                return int(self_index->values[slot]) - 1;
+            return int(slot);
+        };
+        auto clamp_key = [&](const std::string &key, int limit, bool bed) {
+            if (limit <= 0 || key.empty())
+                return;
+            if (auto *ori = m_ori_full_print_config.option<ConfigOptionInts>(key))
+                for (int &v : ori->values)
+                    v = std::min(v, limit);
+            auto *opt = new_full_config.option<ConfigOptionInts>(key);
+            if (opt == nullptr)
+                return;
+            for (size_t i = 0; i < opt->values.size(); ++i)
+                if (opt->values[i] > limit) {
+                    m_temperature_clamps.push_back({ key, bed, filament_of_slot(i), int(i), opt->values[i], limit });
+                    opt->values[i] = limit;
+                }
+        };
+        if (max_bed > 0) {
+            clamp_key(get_bed_temp_key(bed_type), max_bed, true);
+            clamp_key(get_bed_temp_1st_layer_key(bed_type), max_bed, true);
+        }
+        clamp_key("nozzle_temperature", max_nozzle, false);
+        clamp_key("nozzle_temperature_initial_layer", max_nozzle, false);
     }
 
     // Fill in physical_extruder_map when the printer profile has not authored one. It has one

@@ -1414,7 +1414,8 @@ public:
     {
         std::string key;           // the config key that was lowered, e.g. "hot_plate_temp_initial_layer"
         bool        bed      = false;
-        int         filament = 0;  // 0-based filament slot
+        int         filament = 0;  // 0-based filament (for the name in the warning)
+        int         slot     = 0;  // index in the final, variant-expanded vector the G-code reads
         int         from     = 0;
         int         to       = 0;
     };
