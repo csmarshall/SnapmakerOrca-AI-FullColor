@@ -8,6 +8,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <cctype>
 #include <cstddef>
+#include <filesystem>
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Config.hpp"
 #include <map>
@@ -18,6 +19,7 @@
 #include "slic3r/GUI/Widgets/StateColor.hpp"
 #include "slic3r/GUI/GUI_Utils.hpp"
 #include "slic3r/GUI/EncodedFilament.hpp"
+#include "slic3r/GUI/FilamentSort.hpp"
 #include <unordered_set>
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/CalibrationWizardPage.hpp"
@@ -225,6 +227,22 @@ void PresetComboBox::validate_selection(bool predicate/*=false*/)
         // just in case: mark m_last_selected as a first added element
         m_last_selected == INT_MAX)
         m_last_selected = GetCount() - 1;
+}
+
+// Loaded once per process: popup refreshes must not read files, and a deployed allow-list that PresetUpdater
+// replaces takes effect after the next restart.
+static const FilamentOrder &system_filament_order()
+{
+    static const FilamentOrder order = [] {
+        const FilamentOrderLoad loaded = load_filament_order(std::filesystem::u8path(Slic3r::data_dir()),
+                                                             std::filesystem::u8path(Slic3r::resources_dir()));
+        if (loaded.order.empty())
+            BOOST_LOG_TRIVIAL(warning) << "FilamentOrder " << loaded.failure << ": " << loaded.path.u8string();
+        else
+            BOOST_LOG_TRIVIAL(info) << "FilamentOrder loaded: " << loaded.path.u8string();
+        return loaded.order;
+    }();
+    return order;
 }
 
 void PresetComboBox::update_selection()
@@ -1387,11 +1405,7 @@ void PlaterPresetComboBox::update()
         selected_in_ams = add_ams_filaments(into_u8(selected_alias), true);
     }
 
-    std::vector<wxString> filament_orders = {"Bambu PLA Basic", "Bambu PLA Matte", "Bambu PETG HF",    "Bambu ABS",      "Bambu PLA Silk", "Bambu PLA-CF",
-                                                "Bambu PLA Galaxy", "Bambu PLA Metal", "Bambu PLA Marble", "Bambu PETG-CF", "Bambu PETG Translucent", "Bambu ABS-GF"};
-    std::vector<std::string> first_vendors     = {"", "Bambu", "Generic"}; // Empty vendor for non-system presets
-    std::vector<std::string> first_types     = {"PLA", "PETG", "ABS", "TPU"};
-    auto  add_presets       = [this, &preset_descriptions, &filament_orders, &preset_filament_vendors, &first_vendors, &preset_filament_types, &preset_aliases, &preset_bundle_ids, &preset_bundle_names, &first_types, &selected_in_ams]
+    auto  add_presets       = [this, &preset_descriptions, &preset_filament_vendors, &preset_filament_types, &preset_aliases, &preset_bundle_ids, &preset_bundle_names, &selected_in_ams]
             (std::map<wxString, wxBitmap *> const &presets, wxString const &selected, std::string const &group, wxString const &groupName) {
         if (!presets.empty()) {
             set_label_marker(Append(_L(group), wxNullBitmap, DD_ITEM_STYLE_SPLIT_ITEM));
@@ -1404,27 +1418,23 @@ void PlaterPresetComboBox::update()
                 //    else SetString(GetCount() - 1, "");
                 //}
                 if (m_type == Preset::TYPE_FILAMENT && (group == "System presets" || group == "Unsupported presets"))
-                    std::sort(list.begin(), list.end(), [&filament_orders, &preset_filament_vendors, &first_vendors, &preset_filament_types, &first_types](auto *l, auto *r) {
-                        { // Compare order
-                            auto iter1 = std::find(filament_orders.begin(), filament_orders.end(), l->first);
-                            auto iter2 = std::find(filament_orders.begin(), filament_orders.end(), r->first);
-                            if (iter1 != iter2)
-                                return iter1 < iter2;
-                        }
-                        { // Compare vendor
-                            auto iter1 = std::find(first_vendors.begin(), first_vendors.end(), preset_filament_vendors[l->first]);
-                            auto iter2 = std::find(first_vendors.begin(), first_vendors.end(), preset_filament_vendors[r->first]);
-                            if (iter1 != iter2)
-                                return iter1 < iter2;
-                        }
-                        { // Compare type
-                            auto iter1 = std::find(first_types.begin(), first_types.end(), preset_filament_types[l->first]);
-                            auto iter2 = std::find(first_types.begin(), first_types.end(), preset_filament_types[r->first]);
-                            if (iter1 != iter2)
-                                return iter1 < iter2;
-                        }
-                        return l->first < r->first;
-                    });
+                {
+                    // Snapmaker's configured order first, then the previous Bambu/vendor/type fallbacks.
+                    const SystemFilamentComparator comparator(system_filament_order());
+                    std::vector<std::pair<SystemFilamentRow, decltype(list)::value_type>> keyed;
+                    keyed.reserve(list.size());
+                    for (size_t i = 0; i < list.size(); ++i) {
+                        const auto vendor_it = preset_filament_vendors.find(list[i]->first);
+                        const auto type_it   = preset_filament_types.find(list[i]->first);
+                        keyed.emplace_back(make_system_filament_row(list[i]->first,
+                                                                         vendor_it != preset_filament_vendors.end() ? vendor_it->second : std::string(),
+                                                                         type_it != preset_filament_types.end() ? type_it->second : std::string(), i),
+                                           list[i]);
+                    }
+                    std::sort(keyed.begin(), keyed.end(), [&comparator](const auto &l, const auto &r) { return comparator(l.first, r.first); });
+                    for (size_t i = 0; i < keyed.size(); ++i)
+                        list[i] = keyed[i].second;
+                }
                 // ORCA add sorting support for vendor / type for user presets. also non grouped items
                 if (groupName == "by_bundle" || groupName == "by_vendor" || groupName == "by_type" || groupName == ""){
                     auto by = groupName == "by_bundle" ? preset_bundle_names
