@@ -333,6 +333,39 @@ TEST_CASE("The all-extruder bed maximum is still clamped to the printer's bed li
     CHECK(gcode.find("M140 S105") == std::string::npos);
 }
 
+// A mixed slot is virtual; the filaments it prints with are its components, so the hotter component sets the bed (Snapmaker has no mixed
+// slots, so this is our extension of its all-extruders rule).
+TEST_CASE("The bed maximum counts the components of a mixed filament", "[GCode]")
+{
+    DynamicPrintConfig config = Test::multifilament_config(3, {
+        {"filament_is_mixed",                "0,0,1"},
+        {"filament_mixed_components",        ";;1,2"},
+        {"filament_mixed_sublayer_ratios",   ";;0.6,0.4"},
+        {"filament_mixed_gradient",          "0,0,0"},
+        {"filament_mixed_gradient_range",    ";;"},
+        {"filament_mixed_gradient_curve",    ";;"},
+        {"filament_mixed_gradient_per_part", "0,0,0"},
+        {"bed_temperature_formula",          "by_highest_temp"},
+        {"curr_bed_type",                    "High Temp Plate"},
+        // component 1 is cool, component 2 hot, the virtual slot's own entry is a lower placeholder
+        {"hot_plate_temp_initial_layer",     "60,100,50"},
+        {"hot_plate_temp",                   "55,95,45"},
+        {"outer_wall_filament_id",           "3"},
+        {"inner_wall_filament_id",           "3"},
+        {"sparse_infill_filament_id",        "3"},
+        {"internal_solid_filament_id",       "3"},
+        {"top_surface_filament_id",          "3"},
+        {"bottom_surface_filament_id",       "3"},
+        {"enable_prime_tower",               0},
+        {"skirt_loops",                      0},
+        {"brim_type",                        "no_brim"},
+    });
+    const std::string gcode = Test::slice({Test::cube(20)}, config);
+    std::smatch m;
+    REQUIRE(std::regex_search(gcode, m, std::regex(R"(M190 S(\d+))")));
+    CHECK(std::stoi(m[1]) == 100);
+}
+
 // Snapmaker's start G-code reads chamber_cooling_mode (0 keep warm, 1 weak, 2 strong); filaments flagged filament_is_high_temperature
 // are skipped, as in Snapmaker's GCode.cpp. Expectations are from that source, not from a Snapmaker slice.
 TEST_CASE("chamber_cooling_mode skips high-temperature filaments", "[GCode]")

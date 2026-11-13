@@ -5582,7 +5582,8 @@ int GCode::get_highest_bed_temperature(const bool is_first_layer, const Print& p
     // Snapmaker takes the max over every extruder the print uses (object, support, wipe tower, brim), not only the ones on the first layer,
     // so a hot-bed filament that first appears at layer 5 still sets the bed from the start (ADR 0004, issue #119).
     // A value of 0 means the filament does not support the current bed type and is skipped by max().
-    for (const unsigned int fidx : print.extruders())
+    // A mixed slot is virtual (its own bed entry is a placeholder): the filaments it prints with are its components.
+    for (const unsigned int fidx : expand_mixed_filaments(print.extruders(), m_config.filament_is_mixed.values, m_config.filament_mixed_components.values))
         bed_temp = std::max(bed_temp, get_bed_temperature(fidx, is_first_layer, bed_type));
     return bed_temp;
 }
