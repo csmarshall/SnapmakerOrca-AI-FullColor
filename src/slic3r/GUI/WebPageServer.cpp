@@ -1,4 +1,5 @@
 #include "WebPageServer.hpp"
+#include "PreprintCapabilityStore.hpp"
 #include <cstring>
 #include <regex>
 #include <sstream>
@@ -212,6 +213,7 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
     std::string             csp;            // the policy sent on every response; set by start()
     std::string             extra_origin;   // validated by set_extra_origin(); added to csp by start()
     fs::path                canonical_root; // set by start()
+    std::shared_ptr<PreprintCapabilityStore> caps; // opt-in; set before start()
     std::string             token = make_token();
     std::string             expected_host;
     std::string             expected_origin;
@@ -235,10 +237,13 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
         fs::path     file;
         std::string  location; // for 302
         bool         set_cookie = false;
+        bool         capability = false; // file is a capability snapshot: send as octet-stream, then finish_serve(cap_key)
+        std::string  cap_key;
+        std::uint64_t cap_size = 0;
     };
 
     Outcome route(http::verb method, const std::string& target, const std::string& host, const std::string& origin, bool has_origin,
-                  const std::string& cookie_header, bool has_fetch_site, const std::string& fetch_site) const
+                  const std::string& cookie_header, bool has_fetch_site, const std::string& fetch_site, bool has_range = false) const
     {
         Outcome out;
         // DNS rebinding and cross-site requests: before anything else.
@@ -255,6 +260,22 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
         const bool token_from_query  = !q_token.empty() && constant_time_equal(q_token, token);
         const bool token_from_cookie = cookie_matches(cookie_header, cookie_name, token);
         if (!token_from_query && !token_from_cookie) return out; // 403
+
+        if (caps && raw_path.compare(0, std::strlen(PreprintCapabilityStore::path_prefix), PreprintCapabilityStore::path_prefix) == 0) {
+            if (!token_from_cookie) return out;   // the cookie is required here; the query token only bootstraps the bundle page
+            if (method != http::verb::get) { out.status = http::status::method_not_allowed; return out; } // no HEAD either
+            if (has_range) { out.status = http::status::range_not_satisfiable; return out; }
+            const auto serve = caps->begin_serve(raw_path); // exact match on the whole path
+            switch (serve.status) {
+            case PreprintCapabilityStore::Status::Ok:
+                out.status = http::status::ok; out.file = serve.snapshot; out.capability = true; out.cap_key = raw_path; out.cap_size = serve.size;
+                break;
+            case PreprintCapabilityStore::Status::Gone:    out.status = http::status::gone; break;
+            case PreprintCapabilityStore::Status::Corrupt: out.status = http::status::internal_server_error; break;
+            default:                                       out.status = http::status::not_found; break;
+            }
+            return out;
+        }
 
         if (method != http::verb::get && method != http::verb::head) {
             out.status = http::status::method_not_allowed;
@@ -391,7 +412,8 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             const auto  range = req.equal_range(http::field::cookie);
             for (auto it = range.first; it != range.second; ++it) cookie += std::string(it->value()) + "; ";
 
-            const Outcome o = impl->route(req.method(), target, host, origin, has_origin, cookie, has_fetch_site, fetch_site);
+            const bool    has_range = req.find(http::field::range) != req.end();
+            const Outcome o = impl->route(req.method(), target, host, origin, has_origin, cookie, has_fetch_site, fetch_site, has_range);
             // Diagnostics for "the page does not load": what the webview asked for and what we answered. The query (token) is never logged.
             BOOST_LOG_TRIVIAL(trace) << "WebPageServer: " << std::string(req.method_string()) << " " << target.substr(0, target.find('?'))
                                     << " host=" << host << " origin=" << (has_origin ? origin : std::string("-"))
@@ -403,6 +425,10 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             }
             if (o.status != http::status::ok) {
                 send_status(o.status);
+                return;
+            }
+            if (o.capability) {
+                send_capability(o);
                 return;
             }
 
@@ -433,6 +459,30 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             res->prepare_payload();
             finish_write(res, k_file_timeout);
             http::async_write(stream, *res, [self = shared_from_this()](beast::error_code, std::size_t) { self->shutdown(); });
+        }
+
+        // One-shot snapshot download. The capability is consumed only when the whole body was written without error.
+        void send_capability(const Outcome& o)
+        {
+            beast::error_code ec;
+            http::file_body::value_type body;
+            body.open(o.file.string().c_str(), beast::file_mode::scan, ec);
+            if (ec || body.size() != o.cap_size) {
+                body.close();
+                impl->caps->finish_serve(o.cap_key, false);
+                send_status(http::status::internal_server_error);
+                return;
+            }
+            auto res = std::make_shared<Response>(http::status::ok, 11);
+            common_headers(*res); // no-store, nosniff, no CORS
+            res->set(http::field::content_type, "application/octet-stream");
+            res->body() = std::move(body);
+            res->prepare_payload(); // fixed Content-Length = snapshot size
+            finish_write(res, k_file_timeout);
+            http::async_write(stream, *res, [self = shared_from_this(), key = o.cap_key](beast::error_code wec, std::size_t) {
+                self->impl->caps->finish_serve(key, !wec);
+                self->shutdown();
+            });
         }
 
         std::string set_cookie_header() const
@@ -549,6 +599,13 @@ bool WebPageServer::set_extra_origin(const std::string& origin)
     static const std::regex ok(R"(^http://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])$)");
     if (!std::regex_match(origin, ok)) return false;
     m_impl->extra_origin = origin;
+    return true;
+}
+
+bool WebPageServer::set_capability_store(std::shared_ptr<PreprintCapabilityStore> store)
+{
+    if (m_impl->running) return false;
+    m_impl->caps = std::move(store);
     return true;
 }
 

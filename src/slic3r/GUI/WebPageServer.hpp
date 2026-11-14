@@ -9,6 +9,8 @@
 
 namespace Slic3r { namespace GUI {
 
+class PreprintCapabilityStore;
+
 // Serves one static directory (the vendored Snapmaker Flutter bundle, resources/web/flutter_web) to the
 // app's own webview. It exists only because the bundle needs http:// (service worker, wasm streaming,
 // <base href="/web/flutter_web/">), so it is deliberately small and hostile to everything else:
@@ -25,7 +27,10 @@ namespace Slic3r { namespace GUI {
 //  * Host must be exactly 127.0.0.1:<port> and Origin absent or exactly http://127.0.0.1:<port>
 //    (DNS rebinding and cross-site requests);
 //  * never sends Access-Control-Allow-Origin or any other CORS header;
-//  * GET and HEAD only; no directory listing; no endpoint that serves a file by caller-supplied path;
+//  * GET and HEAD only; no directory listing; no endpoint that serves a file by caller-supplied path, and no POST/upload endpoint.
+//    The ONE exception is opt-in: after set_capability_store(), GET /cap/<256-bit token>/<name> serves the private snapshot
+//    registered under exactly that path (PreprintCapabilityStore), once, with the session cookie required. Without a store the
+//    /cap/ prefix is just another 404;
 //  * every response (200, 302, 403, 404, 405, HEAD...) carries the Content-Security-Policy read at start() from
 //    flutter_web.csp next to the bundle: default-src 'none', hashes for the bundle's few inline blocks, frame-src 'none',
 //    no unsafe-inline / unsafe-eval. A missing, empty or malformed policy file makes start() fail (fail closed): the server
@@ -49,6 +54,9 @@ public:
     // snapshot. "" clears it. A rejected value also clears it and returns false, so the static policy stays in force. The origin is
     // fixed at start(): a machine change after that needs a restart (docs/third-party/flutter_web.md).
     bool set_extra_origin(const std::string& origin);
+
+    // Opt-in one-shot download capabilities (/cap/...). Must be called before start(); returns false if already running.
+    bool set_capability_store(std::shared_ptr<PreprintCapabilityStore> store);
 
     // Returns false (and logs) if the root does not exist, the policy file is missing/empty/malformed, or the socket cannot be bound.
     bool start();

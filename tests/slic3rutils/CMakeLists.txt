@@ -65,6 +65,7 @@ add_executable(${_TEST_NAME}_tests
     test_timelapse_codecs.cpp
     test_file_url.cpp
     test_web_page_server.cpp
+    test_preprint_capability.cpp
     test_sswcp.cpp
     test_snapmaker_device_ui.cpp
     test_print_host_agents.cpp
