@@ -8,8 +8,9 @@
 //                 trailing newline and upper-case keys;
 //        singular (aSb, setPrePrintConfiguration): the same map and used lines, then "SET_PRINT_PREFERENCE KEY=<k> VALUE=<v>" lines;
 //                 all lines joined by "\n", no trailing newline, at least one preference line.
-//      Not accepted (unverified whether the page ever sends them): singular with no preference line, a trailing newline after a
-//      preference line, a blank line.
+//      A script of map + used lines only, each "\n"-terminated (no preference line), IS accepted and labelled Plural.
+//      Not accepted (fail closed; unverified whether the page ever sends them): a script without a map or used line (preferences only),
+//      map + used with no trailing newline, a trailing newline after a preference line, a blank line.
 //   2. SnapmakerPreprintGate: Idle -> Open -> Configured -> Started -> Closed under one mutex. It decides; it never touches a printer.
 //      Printer facts (print_stats idle, metadata size) arrive as injected predicates, evaluated OUTSIDE the mutex (they may be slow),
 //      with an in-flight flag so two racing callers cannot both pass; a close during evaluation wins.
@@ -17,6 +18,7 @@
 // of the page JS: they show agreement, not firmware behaviour.
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -45,7 +47,9 @@ struct SnapmakerPreprintGcode
     std::vector<std::pair<std::string, int>> prefs; // lower-case key, 0/1
 };
 
-// Plain-data description of one open pre-print send, fixed at open time.
+// The pinned printer identity. host, port and serial (and SnapmakerPreprintOpen::remote_filename) are compared as EXACT strings: no case
+// folding, no trailing-dot or port normalisation. The caller must canonicalise the pinned value and the "current" value it presents
+// identically; a mismatch fails closed (refused).
 struct SnapmakerPreprintPin
 {
     std::string host, port, serial;
@@ -229,17 +233,18 @@ enum class SnapmakerPreprintState { Idle, Open, Configured, Started, Closed };
 enum class SnapmakerPreprintDecision {
     Allowed,
     RefusedNoContext,      // nothing open
+    RefusedStaleEpoch,     // the request carries an epoch from an earlier open()
     RefusedClosed,
     RefusedState,          // wrong state for the request (e.g. a script after Started)
     RefusedInvalid,        // script failed validation
     RefusedTooManyScripts, // a third script
     RefusedNotConfigured,  // start before the script when the page's options are non-empty
     RefusedAlreadyStarted, // also: a start already in flight
-    RefusedInFlight,       // another request is being evaluated
+    RefusedInFlight,       // another request is awaiting its confirm()
     RefusedFilename,
     RefusedPrinterChanged,
-    RefusedPrinterBusy,    // print_stats not idle, or no predicate (fail closed)
-    RefusedMetadata        // remote size differs from the snapshot, or no predicate (fail closed)
+    RefusedPrinterBusy,    // print_stats not idle, a throwing predicate, or no predicate (fail closed)
+    RefusedMetadata        // remote size differs from the snapshot, a throwing predicate, or no predicate (fail closed)
 };
 
 struct SnapmakerPreprintOpen
@@ -252,27 +257,52 @@ struct SnapmakerPreprintOpen
     bool                  configure_required = false; // the page's options are non-empty: a validated script must precede the start
 };
 
+// Proof that a request was Allowed. The caller must forward the script / start to the printer IMMEDIATELY and then call
+// SnapmakerPreprintGate::confirm(ticket, forward_succeeded). Until then the gate is "in flight" and refuses every other request.
+struct SnapmakerPreprintTicket
+{
+    std::uint64_t epoch = 0;
+    std::uint64_t op = 0;
+};
+
+struct SnapmakerPreprintResult
+{
+    SnapmakerPreprintDecision decision = SnapmakerPreprintDecision::RefusedNoContext;
+    SnapmakerPreprintTicket   ticket; // valid only when decision == Allowed
+    bool                      allowed() const { return decision == SnapmakerPreprintDecision::Allowed; }
+};
+
 class SnapmakerPreprintGate
 {
 public:
     using IdlePredicate     = std::function<bool()>;
     using MetadataPredicate = std::function<bool(const std::string& filename, std::uint64_t expected_size)>;
+    using D                 = SnapmakerPreprintDecision;
 
-    void open(SnapmakerPreprintOpen o)
+    // Validates and opens. Returns the epoch (> 0) every later request must present; 0 with `error` set and the gate left Idle when the
+    // parameters are unusable.
+    std::uint64_t open(SnapmakerPreprintOpen o, std::string& error)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        ++m_epoch;
+        ++m_op;
+        m_state = SnapmakerPreprintState::Idle;
+        m_open = SnapmakerPreprintOpen{};
+        m_in_flight = m_start_in_flight = false;
+        m_configures = 0;
+        error = validate_open(o);
+        if (!error.empty()) return 0;
         m_open = std::move(o);
         m_state = SnapmakerPreprintState::Open;
-        m_configures = 0;
-        m_in_flight = m_start_in_flight = false;
-        ++m_epoch;
+        return m_epoch;
     }
-    // Invalidate / close from any state.
+    // Invalidate / close from any state; an outstanding ticket becomes void.
     void close()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_state != SnapmakerPreprintState::Idle) m_state = SnapmakerPreprintState::Closed;
-        ++m_epoch;
+        ++m_op;
+        m_in_flight = m_start_in_flight = false;
     }
     SnapmakerPreprintState state() const
     {
@@ -280,78 +310,124 @@ public:
         return m_state;
     }
 
-    // Validates one sw_SendGCodes string. Allowed = the caller may forward `script` to the printer; nothing is sent here.
-    SnapmakerPreprintDecision request_configure(const std::string& script, const SnapmakerPreprintPin& current_printer, const IdlePredicate& idle,
-                                                SnapmakerPreprintGcode* parsed = nullptr)
+    // Validates one sw_SendGCodes string. Allowed = forward `script` now, then confirm(). Nothing is sent here. A throwing predicate
+    // is a refusal. The state becomes Configured only on confirm(ticket, true).
+    SnapmakerPreprintResult request_configure(std::uint64_t epoch, const std::string& script, const SnapmakerPreprintPin& current_printer,
+                                              const IdlePredicate& idle, SnapmakerPreprintGcode* parsed = nullptr)
     {
         std::vector<int> filaments;
         int              extruders = 0;
-        std::uint64_t    epoch = 0;
+        std::uint64_t    op = 0;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (auto d = state_refusal(/*start=*/false); d != SnapmakerPreprintDecision::Allowed) return d;
-            if (m_configures >= snapmaker_preprint_max_configures) return SnapmakerPreprintDecision::RefusedTooManyScripts;
-            if (current_printer != m_open.printer) return SnapmakerPreprintDecision::RefusedPrinterChanged;
+            if (auto d = state_refusal(epoch, /*start=*/false); d != D::Allowed) return {d, {}};
+            if (m_configures >= snapmaker_preprint_max_configures) return {D::RefusedTooManyScripts, {}};
+            if (current_printer != m_open.printer) return {D::RefusedPrinterChanged, {}};
             filaments = m_open.plate_filaments;
             extruders = m_open.extruder_count;
             m_in_flight = true;
-            epoch = m_epoch;
+            op = ++m_op;
         }
         SnapmakerPreprintGcode g = validate_snapmaker_preprint_gcode(script, filaments, extruders);
-        const bool             idle_ok = g.ok && idle && idle();
+        const bool             idle_ok = g.ok && safe_call([&] { return idle && idle(); });
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_epoch != epoch) return state_refusal(false) == SnapmakerPreprintDecision::Allowed ? SnapmakerPreprintDecision::RefusedState : state_refusal(false);
-        m_in_flight = false;
-        if (!g.ok) return SnapmakerPreprintDecision::RefusedInvalid;
-        if (!idle_ok) return SnapmakerPreprintDecision::RefusedPrinterBusy;
-        ++m_configures;
-        m_state = SnapmakerPreprintState::Configured;
+        if (op != m_op) return {state_refusal_after_void(epoch, false), {}}; // closed or reopened meanwhile
+        if (!g.ok || !idle_ok) {
+            m_in_flight = false;
+            return {!g.ok ? D::RefusedInvalid : D::RefusedPrinterBusy, {}};
+        }
         if (parsed) *parsed = std::move(g);
-        return SnapmakerPreprintDecision::Allowed;
+        return {D::Allowed, {m_epoch, op}};
     }
 
-    // One start of exactly the pinned file on the pinned printer. Allowed = the caller may forward the start; nothing is sent here.
-    SnapmakerPreprintDecision request_start(const std::string& filename, const SnapmakerPreprintPin& current_printer, const IdlePredicate& idle,
-                                            const MetadataPredicate& metadata_matches)
+    // One start of exactly the pinned file on the pinned printer. Allowed = forward the start now, then confirm(). Nothing is sent
+    // here. Started only on confirm(ticket, true); confirm(ticket, false) returns to the earlier state with the start budget intact.
+    SnapmakerPreprintResult request_start(std::uint64_t epoch, const std::string& filename, const SnapmakerPreprintPin& current_printer,
+                                          const IdlePredicate& idle, const MetadataPredicate& metadata_matches)
     {
         std::string   expected;
         std::uint64_t size = 0;
-        std::uint64_t epoch = 0;
+        std::uint64_t op = 0;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (auto d = state_refusal(/*start=*/true); d != SnapmakerPreprintDecision::Allowed) return d;
-            if (m_open.configure_required && m_state != SnapmakerPreprintState::Configured) return SnapmakerPreprintDecision::RefusedNotConfigured;
-            if (filename.empty() || filename != m_open.remote_filename) return SnapmakerPreprintDecision::RefusedFilename;
-            if (current_printer != m_open.printer) return SnapmakerPreprintDecision::RefusedPrinterChanged;
+            if (auto d = state_refusal(epoch, /*start=*/true); d != D::Allowed) return {d, {}};
+            if (m_open.configure_required && m_state != SnapmakerPreprintState::Configured) return {D::RefusedNotConfigured, {}};
+            if (filename.empty() || filename != m_open.remote_filename) return {D::RefusedFilename, {}};
+            if (current_printer != m_open.printer) return {D::RefusedPrinterChanged, {}};
             expected = m_open.remote_filename;
             size = m_open.snapshot_size;
             m_in_flight = m_start_in_flight = true;
-            epoch = m_epoch;
+            op = ++m_op;
         }
-        const bool idle_ok = idle && idle();
-        const bool meta_ok = idle_ok && metadata_matches && metadata_matches(expected, size);
+        const bool idle_ok = safe_call([&] { return idle && idle(); });
+        const bool meta_ok = idle_ok && safe_call([&] { return metadata_matches && metadata_matches(expected, size); });
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_epoch != epoch) return state_refusal(true) == SnapmakerPreprintDecision::Allowed ? SnapmakerPreprintDecision::RefusedState : state_refusal(true);
+        if (op != m_op) return {state_refusal_after_void(epoch, true), {}};
+        if (!idle_ok || !meta_ok) {
+            m_in_flight = m_start_in_flight = false;
+            return {!idle_ok ? D::RefusedPrinterBusy : D::RefusedMetadata, {}};
+        }
+        return {D::Allowed, {m_epoch, op}};
+    }
+
+    // Reports whether forwarding succeeded. True when the ticket was current and the transition was applied (or, for a failure, rolled
+    // back); false for a stale/void ticket (closed, reopened, already confirmed): nothing changes then.
+    bool confirm(const SnapmakerPreprintTicket& t, bool forwarded_ok)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_in_flight || t.op != m_op || t.epoch != m_epoch || m_state == SnapmakerPreprintState::Closed || m_state == SnapmakerPreprintState::Idle)
+            return false;
+        const bool was_start = m_start_in_flight;
         m_in_flight = m_start_in_flight = false;
-        if (!idle_ok) return SnapmakerPreprintDecision::RefusedPrinterBusy;
-        if (!meta_ok) return SnapmakerPreprintDecision::RefusedMetadata;
-        m_state = SnapmakerPreprintState::Started;
-        return SnapmakerPreprintDecision::Allowed;
+        if (forwarded_ok) {
+            if (was_start) m_state = SnapmakerPreprintState::Started;
+            else {
+                ++m_configures;
+                m_state = SnapmakerPreprintState::Configured;
+            }
+        }
+        return true;
     }
 
 private:
-    // Caller holds the mutex.
-    SnapmakerPreprintDecision state_refusal(bool start) const
+    static std::string validate_open(const SnapmakerPreprintOpen& o)
     {
+        if (o.printer.host.empty() || o.printer.port.empty() || o.printer.serial.empty()) return "the pinned printer identity is incomplete";
+        if (o.remote_filename.empty()) return "no remote filename";
+        if (o.extruder_count < 1 || o.extruder_count > snapmaker_max_extruders) return "invalid extruder count";
+        if (o.plate_filaments.empty()) return "the plate uses no filaments";
+        std::set<int> seen;
+        for (int f : o.plate_filaments)
+            if (f < 0 || f >= snapmaker_max_filaments || !seen.insert(f).second) return "invalid or duplicate plate filament index";
+        return {};
+    }
+    template<class F> static bool safe_call(F&& f)
+    {
+        try {
+            return f();
+        } catch (...) {
+            return false;
+        }
+    }
+    // Caller holds the mutex.
+    SnapmakerPreprintDecision state_refusal(std::uint64_t epoch, bool start) const
+    {
+        if (epoch != m_epoch) return D::RefusedStaleEpoch;
         switch (m_state) {
-        case SnapmakerPreprintState::Idle: return SnapmakerPreprintDecision::RefusedNoContext;
-        case SnapmakerPreprintState::Closed: return SnapmakerPreprintDecision::RefusedClosed;
-        case SnapmakerPreprintState::Started: return start ? SnapmakerPreprintDecision::RefusedAlreadyStarted : SnapmakerPreprintDecision::RefusedState;
+        case SnapmakerPreprintState::Idle: return D::RefusedNoContext;
+        case SnapmakerPreprintState::Closed: return D::RefusedClosed;
+        case SnapmakerPreprintState::Started: return start ? D::RefusedAlreadyStarted : D::RefusedState;
         default: break;
         }
-        if (m_start_in_flight) return SnapmakerPreprintDecision::RefusedAlreadyStarted;
-        if (m_in_flight) return SnapmakerPreprintDecision::RefusedInFlight;
-        return SnapmakerPreprintDecision::Allowed;
+        if (m_start_in_flight) return D::RefusedAlreadyStarted;
+        if (m_in_flight) return D::RefusedInFlight;
+        return D::Allowed;
+    }
+    // After the context was closed/reopened during an evaluation: whatever the gate says now, never Allowed.
+    SnapmakerPreprintDecision state_refusal_after_void(std::uint64_t epoch, bool start) const
+    {
+        const D d = state_refusal(epoch, start);
+        return d == D::Allowed ? D::RefusedState : d;
     }
 
     mutable std::mutex     m_mutex;
@@ -359,7 +435,8 @@ private:
     SnapmakerPreprintOpen  m_open;
     int                    m_configures = 0;
     bool                   m_in_flight = false, m_start_in_flight = false;
-    std::uint64_t          m_epoch = 0; // bumped by open/close so an evaluation that straddles a close is discarded
+    std::uint64_t          m_epoch = 0; // bumped by every open(); requests must present the one open() returned
+    std::uint64_t          m_op = 0;    // bumped when a ticket is issued and on open/close, voiding tickets and evaluations in progress
 };
 
 } // namespace Slic3r
