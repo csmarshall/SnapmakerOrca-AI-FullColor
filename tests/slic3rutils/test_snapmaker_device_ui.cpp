@@ -1056,6 +1056,66 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
     for (const auto& n : registered) CHECK(denied.count(n) == 0);
 }
 
+// #115: OTA / firmware-update checks are disabled in OpenSnorca (LAN-only, #86; no allow-list). The app-update and profile-sync feeds are pinned
+// off in test_appconfig.cpp. Here: no OTA/firmware/update-check command is registered, whether in the classified list or in the vendored bundle.
+namespace {
+bool looks_like_ota_command(const std::string& name)
+{
+    std::string lower;
+    for (char c : name) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    for (const char* needle : {"ota", "firmware", "upgrade", "checkupdate", "checknewversion", "newversion", "softwareupdate", "fwupdate"})
+        if (lower.find(needle) != std::string::npos) return true;
+    return false;
+}
+} // namespace
+
+TEST_CASE("no OTA / firmware / update-check command is registered, classified REGISTERED or present in the bundle", "[SSWCP][device_ui][ota]")
+{
+    const boost::filesystem::path web = boost::filesystem::path(PROFILES_DIR).parent_path() / "web";
+    std::ifstream in((web / "snapmaker_bridge_commands.txt").string());
+    REQUIRE(in.good());
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        std::string cls, name;
+        if (!(ss >> cls >> name) || cls[0] == '#') continue;
+        if (looks_like_ota_command(name)) { CAPTURE(name); CHECK(cls == "DENIED"); }
+    }
+
+    // The vendored bundle itself offers no such sw_* command: a bundle update that adds one fails here (and the classification gate).
+    size_t bundles = 0;
+    for (const auto& e : boost::filesystem::directory_iterator(web / "flutter_web")) {
+        const std::string fn = e.path().filename().string();
+        if (fn.rfind("main.", 0) != 0 || e.path().extension() != ".js") continue;
+        ++bundles;
+        std::ifstream js(e.path().string(), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(js)), std::istreambuf_iterator<char>());
+        for (size_t pos = text.find("sw_"); pos != std::string::npos; pos = text.find("sw_", pos + 3)) {
+            size_t end = pos + 3;
+            while (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_')) ++end;
+            const std::string name = text.substr(pos, end - pos);
+            CAPTURE(name);
+            CHECK_FALSE(looks_like_ota_command(name));
+        }
+    }
+    CHECK(bundles >= 1);
+
+    // Plausible names (an older or newer bundle, or the stock Orca / Snapmaker ones) answer 501 and reach neither the machine nor a tab.
+    BridgeHarness h;
+    for (const char* cmd : {"sw_CheckFirmwareUpdate", "sw_GetFirmwareVersion", "sw_StartOta", "sw_OtaUpgrade", "sw_UpgradeFirmware", "sw_MachineUpgrade",
+                            "sw_DownloadFirmware", "sw_CheckUpdate", "sw_CheckNewVersion", "sw_GetNewVersion", "sw_SoftwareUpdate"}) {
+        CAPTURE(cmd);
+        CHECK(looks_like_ota_command(cmd));
+        CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
+        h.sent.clear();
+        CHECK(h.bridge.on_script_message(h.good, BridgeHarness::msg(cmd)));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 501);
+    }
+    CHECK(h.queries.empty());
+    CHECK(h.tabs.empty());
+}
+
 // ---- camera preview (#76): sw_CameraStartMonitor / sw_CameraStopMonitor -> Moonraker camera.start_monitor / stop_monitor ----
 
 namespace {
