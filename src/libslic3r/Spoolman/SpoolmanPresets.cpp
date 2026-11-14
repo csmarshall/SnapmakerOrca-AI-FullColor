@@ -247,14 +247,8 @@ std::vector<ParentCandidate> build_parent_candidates(const PresetCollection &fil
                 listed = std::find(cp->values.begin(), cp->values.end(), printer->name) != cp->values.end();
         ParentCandidate c{p.name, p.alias, first_string(p.config, "filament_type"), first_string(p.config, "filament_vendor"), p.setting_id,
                           p.filament_id, listed, {}};
-        std::set<std::string> seen{p.name};
-        for (const Preset *a = &p; !a->inherits().empty() && seen.insert(a->inherits()).second;) {
-            a = filaments.find_preset(a->inherits(), false);
-            if (!a)
-                break;
-            if (!a->filament_id.empty() && a->filament_id != p.filament_id)
-                c.inherited_filament_ids.push_back(a->filament_id);
-        }
+        if (!p.inherited_filament_id.empty() && p.inherited_filament_id != p.filament_id)
+            c.inherited_filament_ids.push_back(p.inherited_filament_id);
         out.push_back(std::move(c));
     }
     return out;

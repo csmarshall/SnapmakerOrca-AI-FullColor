@@ -8051,17 +8051,20 @@ PresetBundle::PresetInstall PresetBundle::resolve_vendor_preset(const CachedPres
                 default_config = &(base_it2->second);
         }
         if (default_config != nullptr) {
-            if (out.filament_id.empty() && (presets_collection.type() == Preset::TYPE_FILAMENT)) {
+            if (presets_collection.type() == Preset::TYPE_FILAMENT) {
+                std::string inherited_id;
                 auto filament_id_map_iter = install.filament_id_maps.find(entry.inherits);
-                if (filament_id_map_iter != install.filament_id_maps.end()) {
-                    out.filament_id = filament_id_map_iter->second;
-                }
-                if (out.filament_id.empty() && base_bundle != nullptr) {
+                if (filament_id_map_iter != install.filament_id_maps.end())
+                    inherited_id = filament_id_map_iter->second;
+                if (inherited_id.empty() && base_bundle != nullptr) {
                     auto base_filament_id_map_iter = base_bundle->m_filament_id_maps.find(entry.inherits);
-                    if (base_filament_id_map_iter != base_bundle->m_filament_id_maps.end()) {
-                        out.filament_id = base_filament_id_map_iter->second;
-                    }
+                    if (base_filament_id_map_iter != base_bundle->m_filament_id_maps.end())
+                        inherited_id = base_filament_id_map_iter->second;
                 }
+                if (out.filament_id.empty())
+                    out.filament_id = inherited_id;
+                if (inherited_id != out.filament_id)
+                    out.inherited_filament_id = inherited_id;
             }
         }
         else {
@@ -8246,6 +8249,7 @@ std::string PresetBundle::commit_vendor_preset(const CachedPreset& entry, Preset
             loaded.setting_id = generate_preset_setting_id(
                 vendor_name, Preset::get_type_string(presets_collection->type()), preset_name);
         loaded.filament_id = resolved.filament_id;
+        loaded.inherited_filament_id = resolved.inherited_filament_id;
         loaded.m_from_orca_filament_lib = install.is_from_lib;
         if (presets_collection->type() == Preset::TYPE_FILAMENT) {
             if (resolved.filament_id.empty() && "Template" != vendor_name) {

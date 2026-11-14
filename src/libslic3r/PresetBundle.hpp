@@ -900,6 +900,8 @@ private:
         // Empty when the preset is its own alias.
         std::string              alias;
         std::string              filament_id;
+        // filament_id of the preset named by inherits (filaments only), whether or not this preset has its own.
+        std::string              inherited_filament_id;
         std::vector<std::string> renamed_from;
         // Reported by commit, so resolving entries together leaves the log and
         // the error count as one entry at a time produces them.

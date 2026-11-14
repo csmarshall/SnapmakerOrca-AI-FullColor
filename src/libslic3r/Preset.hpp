@@ -324,6 +324,8 @@ public:
     std::string         ini_str;         // ini string of preset
     std::string         setting_id;      // setting id in cloud database
     std::string         filament_id;      // setting id in cloud database
+    // filament_id of the @base preset this system filament was derived from (loading flattens it, so the inherits link is lost). Empty when none or equal to filament_id.
+    std::string         inherited_filament_id;
     std::string         user_id;         // preset user_id
     std::string         base_id;         // base id of preset
     std::string         sync_info;       // enum: "delete", "create", "update", ""
