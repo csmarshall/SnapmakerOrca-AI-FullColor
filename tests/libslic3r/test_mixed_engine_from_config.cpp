@@ -370,11 +370,47 @@ TEST_CASE("Deleting a physical filament remaps component ids inside engine rows"
         remap_mixed_engine_rows_on_delete(is_mixed, rows, 1);
         const std::vector<MixedFilament> d = parse_mixed_filaments(rows[6], 12);
         REQUIRE(d.size() == 1);
-        CHECK(d[0].component_a == 2);   // a pattern row: the pair is left alone (Snapmaker), it is not shifted
-        CHECK(d[0].component_b == 4);
+        // Deliberate departure from Snapmaker (which leaves a pattern row's pair unshifted, pinning 2,4 here): the pair is
+        // shifted unless it is exactly (1,2), because it is still the row's display/ratio colours (ticket #113, decision B).
+        CHECK(d[0].component_a == 1);
+        CHECK(d[0].component_b == 3);
         CHECK(d[0].gradient_component_ids == "123");
         CHECK(d[0].gradient_component_weights == "40/30/30");
         CHECK(d[0].manual_pattern == "2,1,93"); // [10] shifts to 9, which is a single-digit token
+    }
+    SECTION("a pattern row with pair 1,2 keeps the symbolic pair; any other pair shifts; weights follow an erased gradient id")
+    {
+        const std::string rowE = "3,4,1,1,50,0,g125,w50/30/20,m2,z0,xa0,xb0,d0,o0,u8,55";
+        const std::string rowF = "1,2,1,1,50,0,g125,w50/30/20,m2,z0,xa0,xb0,d0,o0,u9,55";
+        std::vector<std::string> r = {"", "", "", "", rowE, rowF, ""};
+        std::vector<std::string> warn;
+        remap_mixed_engine_rows_on_delete(is_mixed, r, 2, nullptr, &warn); // delete filament 2: not used by either pattern
+        CHECK(warn.empty());
+        const std::vector<MixedFilament> e = parse_mixed_filaments(r[4], 12);
+        REQUIRE(e.size() == 1);
+        CHECK(e[0].component_a == 2);
+        CHECK(e[0].component_b == 3);
+        CHECK(e[0].manual_pattern == "44");
+        CHECK(e[0].gradient_component_ids == "14"); // id 2 erased, 5 -> 4
+        CHECK(e[0].gradient_component_weights == "71/29"); // matching weight erased (50/20 renormalised), lengths agree
+        const std::vector<MixedFilament> f = parse_mixed_filaments(r[5], 12);
+        REQUIRE(f.size() == 1);
+        CHECK(f[0].component_a == 1); // exactly 1,2: symbolic, left alone
+        CHECK(f[0].component_b == 2);
+        CHECK(f[0].manual_pattern == "44");
+    }
+    SECTION("a pattern row whose pair names the deleted filament but whose pattern does not need it keeps the slot, substitutes the pair member and warns")
+    {
+        const std::string rowG = "3,4,1,1,50,0,g34,w50/50,m2,z0,xa0,xb0,d0,o0,u8,55";
+        std::vector<std::string> r = {"", "", "", "", rowG, "", ""};
+        std::vector<std::string> warn;
+        remap_mixed_engine_rows_on_delete(is_mixed, r, 3, nullptr, &warn);
+        CHECK(warn.size() == 1);
+        const std::vector<MixedFilament> g = parse_mixed_filaments(r[4], 12);
+        REQUIRE(g.size() == 1);
+        CHECK(g[0].component_a == 1); // 3 was deleted: replaced by the lowest id differing from the other member
+        CHECK(g[0].component_b == 3);   // 4 shifted
+        CHECK(g[0].manual_pattern == "44");
     }
     SECTION("a pattern that names the deleted id drops the row (slot goes native), it is not silently recoloured")
     {
@@ -699,7 +735,7 @@ TEST_CASE("Deleting a physical filament: a row using the deleted id is dropped t
     }
 }
 
-TEST_CASE("Deleting a physical filament: pattern rows keep their pair and lose only the deleted gradient id", "[MixedFilament][EngineConfig][Bundle]")
+TEST_CASE("Deleting a physical filament: pattern rows lose the deleted gradient id and weight, and shift a pair other than 1,2", "[MixedFilament][EngineConfig][Bundle]")
 {
     // (b) pattern row: Snapmaker leaves component_a/b alone, whatever their value
     const std::string row = row_text(1, 2, "1233", "g134", "w50/25/25,r1/0.2/0.8", "m0") + "2";
@@ -711,13 +747,15 @@ TEST_CASE("Deleting a physical filament: pattern rows keep their pair and lose o
     CHECK(r[0].component_a == 1);
     CHECK(r[0].component_b == 2);
     CHECK(r[0].manual_pattern == "1233");
-    CHECK(r[0].gradient_component_ids == "13"); // 4 erased; the weights are left as they were (Snapmaker)
+    CHECK(r[0].gradient_component_ids == "13"); // 4 erased
+    CHECK(r[0].gradient_component_weights == "67/33"); // the matching weight (25) is erased with it, 50/25 renormalised
 
-    // The pinned Snapmaker quirk: a pattern row whose pair is not 1,2 keeps its pair unshifted.
+    // Deliberate departure from Snapmaker, which pinned a pattern row whose pair is not 1,2 as left unshifted: the
+    // pair is shifted (ticket #113, decision B) because it is still the row's display/ratio colours.
     const std::string odd = row_text(4, 5, "1122") + "3";
     const Deleted q = delete_physical({ {"4,5", odd.c_str()} }, 1);
     const auto qr = parse_mixed_filaments(q.rows_after[4], 5);
     REQUIRE(qr.size() == 1);
-    CHECK(qr[0].component_a == 4);
-    CHECK(qr[0].component_b == 5);
+    CHECK(qr[0].component_a == 3);
+    CHECK(qr[0].component_b == 4);
 }

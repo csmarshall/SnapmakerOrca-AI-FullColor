@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <numeric>
+#include <sstream>
 
 namespace Slic3r {
 
@@ -943,7 +944,7 @@ void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixe
         }
 
         if (!norm.empty()) {
-            // Pair left alone (A/B are symbolic in a pattern). Every token is adjusted as a literal id, as Snapmaker does.
+            // Pattern tokens: Snapmaker's rules (symbolic 1/2 = A/B, every other id is literal and shifts).
             std::string adjusted;
             for (size_t gi = 0; gi < pattern_groups.size(); ++gi) {
                 if (gi > 0)
@@ -957,6 +958,29 @@ void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixe
                 }
             }
             mf.manual_pattern = adjusted;
+            // DEPARTURE FROM SNAPMAKER (docs/u1-differences-from-snapmaker.md): Snapmaker leaves the pair of a pattern row
+            // unshifted, so a pair other than exactly (1,2) names the wrong filament after a delete. The pair is still the
+            // row's display/ratio colours, so it is shifted unless it is exactly (1,2). A pair member equal to the deleted
+            // id that the pattern does not need (the pattern needing it dropped the row above) has no successor: it
+            // becomes the lowest filament id that differs from the other member (the pair must stay two distinct ids) and
+            // the user is warned.
+            if (!(mf.component_a == 1 && mf.component_b == 2)) {
+                const bool a_gone = mf.component_a == del_1based, b_gone = mf.component_b == del_1based;
+                unsigned int a = a_gone ? 0 : down(mf.component_a), b = b_gone ? 0 : down(mf.component_b);
+                if (a_gone || b_gone) {
+                    const unsigned int other = a_gone ? b : a;
+                    const unsigned int sub   = other == 1 ? 2 : 1;
+                    (a_gone ? a : b) = sub;
+                    if (a_gone && b_gone)
+                        b = sub == 1 ? 2 : 1;
+                    if (warnings != nullptr)
+                        warnings->push_back("Mixed slot " + std::to_string(i + 1) + " had the deleted filament " + std::to_string(del_1based) +
+                                            " in its filament pair; the pattern does not use it, so the pair now shows filament " +
+                                            std::to_string(sub) + " instead.");
+                }
+                mf.component_a = a;
+                mf.component_b = b;
+            }
         } else {
             mf.component_a = down(mf.component_a);
             mf.component_b = down(mf.component_b);
@@ -964,8 +988,29 @@ void remap_mixed_engine_rows_on_delete(const std::vector<unsigned char> &is_mixe
         // Gradient ids: with a pattern the deleted id is erased (the pattern is what resolves), then all shift down.
         if (!mf.gradient_component_ids.empty()) {
             std::vector<unsigned int> ids = grad_ids;
-            if (!norm.empty())
-                ids.erase(std::remove(ids.begin(), ids.end(), del_1based), ids.end());
+            if (!norm.empty()) {
+                // The matching weight goes with the id so ids and weights stay the same length (serialisation would
+                // otherwise discard the whole weight list on a count mismatch).
+                std::vector<std::string> wt;
+                {
+                    std::stringstream ss(mf.gradient_component_weights);
+                    std::string tok;
+                    while (std::getline(ss, tok, '/'))
+                        wt.push_back(tok);
+                }
+                const auto it = std::find(ids.begin(), ids.end(), del_1based);
+                if (it != ids.end()) {
+                    const size_t idx = size_t(it - ids.begin());
+                    if (wt.size() == ids.size()) {
+                        wt.erase(wt.begin() + idx);
+                        std::string w;
+                        for (size_t k = 0; k < wt.size(); ++k)
+                            w += (k ? "/" : "") + wt[k];
+                        mf.gradient_component_weights = w;
+                    }
+                    ids.erase(it);
+                }
+            }
             for (unsigned int &id : ids)
                 id = down(id);
             mf.gradient_component_ids = encode_gradient_component_ids(ids);
