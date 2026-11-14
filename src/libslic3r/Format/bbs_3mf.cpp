@@ -2493,14 +2493,21 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         const ConfigOptionStrings* filament_ids_opt = config.option<ConfigOptionStrings>("filament_settings_id");
         int max_filament_id = filament_ids_opt ? filament_ids_opt->size() : std::numeric_limits<int>::max();
+        // Snapmaker project: objects on an id beyond the converted slots (e.g. auto-generated pair rows the string does
+        // not carry) are reset to filament 1 below; count them so the plate can say so.
+        size_t legacy_ids_reset = 0;
+        const bool legacy_project = m_load_config && !m_legacy_mixed_definitions.empty();
         for (ModelObject* mo : m_model->objects) {
             const ConfigOptionInt* extruder_opt = dynamic_cast<const ConfigOptionInt*>(mo->config.option("extruder"));
             int extruder_id = 0;
             if (extruder_opt != nullptr)
                 extruder_id = extruder_opt->getInt();
 
-            if (extruder_id == 0 || extruder_id > max_filament_id)
+            if (extruder_id == 0 || extruder_id > max_filament_id) {
+                if (legacy_project && extruder_id > max_filament_id)
+                    ++legacy_ids_reset;
                 mo->config.set_key_value("extruder", new ConfigOptionInt(1));
+            }
 
             if (mo->volumes.size() == 1) {
                 mo->volumes[0]->config.erase("extruder");
@@ -2513,10 +2520,20 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                     if (vol_extruder_opt->getInt() == 0)
                         mv->config.erase("extruder");
-                    else if (vol_extruder_opt->getInt() > max_filament_id)
+                    else if (vol_extruder_opt->getInt() > max_filament_id) {
+                        if (legacy_project)
+                            ++legacy_ids_reset;
                         mv->config.set_key_value("extruder", new ConfigOptionInt(1));
+                    }
                 }
             }
+        }
+        if (legacy_ids_reset > 0) {
+            // The converter cannot know Snapmaker's auto-generate preference (it is not stored in the project), so it
+            // does not guess the missing pair rows; it only reports the objects that referenced them.
+            m_legacy_mixed_warnings.push_back(std::to_string(legacy_ids_reset) + " object/volume extruder assignment(s) referenced a filament id beyond the " +
+                                              std::to_string(max_filament_id) + " converted filaments and mixed filament slots (Snapmaker auto-generated mixed filaments are not stored in the project) and were reset to filament 1.");
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << m_legacy_mixed_warnings.back();
         }
 
 //        // fixes the min z of the model if negative

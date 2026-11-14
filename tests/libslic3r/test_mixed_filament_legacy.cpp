@@ -276,7 +276,7 @@ TEST_CASE("Legacy mixed rows: the definitions are converted at 3MF load, and not
                              "1,3,0,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u2;"
                              "2,4,1,1,20,0,g,w,m2,z0,xa0,xb0,d0,o0,u3";
 
-    auto store_and_load = [&](const std::string &definitions, const DynamicPrintConfig &cfg, DynamicPrintConfig &dst_config, Model &dst_model, std::string *saved_settings = nullptr) {
+    auto store_and_load = [&](const std::string &definitions, const DynamicPrintConfig &cfg, DynamicPrintConfig &dst_config, Model &dst_model, std::string *saved_settings = nullptr, std::vector<std::string> *plate_warnings = nullptr) {
         ScopedTemporaryFile temp(".3mf");
         PlateData *plate = new PlateData();
         plate->plate_index = 0;
@@ -323,6 +323,11 @@ TEST_CASE("Legacy mixed rows: the definitions are converted at 3MF load, and not
                     *saved_settings = data;
             });
         }
+        if (plate_warnings != nullptr)
+            for (PlateData *pl : plates)
+                if (pl != nullptr)
+                    for (const auto &w : pl->warnings)
+                        plate_warnings->push_back(w.msg);
         release_PlateData_list(plates);
     };
 
@@ -343,6 +348,29 @@ TEST_CASE("Legacy mixed rows: the definitions are converted at 3MF load, and not
         store_and_load("", config, dst, dst_model);
         CHECK(dst.option<ConfigOptionStrings>("filament_colour")->values.size() == 4);
         CHECK(dst_model.objects.front()->config.opt_int("extruder") == 1);
+    }
+    SECTION("F4: a custom-only string loses the auto tail rows; an object on a tail id is reset to filament 1 and the plate says so") {
+        // One custom row only (slot 5). Snapmaker with its auto-generate pref on would also have appended the C(4,2)
+        // pair rows as ids 6..11, so the object on id 6 used one of them; the converter cannot know that pref (it is
+        // not in the project), so id 6 is out of range here. Documents the behaviour: extruder reset to 1, plus a warning.
+        Model dst_model;
+        DynamicPrintConfig dst;
+        std::vector<std::string> warnings;
+        store_and_load("1,2,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u1", config, dst, dst_model, nullptr, &warnings);
+        CHECK(dst.option<ConfigOptionStrings>("filament_colour")->values.size() == 5);
+        CHECK(dst_model.objects.front()->config.opt_int("extruder") == 1);
+        const bool warned = std::any_of(warnings.begin(), warnings.end(), [](const std::string &w) {
+            return w.find("extruder") != std::string::npos && w.find("filament 1") != std::string::npos;
+        });
+        CHECK(warned);
+    }
+    SECTION("no extra warning when every object extruder is within the converted slots") {
+        Model dst_model;
+        DynamicPrintConfig dst;
+        std::vector<std::string> warnings;
+        store_and_load(defs, config, dst, dst_model, nullptr, &warnings); // object on 6 of 6 slots
+        for (const std::string &w : warnings)
+            CHECK(w.find("reset to filament 1") == std::string::npos);
     }
     SECTION("an upstream 2.5 mixed project is untouched even when definitions are present") {
         DynamicPrintConfig cfg = project_config(5);

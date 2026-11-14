@@ -347,3 +347,81 @@ TEST_CASE("4c engine row: multi-object plate uses each object's own layer index"
         CHECK(std::set<unsigned>(got.begin(), got.end()) == want);
     }
 }
+
+// ---- (d) F9 (#113): the "M104 S0 ;cooldown" last-use map must see mixed COMPONENTS ---------------------------
+//
+// OozePrevention::pre_toolchange decides "this tool is finished" from ToolOrdering::is_last_extrusion_layer, which reads
+// m_last_layer_per_extruder, which collect_extruder_statistics() fills from LayerTools::extruders. If that ran before
+// resolve_mixed_filaments() rewrote the extruders of the mixed slots, a filament used later only as a component of a
+// mixed slot would look finished and get M104 S0 (a cold-nozzle tool change). Object A prints filament 2 (tool 1)
+// directly up to 4 mm; object B (20 mm) prints the mixed slot 3 = 1+2, so tool 1 is only ever a component above 4 mm.
+// What this cannot catch: it checks the ToolOrdering map the cooldown reads, not the emitted G-code text.
+namespace {
+void setup_direct_plus_mixed(Print &print, Model &model, const DynamicPrintConfig &config_in)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.apply(config_in);
+    int idx = 0;
+    for (auto [x, z] : { std::pair{ 60., 4. }, std::pair{ 120., 20. } }) {
+        ModelObject *object = model.add_object();
+        object->name += "object.stl";
+        object->add_volume(cube_at(x, 20, z));
+        object->add_instance();
+        if (idx++ == 0)
+            for (const char *k : { "outer_wall_filament_id", "inner_wall_filament_id", "sparse_infill_filament_id",
+                                   "internal_solid_filament_id", "top_surface_filament_id", "bottom_surface_filament_id" }) {
+                DynamicPrintConfig oc;
+                oc.set_deserialize_strict(k, "2");
+                object->config.apply(oc);
+            }
+    }
+    for (ModelObject *mo : model.objects) {
+        mo->ensure_on_bed();
+        print.auto_assign_extruders(mo);
+    }
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    print.process();
+}
+
+void check_component_counts_as_used(const DynamicPrintConfig &cfg, const char *what)
+{
+    INFO(what);
+    Print print;
+    Model model;
+    setup_direct_plus_mixed(print, model, cfg);
+    const ToolOrdering &to = print.tool_ordering();
+    constexpr unsigned  tool = 1; // filament 2
+    double last_direct = 0., last_any = 0.;
+    bool   component_only_layer = false;
+    for (const LayerTools &lt : to) {
+        const bool used = std::find(lt.extruders.begin(), lt.extruders.end(), tool) != lt.extruders.end();
+        bool in_group = false;
+        for (const auto &g : lt.mixed_sub_layer_groups)
+            in_group |= std::find(g.components_0based.begin(), g.components_0based.end(), tool) != g.components_0based.end();
+        if (used || in_group)
+            last_any = lt.print_z;
+        if (used && lt.print_z < 4.0 + 1e-6)
+            last_direct = lt.print_z;
+        if (lt.print_z > 4.0 + 1e-6 && (used || in_group))
+            component_only_layer = true;
+    }
+    REQUIRE(last_direct > 0.);
+    REQUIRE(component_only_layer);        // scenario is meaningful: tool 1 is used above object A's top
+    REQUIRE(last_any > last_direct + 1.); // ... well above it
+    for (const LayerTools &lt : to) {
+        INFO("z=" << lt.print_z);
+        if (lt.print_z < last_any - 1e-6)
+            CHECK_FALSE(to.is_last_extrusion_layer(lt.print_z, tool)); // a cooldown here would precede a later use
+    }
+    CHECK(to.is_last_extrusion_layer(last_any, tool));
+}
+} // namespace
+
+TEST_CASE("F9 cooldown last-use map counts mixed components (native, engine row, sub-layer)", "[MixedFilament][ToolOrdering][F9]")
+{
+    check_component_counts_as_used(make_config(2, { { "1,2", "0.5,0.5", "", false } }, false, 3), "native whole-layer");
+    check_component_counts_as_used(make_config(2, { { "1,2", "0.5,0.5", "", false } }, true, 3), "native sub-layer");
+    check_component_counts_as_used(make_config(2, { { "1,2", "0.5,0.5", kRow50, false } }, false, 3), "engine row");
+}
