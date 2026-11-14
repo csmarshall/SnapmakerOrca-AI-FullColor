@@ -857,7 +857,7 @@ inline bool snapmaker_control_gate_allows(SnapmakerControlGate g, const nlohmann
     switch (g) {
     case SnapmakerControlGate::Idle: return snapmaker_machine_idle(result);
     case SnapmakerControlGate::BedMeshRun: return snapmaker_bed_mesh_run_active(result);
-    default: return true;
+    default: return false; // fail closed: None never reaches here (the caller skips the read), an unknown kind is refused
     }
 }
 

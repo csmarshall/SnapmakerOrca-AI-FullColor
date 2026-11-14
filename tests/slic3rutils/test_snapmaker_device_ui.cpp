@@ -3072,12 +3072,14 @@ struct QueryProbeAgent : MoonrakerPrinterAgent
     QueryProbeAgent() : MoonrakerPrinterAgent("") {}
     std::vector<std::vector<std::string>> asked;
     std::vector<bool>                     gate_held;
+    std::vector<bool>                     mesh_held;
     json                                  reply = json::object();
     bool                                  reply_ok = false;
     void query_machine_objects_async(const std::vector<std::string>& objects, std::function<void(bool, json)> done) override
     {
         asked.push_back(objects);
         gate_held.push_back(gcode_gate()->busy_now());
+        mesh_held.push_back(mesh_abort_gate()->busy_now());
         done(reply_ok, reply);
     }
 };
@@ -3447,6 +3449,11 @@ TEST_CASE("agent: the gated methods read the state under their own gate; the pre
         CHECK(agent.asked[0] == std::vector<std::string>{"print_stats", "machine_state_manager"});
         CHECK(calls == 1);
         CHECK_FALSE(ok); // the canned read fails: refused
+        const bool is_abort = std::string(method) == "printer.bed_mesh.abort_probe_mesh";
+        REQUIRE(agent.gate_held.size() == 1);
+        REQUIRE(agent.mesh_held.size() == 1);
+        CHECK(agent.gate_held[0] == !is_abort); // rename is read under gcode_gate(), the abort under mesh_abort_gate(), never the other
+        CHECK(agent.mesh_held[0] == is_abort);
     }
     { // an invalid shape reaches neither the read nor the wire
         QueryProbeAgent agent;
@@ -3456,6 +3463,9 @@ TEST_CASE("agent: the gated methods read the state under their own gate; the pre
         CHECK(agent.asked.empty());
         CHECK(calls == 2);
     }
+    // fail closed: a kind with no predicate (None, or any value outside the enum) allows nothing, whatever the state says
+    CHECK_FALSE(snapmaker_control_gate_allows(SnapmakerControlGate::None, json{{"status", {{"print_stats", {{"state", "standby"}}}, {"machine_state_manager", {{"main_state", 0}}}}}}));
+    CHECK_FALSE(snapmaker_control_gate_allows(static_cast<SnapmakerControlGate>(99), json::object()));
     const auto state = [](const json& s, const json& ms) { return json{{"status", {{"print_stats", {{"state", s}}}, {"machine_state_manager", {{"main_state", ms}}}}}}; };
     struct Row { SnapmakerControlGate kind; json s, ms; bool runs; };
     for (const Row& r : std::vector<Row>{{SnapmakerControlGate::Idle, "standby", 0, true},   {SnapmakerControlGate::Idle, "standby", 3, false},

@@ -1125,7 +1125,9 @@ void SnapmakerDeviceBridge::register_commands()
     // flight. sw_SendGCodes: a heater script goes straight through (the page does not gate it); every other shape (jog, home, extrude,
     // park, pick, filament config) first asks for print_stats.state + machine_state_manager.main_state and is sent only when both say
     // idle, one at a time, never while a cancel is in flight. Each gcode request is gated on its own, so the second call of the extrude
-    // sequence (M83, then G1 E..) is re-checked. ---
+    // sequence (M83, then G1 E..) is re-checked. #123: sw_SetDeviceName (rename) is idle-only like those gcode shapes (same fresh read,
+    // gcode slot); sw_BedMesh_AbortProbeMesh is sent only while a bed-mesh run is active (fresh read, its own slot); sw_ControlPurifier is
+    // ungated by decision (sent only on the user's click, also mid-print). ---
     for (const std::string& cmd : snapmaker_registered_control_commands()) {
         m_sswcp.register_command(
             cmd,

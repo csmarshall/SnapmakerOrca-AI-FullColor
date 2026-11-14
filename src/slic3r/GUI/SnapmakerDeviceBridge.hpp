@@ -181,8 +181,9 @@ bool snapmaker_print_state_allows(const std::string& rpc_method, const std::stri
 // sw_mqtt_* commands are accepted and ignored. Most are read-only. The ones that can change printer state are exactly the control
 // commands of snapmaker_registered_control_commands() (#75, #79): LED, print speed, main and cavity fan, bed temperature, and
 // pause/resume/cancel (the last three only in the matching print state), and sw_SendGCodes for nozzle temperature (SET_HEATER_TEMPERATURE scripts only, #79). Everything else that could change state (other G-code, print
-// start, uploads, deletes, renames, firmware, nozzle temperature, purifier, device name) is deliberately NOT registered and gets the
-// core's 501; test_snapmaker_device_ui.cpp pins that list.
+// start, uploads, deletes, firmware, nozzle temperature) is deliberately NOT registered and gets the core's 501. The rename
+// (idle-only), the purifier (ungated by decision: it is only sent on the user's click, also mid-print) and the bed-mesh abort (sent only
+// during an active bed-mesh run) are registered; test_snapmaker_device_ui.cpp pins that list.
 class SnapmakerDeviceBridge
 {
 public:
