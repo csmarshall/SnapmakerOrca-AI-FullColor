@@ -99,6 +99,8 @@ struct BridgeHarness
     bool                              timelapse_ok = true;
     json                              timelapse_result = json::object();
     std::shared_ptr<SnapmakerPreprintContext> preprint = std::make_shared<SnapmakerPreprintContext>();
+    // The bridge's clock for in-flight timeouts: tests move it forward by hand.
+    std::chrono::steady_clock::time_point fake_now = std::chrono::steady_clock::time_point{} + std::chrono::hours(1);
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -107,6 +109,7 @@ struct BridgeHarness
               o.port       = 5000;
               o.http_host  = "http://127.0.0.1:5000";
               o.preprint   = preprint;
+              o.now        = [this] { return fake_now; };
               o.run_script = [this](const std::string& js) { sent.push_back(js); };
               o.devices    = [this] { return devices; };
               o.query_state = [this](const std::vector<std::string>& objs, std::function<void(bool, json)> done) {
@@ -1941,7 +1944,7 @@ TEST_CASE("sw_SendGCodes refuses everything but nozzle-temperature scripts, with
         "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=1.5", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=",
         "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=0200", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=+5",
         "SET_HEATER_TEMPERATURE HEATER=extruder4 TARGET=200", "SET_HEATER_TEMPERATURE HEATER=extruder0 TARGET=200",
-        "G28", "M112", "", "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200 X=1",
+        "G28 X", "M112", "", "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200 X=1",
         ok + " ; M112", ok + "\nG28", ok + "\n" + ok, ok + "\n" + ok + "\n", ok + "\r\nG28", " " + ok, "SET_HEATER_TEMPERATURE  HEATER=extruder TARGET=200",
         "set_heater_temperature HEATER=extruder TARGET=200", "SET_HEATER_TEMPERATURE heater=extruder TARGET=200",
         "SET_HEATER_TEMPERATURE HEATER=Extruder TARGET=200", "SET_HEATER_TEMPERATURE HEATER=extruder target=200",
@@ -1979,7 +1982,7 @@ TEST_CASE("the agent itself refuses a printer.gcode.script that is not a nozzle-
     CHECK(r["params"] == json{{"script", ok}});
     CHECK_FALSE(req({{"script", ok + "\n" + ok}}).empty()); // the bridge's joined form
     for (const json& p : std::vector<json>{
-             {{"script", "G28"}}, {{"script", "M112"}}, {{"script", ""}}, {{"script", ok + "\nG28"}}, {{"script", ok + " ; M112"}},
+             {{"script", "G28 X"}}, {{"script", "M112"}}, {{"script", ""}}, {{"script", ok + "\nG28"}}, {{"script", ok + " ; M112"}},
              {{"script", "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60"}}, {{"script", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=301"}},
              {{"script", "set_heater_temperature HEATER=extruder TARGET=200"}}, {{"script", ok + "\n" + ok + "\n" + ok + "\n" + ok + "\n" + ok}},
              {{"script", json::array({ok})}}, {{"script", 5}}, json::object(), {{"script", ok}, {"extra", 1}}, {{"gcode", ok}}, json::array({ok})})
@@ -2046,12 +2049,12 @@ TEST_CASE("print.* control has its own gate and a 20 s timeout; the other contro
         CHECK(MoonrakerPrinterAgent::control_timeout_for(m) == 5000ms);
     }
     MoonrakerPrinterAgent agent("");
-    const auto print = agent.control_gate_for("printer.print.cancel");
+    const auto print = agent.control_gate_for("printer.print.pause");
     const auto other = agent.control_gate_for("printer.control.led");
     REQUIRE(print);
     REQUIRE(other);
-    CHECK(print == agent.control_gate_for("printer.print.pause"));
     CHECK(print == agent.control_gate_for("printer.print.resume"));
+    CHECK(agent.control_gate_for("printer.print.cancel") != print); // a cancel is never dropped for a pause in flight (#31)
     CHECK(other == agent.control_gate_for("printer.control.main_fan"));
     CHECK(print != other);
     CHECK(print != agent.camera_gate());
@@ -2552,4 +2555,529 @@ TEST_CASE("preprint context: concurrent set/clear/read is safe", "[SSWCP][device
     }
     stop = true;
     writer.join();
+}
+
+// ---- the Device page's gcode shapes through sw_SendGCodes (#31): classifier goldens and rejects, the idle gate, Cancel busy handling ----
+// The goldens below are literal strings written out from the page bundle (main.b347974c91352c2f.js: wV 39155-39168, R6/auI 144131-144146,
+// H_ 39177-39192, 157821/157826, cb2 39735-39762); the validators were written from the same bundle, so these tests show agreement with the
+// page, NOT that the printer behaves well. First real use belongs on a supervised idle printer.
+
+// TABLE-BEGIN (the mutation check in the report extracts this block; it uses only std and SnapmakerGcodeKind)
+struct GcodeCase { const char* label; std::string script; SnapmakerGcodeKind kind; };
+inline std::vector<GcodeCase> gcode_accept_cases()
+{
+    using K = SnapmakerGcodeKind;
+    std::vector<GcodeCase> v;
+    for (const char* step : {"10", "1", "0.1"}) {
+        const std::string p = step;
+        v.push_back({"jog X+", "G91\nG1 X+" + p + " F3600\nG90", K::Jog});
+        v.push_back({"jog X-", "G91\nG1 X-" + p + " F3600\nG90", K::Jog});
+        v.push_back({"jog Y+", "G91\nG1 Y+" + p + " F3600\nG90", K::Jog});
+        v.push_back({"jog Y-", "G91\nG1 Y-" + p + " F3600\nG90", K::Jog});
+        v.push_back({"jog Z+", "G91\nG1 Z+" + p + " F1800\nG90", K::Jog});
+        v.push_back({"jog Z-", "G91\nG1 Z-" + p + " F1800\nG90", K::Jog});
+    }
+    v.push_back({"home all", "G28", K::Home});
+    v.push_back({"home Z", "G28 Z", K::Home});
+    v.push_back({"home XY", "G28 X Y", K::Home});
+    v.push_back({"extrude mode", "M83", K::ExtrudeMode});
+    v.push_back({"extrude", "G1 E10 F300", K::Extrude});
+    v.push_back({"retract", "G1 E-10 F300", K::Extrude});
+    v.push_back({"park 0", "PARK_EXTRUDER", K::Park});
+    for (const char* n : {"1", "2", "3"}) v.push_back({"park n", std::string("PARK_EXTRUDER") + n, K::Park});
+    for (const char* n : {"0", "1", "2", "3"}) v.push_back({"pick n", std::string("T") + n + " A0", K::Pick});
+    v.push_back({"filament full", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='1' FILAMENT_TYPE='PLA' FILAMENT_SUBTYPE='Basic' FILAMENT_COLOR_RGBA='FF0000FF' SAVE='1' VENDOR='Snapmaker'", K::FilamentConfig});
+    v.push_back({"filament colour only", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='0' FILAMENT_COLOR_RGBA='0A1B2C3D' SAVE='1'", K::FilamentConfig});
+    v.push_back({"filament no colour", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='3' FILAMENT_TYPE='PETG-CF' FILAMENT_SUBTYPE='Matte' SAVE='1' VENDOR='Poly maker 1.5+/_'", K::FilamentConfig});
+    v.push_back({"filament minimal", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='2' SAVE='1'", K::FilamentConfig});
+    v.push_back({"filament 32 chars", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='2' FILAMENT_TYPE='" + std::string(32, 'A') + "' SAVE='1'", K::FilamentConfig});
+    v.push_back({"heater", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=215", K::Heater});
+    v.push_back({"heater 3", "SET_HEATER_TEMPERATURE HEATER=extruder3 TARGET=300", K::Heater});
+    return v;
+}
+inline std::vector<GcodeCase> gcode_reject_cases()
+{
+    using K = SnapmakerGcodeKind;
+    const std::string cfg = "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='1' ";
+    std::vector<GcodeCase> v = {
+        // home
+        {"home X (unreachable in the page)", "G28 X", K::None}, {"home Y (unreachable in the page)", "G28 Y", K::None},
+        {"home X Y Z", "G28 X Y Z", K::None}, {"home trailing space", "G28 Z ", K::None}, {"home Y X order", "G28 Y X", K::None},
+        {"home lowercase", "g28", K::None}, {"home twice", "G28\nG28", K::None},
+        // jog: step literal, feed binding, structure
+        {"jog step 5", "G91\nG1 X+5 F3600\nG90", K::None}, {"jog step 0.10", "G91\nG1 X+0.10 F3600\nG90", K::None},
+        {"jog step 1.0", "G91\nG1 X+1.0 F3600\nG90", K::None}, {"jog step 100", "G91\nG1 X+100 F3600\nG90", K::None},
+        {"jog step +0.1 value", "G91\nG1 X++0.1 F3600\nG90", K::None}, {"jog step empty", "G91\nG1 X+ F3600\nG90", K::None},
+        {"jog no sign", "G91\nG1 X10 F3600\nG90", K::None}, {"jog sign star", "G91\nG1 X*10 F3600\nG90", K::None},
+        {"jog sign space", "G91\nG1 X 10 F3600\nG90", K::None}, {"jog axis E", "G91\nG1 E+10 F3600\nG90", K::None},
+        {"jog axis lowercase", "G91\nG1 x+10 F3600\nG90", K::None},
+        {"jog feed Z 3600", "G91\nG1 Z+10 F3600\nG90", K::None}, {"jog feed X 1800", "G91\nG1 X+10 F1800\nG90", K::None},
+        {"jog feed Y 1800", "G91\nG1 Y-1 F1800\nG90", K::None}, {"jog feed 7200", "G91\nG1 X+10 F7200\nG90", K::None},
+        {"jog feed missing", "G91\nG1 X+10\nG90", K::None}, {"jog feed empty", "G91\nG1 X+10 F\nG90", K::None},
+        {"jog missing G90", "G91\nG1 X+10 F3600", K::None}, {"jog G90 first", "G90\nG1 X+10 F3600\nG91", K::None},
+        {"jog without G91", "G1 X+10 F3600\nG90", K::None}, {"jog move alone", "G1 X+10 F3600", K::None},
+        {"jog fourth line", "G91\nG1 X+10 F3600\nG90\nG28", K::None}, {"jog trailing garbage", "G91\nG1 X+10 F3600\nG90 X", K::None},
+        {"jog trailing newline", "G91\nG1 X+10 F3600\nG90\n", K::None}, {"jog CRLF", "G91\r\nG1 X+10 F3600\r\nG90", K::None},
+        {"jog tab", "G91\nG1\tX+10 F3600\nG90", K::None}, {"jog double space", "G91\nG1  X+10 F3600\nG90", K::None},
+        {"jog default G91 only (page default case)", "G91\nG90", K::None}, {"jog lowercase", "g91\ng1 x+10 f3600\ng90", K::None},
+        {"jog two moves", "G91\nG1 X+10 F3600\nG1 Y+10 F3600\nG90", K::None},
+        // extrude
+        {"extrude E11", "G1 E11 F300", K::None}, {"extrude feed 301", "G1 E10 F301", K::None}, {"extrude E-0", "G1 E-0 F300", K::None},
+        {"extrude E+10", "G1 E+10 F300", K::None}, {"extrude E100", "G1 E100 F300", K::None}, {"extrude no feed", "G1 E10", K::None},
+        {"extrude M83 and move", "M83\nG1 E10 F300", K::None}, {"mode M82", "M82", K::None}, {"mode M83 space", "M83 ", K::None},
+        // park / pick
+        {"park 4", "PARK_EXTRUDER4", K::None}, {"park 01", "PARK_EXTRUDER01", K::None}, {"park space 1", "PARK_EXTRUDER 1", K::None},
+        {"park 0 digit", "PARK_EXTRUDER0", K::None}, {"park 11", "PARK_EXTRUDER11", K::None}, {"park 1 and text", "PARK_EXTRUDER1x", K::None}, {"park lowercase", "park_extruder", K::None}, {"park trailing space", "PARK_EXTRUDER ", K::None},
+        {"pick 4", "T4 A0", K::None}, {"pick A1", "T1 A1", K::None}, {"pick bare", "T1", K::None}, {"pick two digits", "T10 A0", K::None},
+        {"pick no space", "T1A0", K::None}, {"pick lowercase", "t1 a0", K::None}, {"pick negative", "T-1 A0", K::None},
+        // filament config
+        {"cfg quote in value", cfg + "FILAMENT_TYPE='PL'A' SAVE='1'", K::None}, {"cfg semicolon", cfg + "FILAMENT_TYPE='PLA;M112' SAVE='1'", K::None},
+        {"cfg newline in value", cfg + "FILAMENT_TYPE='PLA\nM112' SAVE='1'", K::None}, {"cfg hash", cfg + "FILAMENT_TYPE='PLA#' SAVE='1'", K::None},
+        {"cfg backslash", cfg + "FILAMENT_TYPE='PL\\A' SAVE='1'", K::None}, {"cfg parenthesis", cfg + "SAVE='1' VENDOR='A(B)'", K::None},
+        {"cfg SAVE 0", cfg + "SAVE='0'", K::None}, {"cfg SAVE missing", cfg + "FILAMENT_TYPE='PLA'", K::None},
+        {"cfg SAVE unquoted", cfg + "SAVE=1", K::None}, {"cfg CONFIG_EXTRUDER missing", "SET_PRINT_FILAMENT_CONFIG SAVE='1'", K::None},
+        {"cfg duplicate key", cfg + "FILAMENT_TYPE='PLA' FILAMENT_TYPE='PLA' SAVE='1'", K::None},
+        {"cfg duplicate SAVE", cfg + "SAVE='1' SAVE='1'", K::None},
+        {"cfg order TYPE after SUBTYPE", cfg + "FILAMENT_SUBTYPE='Basic' FILAMENT_TYPE='PLA' SAVE='1'", K::None},
+        {"cfg order VENDOR before SAVE", cfg + "VENDOR='Snapmaker' SAVE='1'", K::None},
+        {"cfg order COLOR before TYPE", cfg + "FILAMENT_COLOR_RGBA='FF0000FF' FILAMENT_TYPE='PLA' SAVE='1'", K::None},
+        {"cfg colour 7 hex", cfg + "FILAMENT_COLOR_RGBA='FF0000F' SAVE='1'", K::None}, {"cfg colour 9 hex", cfg + "FILAMENT_COLOR_RGBA='FF0000FFF' SAVE='1'", K::None},
+        {"cfg colour lowercase", cfg + "FILAMENT_COLOR_RGBA='ff0000ff' SAVE='1'", K::None}, {"cfg colour non-hex", cfg + "FILAMENT_COLOR_RGBA='GG0000FF' SAVE='1'", K::None},
+        {"cfg colour hash", cfg + "FILAMENT_COLOR_RGBA='#FF0000F' SAVE='1'", K::None}, {"cfg colour empty", cfg + "FILAMENT_COLOR_RGBA='' SAVE='1'", K::None},
+        {"cfg extruder 4", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='4' SAVE='1'", K::None},
+        {"cfg extruder 10", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='10' SAVE='1'", K::None},
+        {"cfg extruder minus", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='-1' SAVE='1'", K::None},
+        {"cfg value 33 chars", cfg + "FILAMENT_TYPE='" + std::string(33, 'A') + "' SAVE='1'", K::None},
+        {"cfg value empty", cfg + "FILAMENT_TYPE='' SAVE='1'", K::None},
+        {"cfg unknown key", cfg + "SAVE='1' EXTRA='1'", K::None}, {"cfg key lowercase", "SET_PRINT_FILAMENT_CONFIG config_extruder='1' SAVE='1'", K::None},
+        {"cfg trailing space", cfg + "SAVE='1' ", K::None}, {"cfg trailing newline", cfg + "SAVE='1'\n", K::None},
+        {"cfg command chained", cfg + "SAVE='1'\nG28", K::None}, {"cfg double space", "SET_PRINT_FILAMENT_CONFIG  CONFIG_EXTRUDER='1' SAVE='1'", K::None},
+        {"cfg unterminated", cfg + "SAVE='1", K::None}, {"cfg double quote", cfg + "FILAMENT_TYPE=\"PLA\" SAVE='1'", K::None},
+        {"cfg NUL in value", cfg + std::string("FILAMENT_TYPE='P\0A' SAVE='1'", 28), K::None},
+        {"cfg tab in value", cfg + "FILAMENT_TYPE='P\tA' SAVE='1'", K::None}, {"cfg high byte", cfg + "FILAMENT_TYPE='P\xC3\xA9' SAVE='1'", K::None},
+        // print-start and other commands, caps
+        {"print-start SET_PRINT_EXTRUDER_MAP", "SET_PRINT_EXTRUDER_MAP TABLE='0,1,2,3'", K::None},
+        {"print-start SET_PRINT_USED_EXTRUDERS", "SET_PRINT_USED_EXTRUDERS USED='1'", K::None},
+        {"print-start SET_PRINT_PREFERENCE", "SET_PRINT_PREFERENCE FLOW_CALIBRATION=1", K::None},
+        {"emergency stop", "M112", K::None}, {"firmware restart", "FIRMWARE_RESTART", K::None}, {"save config", "SAVE_CONFIG", K::None},
+        {"M84", "M84", K::None}, {"G92", "G92 E0", K::None}, {"M104", "M104 S200", K::None}, {"empty", "", K::None}, {"newline only", "\n", K::None},
+        {"two shapes joined", "G28\nM83", K::None}, {"home then pick", "G28 Z\nT1 A0", K::None}, {"pick then park", "T1 A0\nPARK_EXTRUDER", K::None},
+        {"five heater lines in one string", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=1\nSET_HEATER_TEMPERATURE HEATER=extruder TARGET=2\nSET_HEATER_TEMPERATURE HEATER=extruder TARGET=3\nSET_HEATER_TEMPERATURE HEATER=extruder TARGET=4\nSET_HEATER_TEMPERATURE HEATER=extruder TARGET=5", K::None},
+        {"heater then home", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200\nG28", K::None},
+        {"filament config padded to 300 bytes", "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='1' SAVE='1' " + std::string(260, ' '), K::None},
+        {"300-byte script", "G28" + std::string(297, ' '), K::None},
+        {"control char", std::string("G28\x01"), K::None}, {"DEL", std::string("G28\x7F"), K::None}, {"high bit", "G28\xC3\xA9", K::None},
+    };
+    return v;
+}
+// TABLE-END
+
+TEST_CASE("gcode classifier: every golden shape from the page is accepted with its kind", "[SSWCP][device_ui][gcode][classify]")
+{
+    std::size_t n = 0;
+    for (const auto& c : gcode_accept_cases()) {
+        CAPTURE(c.label, c.script);
+        CHECK(snapmaker_gcode_classify(c.script) == c.kind);
+        ++n;
+    }
+    CHECK(n == 18 + 3 + 1 + 2 + 4 + 4 + 5 + 2); // 18 jogs, 3 homes, M83, 2 extrudes, 4 parks (0..3 incl. bare), 4 picks, 5 filament, 2 heater
+}
+
+TEST_CASE("gcode classifier: each cap, charset, literal, feed-binding and ordering check has an input only it refuses", "[SSWCP][device_ui][gcode][classify]")
+{
+    for (const auto& c : gcode_reject_cases()) {
+        CAPTURE(c.label, c.script);
+        CHECK(snapmaker_gcode_classify(c.script) == SnapmakerGcodeKind::None);
+    }
+    // The 256-byte cap is a backstop: the longest script the grammar accepts (about 220 bytes) is below it, so no input can isolate the cap
+    // from the grammar; a 300-byte script is refused by both (reported as not independently mutation-checkable).
+    CHECK(kGcodeScriptMaxBytes == 256);
+    CHECK_FALSE(snapmaker_gcode_kind_needs_idle(SnapmakerGcodeKind::Heater));
+    CHECK_FALSE(snapmaker_gcode_kind_needs_idle(SnapmakerGcodeKind::None));
+    for (auto k : {SnapmakerGcodeKind::Jog, SnapmakerGcodeKind::Home, SnapmakerGcodeKind::ExtrudeMode, SnapmakerGcodeKind::Extrude,
+                   SnapmakerGcodeKind::Park, SnapmakerGcodeKind::Pick, SnapmakerGcodeKind::FilamentConfig})
+        CHECK(snapmaker_gcode_kind_needs_idle(k));
+}
+
+TEST_CASE("gcode classifier: the vendored page bundle still contains the fragments each shape was written from", "[SSWCP][device_ui][gcode][bundle]")
+{
+    const boost::filesystem::path dir = boost::filesystem::path(PROFILES_DIR).parent_path() / "web" / "flutter_web";
+    std::string                   text;
+    for (boost::filesystem::directory_iterator it(dir), end; it != end; ++it) {
+        const std::string name = it->path().filename().string();
+        if (name.rfind("main.", 0) == 0 && name.size() > 3 && name.compare(name.size() - 3, 3, ".js") == 0) {
+            std::ifstream in(it->path().string(), std::ios::binary);
+            std::stringstream ss;
+            ss << in.rdbuf();
+            text = ss.str();
+        }
+    }
+    REQUIRE_FALSE(text.empty());
+    // JS source text: the page writes the newline as the two characters backslash-n
+    for (const std::string frag : {R"("G91\nG1 X+"+p+" F3600")", R"("G91\nG1 X-"+p+" F3600")", R"("G91\nG1 Y+"+p+" F3600")", R"("G91\nG1 Y-"+p+" F3600")",
+                                   R"("G91\nG1 Z+"+p+" F1800")", R"("G91\nG1 Z-"+p+" F1800")", R"(o+="\nG90")", R"(nK(a,"M83",!0,3))",
+                                   R"("G1 E-"+c+" F"+b)", R"("G1 E"+c+" F"+b)", R"("PARK_EXTRUDER")", R"("PARK_EXTRUDER"+h)", R"("T"+j.a+" A0")",
+                                   R"(s.b="G28 X Y")", R"(s.b="G28 Z")", R"(default:s.b="G28")", R"("SET_PRINT_FILAMENT_CONFIG ")",
+                                   R"(["CONFIG_EXTRUDER",c,"FILAMENT_TYPE",d,"FILAMENT_SUBTYPE",e,"FILAMENT_COLOR_RGBA",b,"SAVE",g,"VENDOR",a0])",
+                                   R"(a.a+"='"+A.d(a.b)+"'")", R"(r+"FF")", "SET_HEATER_TEMPERATURE HEATER="}) {
+        CAPTURE(frag);
+        CHECK(text.find(frag) != std::string::npos);
+    }
+}
+
+namespace {
+// Answers the newest gcode-gate state query (print_stats + machine_state_manager).
+void answer_gcode_query(BridgeHarness& h, const json& state, const json& main_state, bool ok = true)
+{
+    REQUIRE_FALSE(h.queries.empty());
+    auto q = std::move(h.queries.back());
+    h.queries.pop_back();
+    CHECK(q.objects == std::vector<std::string>{"print_stats", "machine_state_manager"});
+    json status = json::object();
+    if (!state.is_null()) status["print_stats"] = {{"state", state}};
+    if (!main_state.is_null()) status["machine_state_manager"] = {{"main_state", main_state}};
+    q.done(ok, ok ? json{{"status", status}} : json::object());
+}
+void send_gcode(BridgeHarness& h, const json& script) { h.bridge.on_script_message(h.good, control_msg("sw_SendGCodes", {{"script", script}})); }
+} // namespace
+
+TEST_CASE("sw_SendGCodes: every golden shape is sent as the exact RPC only after a fresh idle read; heater needs no read", "[SSWCP][device_ui][gcode][gate]")
+{
+    for (const auto& c : gcode_accept_cases()) {
+        CAPTURE(c.label, c.script);
+        BridgeHarness h;
+        send_gcode(h, c.script);
+        if (c.kind == SnapmakerGcodeKind::Heater) {
+            CHECK(h.queries.empty());
+        } else {
+            CHECK(h.control_calls.empty()); // nothing before the state is known
+            answer_gcode_query(h, "standby", 0);
+        }
+        REQUIRE(h.control_calls.size() == 1);
+        CHECK(h.control_calls[0].method == "printer.gcode.script");
+        CHECK(h.control_calls[0].params == json{{"script", c.script}});
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == 200);
+    }
+}
+
+TEST_CASE("sw_SendGCodes: every refused script gets no query and no RPC", "[SSWCP][device_ui][gcode][gate]")
+{
+    for (const auto& c : gcode_reject_cases()) {
+        CAPTURE(c.label, c.script);
+        BridgeHarness h;
+        send_gcode(h, c.script);
+        CHECK(h.queries.empty());
+        CHECK(h.control_calls.empty());
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] != 200);
+    }
+    // arrays: only heater scripts; a one-element array of a jog string, and a jog split into its lines, are refused
+    BridgeHarness h;
+    for (const json& s : {json::array({"G28"}), json::array({"G91", "G1 X+10 F3600", "G90"}), json::array({"M83", "G1 E10 F300"}),
+                          json::array({"G91\nG1 X+10 F3600\nG90"}), json::array({"T1 A0", "T2 A0"}), json(7), json(nullptr), json::object()})
+        send_gcode(h, s);
+    CHECK(h.queries.empty());
+    CHECK(h.control_calls.empty());
+}
+
+TEST_CASE("sw_SendGCodes: the idle gate refuses every non-idle, unknown or failed read with zero gcode RPCs", "[SSWCP][device_ui][gcode][gate]")
+{
+    const std::string jog = "G91\nG1 X+10 F3600\nG90";
+    const std::vector<std::string> shapes = {jog, "G28", "G28 Z", "G28 X Y", "M83", "G1 E10 F300", "G1 E-10 F300", "PARK_EXTRUDER2", "T1 A0",
+                                             "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='1' SAVE='1'"};
+    for (const std::string& shape : shapes) {
+        CAPTURE(shape);
+        for (const json& state : {json("printing"), json("paused"), json("error"), json("ready-ish"), json(""), json(3), json(nullptr)}) {
+            CAPTURE(state.dump());
+            BridgeHarness h;
+            send_gcode(h, shape);
+            answer_gcode_query(h, state, 0);
+            CHECK(h.control_calls.empty());
+            REQUIRE(h.sent.size() == 1);
+            CHECK(h.reply(0)["payload"]["code"] != 200);
+        }
+        for (const json& ms : {json(1), json(2), json(3), json(4), json(5), json(6), json(7), json(8), json(9), json(10), json(11), json(12), json(13),
+                               json(14), json(-1), json(-2), json(nullptr), json("0"), json(0.5), json(true)}) {
+            CAPTURE(ms.dump());
+            BridgeHarness h;
+            send_gcode(h, shape);
+            answer_gcode_query(h, "standby", ms); // null = main_state missing
+            CHECK(h.control_calls.empty());
+            REQUIRE(h.sent.size() == 1);
+            CHECK(h.reply(0)["payload"]["code"] != 200);
+        }
+        for (const json& st : {json("standby"), json("complete"), json("cancelled")}) { // the allowed print_stats states
+            CAPTURE(st.dump());
+            BridgeHarness h;
+            send_gcode(h, shape);
+            answer_gcode_query(h, st, 0);
+            CHECK(h.control_calls.size() == 1);
+        }
+        { // the read fails / no source / malformed reply
+            { BridgeHarness h; send_gcode(h, shape); answer_gcode_query(h, "standby", 0, false); CHECK(h.control_calls.empty()); CHECK(h.sent.size() == 1); }
+            { BridgeHarness h; h.have_source = false; send_gcode(h, shape); CHECK(h.control_calls.empty()); CHECK(h.sent.size() == 1); }
+            for (const json& result : {json::object(), json{{"status", json::object()}}, json{{"status", {{"print_stats", {{"state", "standby"}}}}}},
+                                       json{{"status", {{"machine_state_manager", {{"main_state", 0}}}}}}, json("standby"),
+                                       json{{"status", {{"print_stats", "standby"}, {"machine_state_manager", {{"main_state", 0}}}}}}}) {
+                BridgeHarness h;
+                send_gcode(h, shape);
+                REQUIRE(h.queries.size() == 1);
+                h.queries[0].done(true, result);
+                CHECK(h.control_calls.empty());
+                CHECK(h.sent.size() == 1);
+            }
+        }
+    }
+    // the heater keeps the page's behaviour: sent in any state, with no read at all
+    BridgeHarness h;
+    send_gcode(h, "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200");
+    CHECK(h.control_calls.size() == 1);
+    CHECK(h.queries.empty());
+}
+
+TEST_CASE("sw_SendGCodes: the state is read afresh for every request, never cached", "[SSWCP][device_ui][gcode][gate]")
+{
+    BridgeHarness h;
+    send_gcode(h, "G28");
+    answer_gcode_query(h, "standby", 0);
+    REQUIRE(h.control_calls.size() == 1);
+    send_gcode(h, "G28");
+    REQUIRE(h.queries.size() == 1);            // a second request asks again
+    answer_gcode_query(h, "printing", 1);      // and the machine has started a job
+    CHECK(h.control_calls.size() == 1);
+}
+
+TEST_CASE("sw_SendGCodes: each call of the extrude sequence is gated on its own", "[SSWCP][device_ui][gcode][gate]")
+{
+    BridgeHarness h;
+    send_gcode(h, "M83");
+    answer_gcode_query(h, "standby", 0);
+    REQUIRE(h.control_calls.size() == 1);
+    CHECK(h.control_calls[0].params == json{{"script", "M83"}});
+    send_gcode(h, "G1 E10 F300");              // the machine started a print between the two calls
+    answer_gcode_query(h, "printing", 1);
+    CHECK(h.control_calls.size() == 1);        // the second call is refused
+    CHECK(h.reply(h.sent.size() - 1)["payload"]["code"] != 200);
+    send_gcode(h, "G1 E10 F300");              // and when idle again it goes
+    answer_gcode_query(h, "complete", 0);
+    CHECK(h.control_calls.size() == 2);
+}
+
+TEST_CASE("sw_SendGCodes: one idle-only gcode at a time, a lost callback clears at the deadline", "[SSWCP][device_ui][gcode][busy]")
+{
+    SECTION("second request while the read is pending, or the RPC is pending") {
+        BridgeHarness h;
+        h.hold_control = true;
+        send_gcode(h, "G28");
+        send_gcode(h, "T1 A0");
+        CHECK(h.queries.size() == 1);
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] != 200);
+        answer_gcode_query(h, "standby", 0);
+        REQUIRE(h.control_calls.size() == 1);
+        send_gcode(h, "T1 A0");
+        CHECK(h.queries.empty());
+        CHECK(h.control_calls.size() == 1);
+        h.control_pending[0](true, json{{"state", "success"}});
+        send_gcode(h, "T1 A0");
+        CHECK(h.queries.size() == 1);          // the slot is free again
+    }
+    SECTION("a heater script is not blocked by a gcode in flight") {
+        BridgeHarness h;
+        h.hold_control = true;
+        send_gcode(h, "G28");
+        answer_gcode_query(h, "standby", 0);
+        send_gcode(h, "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200");
+        CHECK(h.control_calls.size() == 2);
+    }
+    SECTION("a lost callback frees the slot after the deadline, and the late callback does not free a newer flight") {
+        BridgeHarness h;
+        h.hold_control = true;
+        send_gcode(h, "G28");
+        answer_gcode_query(h, "standby", 0);
+        REQUIRE(h.control_calls.size() == 1);
+        h.fake_now += std::chrono::seconds(60);
+        send_gcode(h, "G28");
+        CHECK(h.queries.empty());              // still inside the deadline
+        h.fake_now += std::chrono::seconds(200);
+        send_gcode(h, "G28 Z");
+        REQUIRE(h.queries.size() == 1);        // deadline passed: a new flight is allowed
+        answer_gcode_query(h, "standby", 0);
+        REQUIRE(h.control_calls.size() == 2);
+        h.control_pending[0](false, json::object()); // the first, lost, callback arrives late
+        send_gcode(h, "G28");
+        CHECK(h.queries.empty());              // the newer flight is still held
+    }
+}
+
+TEST_CASE("Cancel is never dropped for a pause, resume or gcode in flight; only a second cancel is refused", "[SSWCP][device_ui][control][cancel]")
+{
+    SECTION("pause in flight, then cancel") {
+        BridgeHarness h;
+        h.hold_control = true;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        answer_state_query(h, "printing");
+        REQUIRE(h.control_calls.size() == 1);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        REQUIRE(h.queries.size() == 1);            // the cancel runs its own fresh state query
+        answer_state_query(h, "printing");
+        REQUIRE(h.control_calls.size() == 2);
+        CHECK(h.control_calls[1].method == "printer.print.cancel");
+    }
+    SECTION("pause still reading its state, then cancel") {
+        BridgeHarness h;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        REQUIRE(h.queries.size() == 2);
+        answer_state_query(h, "paused");           // newest = the cancel's
+        CHECK(h.control_calls.size() == 1);
+        CHECK(h.control_calls[0].method == "printer.print.cancel");
+    }
+    SECTION("resume in flight, then cancel") {
+        BridgeHarness h;
+        h.hold_control = true;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintResume", json::object()));
+        answer_state_query(h, "paused");
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        answer_state_query(h, "printing");
+        REQUIRE(h.control_calls.size() == 2);
+        CHECK(h.control_calls[1].method == "printer.print.cancel");
+    }
+    SECTION("an idle-only gcode in flight does not block the cancel") {
+        BridgeHarness h;
+        h.hold_control = true;
+        send_gcode(h, "G28");
+        answer_gcode_query(h, "standby", 0);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        answer_state_query(h, "printing");
+        REQUIRE(h.control_calls.size() == 2);
+        CHECK(h.control_calls[1].method == "printer.print.cancel");
+    }
+    SECTION("cancel in flight: a second cancel, a pause, a resume and any idle-only gcode are refused") {
+        BridgeHarness h;
+        h.hold_control = true;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        answer_state_query(h, "printing");
+        REQUIRE(h.control_calls.size() == 1);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintResume", json::object()));
+        send_gcode(h, "G28");
+        CHECK(h.queries.empty());
+        CHECK(h.control_calls.size() == 1);
+        CHECK(h.sent.size() == 4);
+    }
+    SECTION("a lost cancel callback frees the cancel slot at the deadline") {
+        BridgeHarness h;
+        h.hold_control = true;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        answer_state_query(h, "printing");
+        h.fake_now += std::chrono::seconds(10);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        CHECK(h.queries.empty());
+        h.fake_now += std::chrono::seconds(60);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintCancel", json::object()));
+        CHECK(h.queries.size() == 1);
+    }
+    SECTION("a lost pause callback frees the pause slot at the deadline") {
+        BridgeHarness h;
+        h.hold_control = true;
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        answer_state_query(h, "printing");
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        CHECK(h.queries.empty());
+        h.fake_now += std::chrono::seconds(60);
+        h.bridge.on_script_message(h.good, control_msg("sw_MachinePrintPause", json::object()));
+        CHECK(h.queries.size() == 1);
+    }
+}
+
+TEST_CASE("agent: the second layer refuses every shape the classifier refuses and every non-idle read, with no RPC", "[SSWCP][device_ui][gcode][agent]")
+{
+    using Run = MoonrakerPrinterAgent;
+    for (const auto& c : gcode_accept_cases()) {
+        CAPTURE(c.label, c.script);
+        const std::string req = Run::control_request("printer.gcode.script", {{"script", c.script}}, 1);
+        REQUIRE_FALSE(req.empty());
+        CHECK(json::parse(req)["params"] == json{{"script", c.script}});
+    }
+    for (const auto& c : gcode_reject_cases()) {
+        CAPTURE(c.label, c.script);
+        CHECK(Run::control_request("printer.gcode.script", {{"script", c.script}}, 1).empty());
+    }
+    CHECK(Run::control_request("printer.gcode.script", {{"script", "G28"}, {"extra", 1}}, 1).empty());
+    CHECK(Run::control_request("printer.gcode.script", {{"script", json::array({"G28"})}}, 1).empty());
+
+    const auto idle = [](bool ok, const json& st, const json& ms) { return std::make_pair(ok, json{{"status", {{"print_stats", {{"state", st}}}, {"machine_state_manager", {{"main_state", ms}}}}}}); };
+    struct Row { bool ok; json st, ms; bool runs; };
+    for (const Row& r : std::vector<Row>{{true, "standby", 0, true}, {true, "complete", 0, true}, {true, "cancelled", 0, true},
+                                         {true, "printing", 0, false}, {true, "paused", 0, false}, {true, "error", 0, false},
+                                         {true, "standby", 1, false}, {true, "standby", 7, false}, {true, "standby", -1, false},
+                                         {true, "standby", nullptr, false}, {false, "standby", 0, false}}) {
+        CAPTURE(r.ok, r.st.dump(), r.ms.dump());
+        auto gate = std::make_shared<Run::InFlightGate>();
+        int queries = 0, runs = 0, dones = 0; bool done_ok = false;
+        Run::run_gated_by_idle(
+            gate, [&](std::function<void(bool, json)> cb) { ++queries; auto p = idle(r.ok, r.st, r.ms); cb(p.first, p.first ? p.second : json::object()); },
+            [&](std::function<void(bool, json)> cb) { ++runs; cb(true, json::object()); }, [&](bool o, json) { ++dones; done_ok = o; });
+        CHECK(queries == 1);
+        CHECK(runs == (r.runs ? 1 : 0));
+        CHECK(dones == 1);
+        CHECK(done_ok == r.runs);
+        CHECK_FALSE(gate->busy_now()); // released either way
+    }
+    SECTION("one at a time: a busy gate refuses before any query") {
+        auto gate = std::make_shared<Run::InFlightGate>();
+        REQUIRE(gate->try_acquire());
+        int queries = 0, dones = 0; bool done_ok = true;
+        Run::run_gated_by_idle(gate, [&](std::function<void(bool, json)>) { ++queries; }, [&](std::function<void(bool, json)>) {}, [&](bool o, json) { ++dones; done_ok = o; });
+        CHECK(queries == 0);
+        CHECK(dones == 1);
+        CHECK_FALSE(done_ok);
+        CHECK(gate->busy_now()); // the holder's gate is untouched
+    }
+    SECTION("the gate is held while the read and the RPC are in flight") {
+        auto gate = std::make_shared<Run::InFlightGate>();
+        std::function<void(bool, json)> pending_query, pending_run;
+        int dones = 0;
+        Run::run_gated_by_idle(gate, [&](std::function<void(bool, json)> cb) { pending_query = cb; }, [&](std::function<void(bool, json)> cb) { pending_run = cb; }, [&](bool, json) { ++dones; });
+        CHECK(gate->busy_now());
+        pending_query(true, idle(true, "standby", 0).second);
+        CHECK(gate->busy_now());
+        pending_run(true, json::object());
+        CHECK_FALSE(gate->busy_now());
+        CHECK(dones == 1);
+    }
+    // an unusable machine: control_async answers done(false) once, no RPC, gate free again
+    MoonrakerPrinterAgent agent("");
+    int calls = 0; bool ok = true;
+    agent.control_async("printer.gcode.script", {{"script", "G28"}}, [&](bool o, json) { ++calls; ok = o; });
+    CHECK(calls == 1);
+    CHECK_FALSE(ok);
+    CHECK_FALSE(agent.gcode_gate()->busy_now());
+}
+
+TEST_CASE("agent: gcode timeouts (homing is not cut at 5 s) and gates (cancel and gcode have their own)", "[SSWCP][device_ui][gcode][agent]")
+{
+    using namespace std::chrono_literals;
+    const auto t = [](const std::string& s) { return MoonrakerPrinterAgent::control_timeout_for("printer.gcode.script", {{"script", s}}); };
+    CHECK(t("G28") == 120000ms);
+    CHECK(t("G28 Z") == 120000ms);
+    CHECK(t("G28 X Y") == 120000ms);
+    CHECK(t("T1 A0") == 60000ms);
+    CHECK(t("PARK_EXTRUDER") == 60000ms);
+    CHECK(t("G91\nG1 X+10 F3600\nG90") == 20000ms);
+    CHECK(t("G1 E10 F300") == 20000ms);
+    CHECK(t("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200") == 5000ms);
+    CHECK(MoonrakerPrinterAgent::control_timeout_for("printer.print.cancel", json::object()) == 20000ms);
+    MoonrakerPrinterAgent agent("");
+    const auto cancel = agent.control_gate_for("printer.print.cancel");
+    REQUIRE(cancel);
+    CHECK(cancel != agent.control_gate_for("printer.print.pause"));
+    CHECK(cancel != agent.control_gate_for("printer.control.led"));
+    CHECK(cancel != agent.gcode_gate());
+    CHECK(agent.gcode_gate() != agent.control_gate_for("printer.control.led"));
+    REQUIRE(agent.control_gate_for("printer.print.pause")->try_acquire());
+    CHECK(cancel->try_acquire()); // a pause in flight at the agent does not drop a cancel
 }

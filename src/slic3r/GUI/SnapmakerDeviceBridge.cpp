@@ -124,7 +124,7 @@ const std::vector<SnapmakerControlCommand>& snapmaker_control_table()
 
 const std::vector<std::string>& snapmaker_registered_control_commands()
 {
-    // Approved by Charles after the #79 review. sw_SendGCodes carries the page's nozzle temperature (SET_HEATER_TEMPERATURE only).
+    // Approved by Charles after the #79 review. sw_SendGCodes carries only the Device page's gcode shapes (snapmaker_gcode_classify): nozzle temperature, and, idle-only, jog, home, extrude/retract, park, pick, filament config.
     // Left out on purpose: sw_ControlExtruderTemp and sw_ControlPurifier (the page does not use them), sw_SetDeviceName, sw_BedMesh_AbortProbeMesh.
     static const std::vector<std::string> registered = {"sw_ControlLed",      "sw_ControlPrintSpeed",  "sw_ControlMainFan",
                                                         "sw_ControlGenericFan", "sw_ControlBedTemp",     "sw_MachinePrintPause",
@@ -148,15 +148,10 @@ bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json&
         if (sw_name == s.cmd.sw_name) { spec = &s; break; }
     if (!spec) { error = "unsupported command"; return false; }
     if (!params.is_object()) { error = "failure"; return false; }
-    if (sw_name == "sw_SendGCodes") { // Snapmaker: {script: string | array of strings}, joined with "\n" (SSWCP.cpp sw_SendGCodes); ours: nozzle temperature only
+    if (sw_name == "sw_SendGCodes") { // Snapmaker: {script: string | array of strings}, joined with "\n" (SSWCP.cpp sw_SendGCodes); ours: the page's shapes only
         const auto it = params.find("script");
-        if (it == params.end() || !snapmaker_nozzle_script_valid(*it)) { error = "failure"; return false; }
         std::string joined;
-        for (const auto& e : it->is_array() ? *it : nlohmann::json::array({*it})) {
-            std::string line = e.get<std::string>();
-            while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\n' || line.back() == '\r')) line.pop_back();
-            joined += (joined.empty() ? "" : "\n") + line;
-        }
+        if (it == params.end() || snapmaker_gcode_script_prepare(*it, joined) == SnapmakerGcodeKind::None) { error = "failure"; return false; }
         method     = spec->cmd.rpc_method;
         rpc_params = {{"script", joined}};
         return true;
@@ -601,6 +596,21 @@ bool snapmaker_state_object_allowed(const std::string& name)
         if (name.compare(0, std::strlen(prefix), prefix) == 0 && name.size() > std::strlen(prefix))
             return true;
     return false; // configfile, bed_mesh, gcode_macro..., anything else Klipper exposes
+}
+
+namespace {
+// State query (5 s) + the print RPC (20 s) + margin; a gcode adds homing (120 s in the agent).
+constexpr std::chrono::seconds kPrintFlightLimit{40};
+constexpr std::chrono::seconds kGcodeFlightLimit{150};
+} // namespace
+
+std::uint64_t SnapmakerDeviceBridge::flight_begin(Flight& f, std::chrono::seconds limit)
+{
+    const auto now = flight_now();
+    if (f.token != 0 && now < f.deadline) return 0;
+    f.token    = ++m_flight_seq;
+    f.deadline = now + limit;
+    return f.token;
 }
 
 SnapmakerDeviceBridge::Selection SnapmakerDeviceBridge::select_objects(const nlohmann::json& params) const
@@ -1094,10 +1104,14 @@ void SnapmakerDeviceBridge::register_commands()
         },
         false);
 
-    // --- machine control (#75, #79): only the commands in snapmaker_registered_control_commands() are reachable; the rest of the
+    // --- machine control (#75, #79, #31): only the commands in snapmaker_registered_control_commands() are reachable; the rest of the
     // forklifted table stays unregistered and gets the core's 501. pause / resume / cancel first ask the machine for print_stats.state
-    // and are sent only in the matching state (the RPC carries no job id); a failed query refuses. One print.* request at a time
-    // (the state query counts): a second one is answered "failure" without a query or an RPC. ---
+    // and are sent only in the matching state (the RPC carries no job id); a failed query refuses. Pause and resume share one in-flight
+    // slot (a second is answered "failure" without a query or an RPC); a cancel has its own slot and is never refused for a pause in
+    // flight. sw_SendGCodes: a heater script goes straight through (the page does not gate it); every other shape (jog, home, extrude,
+    // park, pick, filament config) first asks for print_stats.state + machine_state_manager.main_state and is sent only when both say
+    // idle, one at a time, never while a cancel is in flight. Each gcode request is gated on its own, so the second call of the extrude
+    // sequence (M83, then G1 E..) is re-checked. ---
     for (const std::string& cmd : snapmaker_registered_control_commands()) {
         m_sswcp.register_command(
             cmd,
@@ -1106,12 +1120,15 @@ void SnapmakerDeviceBridge::register_commands()
                 nlohmann::json rpc_params;
                 if (!snapmaker_control_prepare(cmd, i.params(), method, rpc_params, error)) { i.handle_general_fail(SSWCPCode::Failure, error); return; }
                 if (!m_options.control) { i.handle_general_fail(SSWCPCode::Failure, "Connection lost!"); return; }
+                const bool needs_idle = method == "printer.gcode.script" &&
+                                        snapmaker_gcode_kind_needs_idle(snapmaker_gcode_classify(rpc_params["script"].get<std::string>()));
                 auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
                 auto alive = m_alive;
-                auto send  = [this, weak, alive, method, rpc_params] {
-                    m_options.control(method, rpc_params, [this, weak, alive, method](bool ok, nlohmann::json result) {
+                // `release` runs when the RPC answers (the slot of this request is freed, a stale one is left alone)
+                auto send  = [this, weak, alive, method, rpc_params](std::function<void()> release) {
+                    m_options.control(method, rpc_params, [this, weak, alive, method, release](bool ok, nlohmann::json result) {
                         if (!*alive) return;
-                        if (control_method_is_print(method)) m_print_control_busy = false;
+                        if (release) release();
                         if (ok && method == "printer.control.led") push_state(true); // #82: the page reads the LED from the state; do not wait for the poll
                         if (auto inst = weak.lock()) {
                             if (ok) inst->reply_ok(std::move(result));
@@ -1119,11 +1136,32 @@ void SnapmakerDeviceBridge::register_commands()
                         }
                     });
                 };
-                if (!control_method_is_print(method)) { send(); return; }
+                if (needs_idle) {
+                    if (m_cancel_busy.token != 0 && flight_now() < m_cancel_busy.deadline) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                    if (!m_options.query_state) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                    const std::uint64_t token = flight_begin(m_gcode_busy, kGcodeFlightLimit);
+                    if (token == 0) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                    m_options.query_state({"print_stats", "machine_state_manager"}, [this, weak, alive, send, token](bool ok, nlohmann::json result) {
+                        if (!*alive) return;
+                        if (m_closed || !ok || !snapmaker_machine_idle(result)) {
+                            flight_end(m_gcode_busy, token);
+                            if (auto inst = weak.lock()) inst->handle_general_fail(SSWCPCode::Failure, "failure");
+                            return;
+                        }
+                        send([this, token] { flight_end(m_gcode_busy, token); });
+                    });
+                    return;
+                }
+                if (!control_method_is_print(method)) { send(nullptr); return; }
 
-                if (m_print_control_busy || !m_options.query_state) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
-                m_print_control_busy = true;
-                m_options.query_state({"print_stats"}, [this, weak, alive, method, send](bool ok, nlohmann::json result) {
+                const bool          is_cancel = method == "printer.print.cancel";
+                Flight&             slot      = is_cancel ? m_cancel_busy : m_print_control_busy;
+                // pause/resume also wait for a cancel in flight (there is nothing left to pause); a cancel waits for nothing but a cancel
+                if (!is_cancel && m_cancel_busy.token != 0 && flight_now() < m_cancel_busy.deadline) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                if (!m_options.query_state) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                const std::uint64_t token = flight_begin(slot, kPrintFlightLimit);
+                if (token == 0) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                m_options.query_state({"print_stats"}, [this, weak, alive, method, send, is_cancel, token](bool ok, nlohmann::json result) {
                     if (!*alive) return;
                     std::string state;
                     if (ok && result.is_object() && result.contains("status") && result["status"].is_object() &&
@@ -1131,11 +1169,11 @@ void SnapmakerDeviceBridge::register_commands()
                         result["status"]["print_stats"].contains("state") && result["status"]["print_stats"]["state"].is_string())
                         state = result["status"]["print_stats"]["state"].get<std::string>();
                     if (m_closed || !snapmaker_print_state_allows(method, state)) {
-                        m_print_control_busy = false;
+                        flight_end(is_cancel ? m_cancel_busy : m_print_control_busy, token);
                         if (auto inst = weak.lock()) inst->handle_general_fail(SSWCPCode::Failure, "failure");
                         return;
                     }
-                    send(); // m_print_control_busy stays set until the RPC answers
+                    send([this, is_cancel, token] { flight_end(is_cancel ? m_cancel_busy : m_print_control_busy, token); }); // the slot stays set until the RPC answers
                 });
             },
             false);

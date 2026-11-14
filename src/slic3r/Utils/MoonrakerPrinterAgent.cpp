@@ -548,10 +548,10 @@ std::string MoonrakerPrinterAgent::control_request(const std::string& method, co
 {
     if (!control_method_allowed(method) || !params.is_object())
         return {};
-    // Defence in depth (#79): the gcode route carries nothing but nozzle-temperature scripts, whatever the caller checked.
+    // Defence in depth (#79, #31): the gcode route carries nothing but the Device page's shapes (snapmaker_gcode_classify), whatever the caller checked.
     if (method == "printer.gcode.script" &&
         (params.size() != 1 || !params.contains("script") || !params["script"].is_string() ||
-         !snapmaker_nozzle_script_joined_valid(params["script"].get<std::string>())))
+         snapmaker_gcode_classify(params["script"].get<std::string>()) == SnapmakerGcodeKind::None))
         return {};
     nlohmann::json req;
     req["jsonrpc"] = "2.0";
@@ -594,7 +594,43 @@ void MoonrakerPrinterAgent::control_async(const std::string& method, const nlohm
         base_url = device_info.base_url;
         api_key  = device_info.api_key;
     }
-    control_run(base_url, api_key, method, params, control_timeout_for(method), control_gate_for(method), std::move(done));
+    const auto timeout = control_timeout_for(method, params);
+    // Idle-only gcodes: a fresh state read of our own before the RPC, behind the bridge's check (second layer). A refused script
+    // (request builder returns "") never reaches the query.
+    if (method == "printer.gcode.script" && params.is_object() && params.contains("script") && params["script"].is_string() &&
+        snapmaker_gcode_kind_needs_idle(snapmaker_gcode_classify(params["script"].get<std::string>()))) {
+        run_gated_by_idle(
+            m_gcode_gate,
+            [this](std::function<void(bool, nlohmann::json)> cb) { query_machine_objects_async({"print_stats", "machine_state_manager"}, std::move(cb)); },
+            [base_url, api_key, method, params, timeout](std::function<void(bool, nlohmann::json)> cb) {
+                control_run(base_url, api_key, method, params, timeout, nullptr, std::move(cb));
+            },
+            std::move(done));
+        return;
+    }
+    control_run(base_url, api_key, method, params, timeout, control_gate_for(method), std::move(done));
+}
+
+void MoonrakerPrinterAgent::run_gated_by_idle(std::shared_ptr<InFlightGate> gate,
+                                              std::function<void(std::function<void(bool, nlohmann::json)>)> query,
+                                              std::function<void(std::function<void(bool, nlohmann::json)>)> run,
+                                              std::function<void(bool ok, nlohmann::json result)> done)
+{
+    if (!gate || !query || !run || !gate->try_acquire()) { // one at a time, refused not queued
+        if (done) done(false, nlohmann::json::object());
+        return;
+    }
+    query([gate, run, done](bool ok, nlohmann::json state) {
+        if (!ok || !snapmaker_machine_idle(state)) {
+            gate->release();
+            if (done) done(false, nlohmann::json::object());
+            return;
+        }
+        run([gate, done](bool ok2, nlohmann::json result) {
+            gate->release();
+            if (done) done(ok2, std::move(result));
+        });
+    });
 }
 
 void MoonrakerPrinterAgent::camera_monitor_async(bool start, const nlohmann::json& params,

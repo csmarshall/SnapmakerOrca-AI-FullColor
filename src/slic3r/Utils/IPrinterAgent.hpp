@@ -606,7 +606,7 @@ inline constexpr const char* kControlRpcMethods[] = {
     "printer.control.generic_fan",  "printer.control.bed_temp",    "printer.control.extruder_temp",
     "printer.print.pause",          "printer.print.resume",        "printer.print.cancel",
     "printer.bed_mesh.abort_probe_mesh", "machine.set_device_name",
-    "printer.gcode.script"}; // printer.gcode.script only ever carries nozzle-temperature scripts (snapmaker_nozzle_script_*_valid, below)
+    "printer.gcode.script"}; // printer.gcode.script only ever carries the Device page's gcode shapes (snapmaker_gcode_classify, below)
 // pause / resume / cancel: they get their own in-flight gate and a longer timeout than the other controls (#79)
 inline bool control_method_is_print(const std::string& method)
 {
@@ -619,9 +619,15 @@ inline bool control_method_allowed(const std::string& method)
     return false;
 }
 
-// Nozzle temperature through the gcode route the Device page uses (#79): `SET_HEATER_TEMPERATURE HEATER=<h> TARGET=<n>` with h one of
-// extruder, extruder1..extruder3 (the page names the heater "extruder" for index 0, else "extruder"+index) and n an integer 0..300.
-// Nothing else is a valid script. Trailing whitespace/newlines are ignored; an embedded newline, extra token, other case or command is not.
+// ---- The gcode route the Device page uses (#79, #31): printer.gcode.script carries only the shapes Snapmaker's own page sends for the
+// controls a user clicks. One classifier over the WHOLE script string, shared by the bridge (page request) and the agent (the string about
+// to go on the wire), so the two layers cannot drift. Source of every literal: resources/web/flutter_web/main.b347974c91352c2f.js (see
+// docs/records/device-page-gcode-allowlist.md in the plan repo). This is agreement with the page, not a statement about printer safety. ----
+enum class SnapmakerGcodeKind { None, Heater, Jog, Home, ExtrudeMode, Extrude, Park, Pick, FilamentConfig };
+
+// Nozzle temperature: `SET_HEATER_TEMPERATURE HEATER=<h> TARGET=<n>` with h one of extruder, extruder1..extruder3 (the page names the heater
+// "extruder" for index 0, else "extruder"+index) and n an integer 0..300. Trailing whitespace/newlines are ignored; an embedded newline,
+// extra token, other case or command is not.
 inline bool snapmaker_nozzle_script_line_valid(const std::string& line)
 {
     std::size_t end = line.size();
@@ -641,28 +647,151 @@ inline bool snapmaker_nozzle_script_line_valid(const std::string& line)
         if (c < '0' || c > '9') return false;
     return std::stoi(n) <= 300;
 }
-inline constexpr std::size_t kNozzleScriptMax = 4;
-// The page's `script` param: a string (one script) or a non-empty array of at most 4 strings; every string is one valid script (an
-// embedded newline fails the digit check, so two commands in one string are refused).
-inline bool snapmaker_nozzle_script_valid(const nlohmann::json& script)
+inline constexpr std::size_t kNozzleScriptMax     = 4;   // heater scripts joined with '\n' (string or array)
+inline constexpr std::size_t kGcodeScriptMaxBytes = 256; // whole-script cap for every non-heater shape
+inline constexpr std::size_t kFilamentValueMax    = 32;  // FILAMENT_TYPE / FILAMENT_SUBTYPE / VENDOR value length cap
+
+// Jog (page `wV`, bundle 39155-39168): "G91\nG1 <X|Y|Z><+|-><10|1|0.1> F<3600 for X,Y | 1800 for Z>\nG90", exactly these three lines.
+inline bool snapmaker_gcode_jog_valid(const std::string& s)
 {
-    if (script.is_string()) return snapmaker_nozzle_script_line_valid(script.get_ref<const std::string&>());
-    if (!script.is_array() || script.empty() || script.size() > kNozzleScriptMax) return false;
-    for (const auto& e : script)
-        if (!e.is_string() || !snapmaker_nozzle_script_line_valid(e.get_ref<const std::string&>())) return false;
+    if (s.compare(0, 7, "G91\nG1 ") != 0 || s.size() < 9) return false;
+    const char axis = s[7], sign = s[8];
+    if (axis != 'X' && axis != 'Y' && axis != 'Z') return false;
+    if (sign != '+' && sign != '-') return false;
+    const std::string feed = axis == 'Z' ? " F1800\nG90" : " F3600\nG90"; // feed bound to the axis
+    for (const char* step : {"10", "1", "0.1"})
+        if (s.compare(9, std::string::npos, std::string(step) + feed) == 0) return true;
+    return false;
+}
+// Home (page `R6`, 39148): G28, G28 Z, G28 X Y. G28 X / G28 Y are not reachable in the page and are refused.
+inline bool snapmaker_gcode_home_valid(const std::string& s) { return s == "G28" || s == "G28 Z" || s == "G28 X Y"; }
+// Extruder arrows (page `H_`, 39177-39192): M83, then G1 E10 F300 / G1 E-10 F300, two separate calls.
+inline bool snapmaker_gcode_extrude_mode_valid(const std::string& s) { return s == "M83"; }
+inline bool snapmaker_gcode_extrude_valid(const std::string& s) { return s == "G1 E10 F300" || s == "G1 E-10 F300"; }
+// Park (157821): PARK_EXTRUDER, PARK_EXTRUDER1..3. Pick (157826): T0 A0 .. T3 A0.
+inline bool snapmaker_gcode_park_valid(const std::string& s)
+{
+    if (s == "PARK_EXTRUDER") return true;
+    return s.size() == 14 && s.compare(0, 13, "PARK_EXTRUDER") == 0 && s[13] >= '1' && s[13] <= '3';
+}
+inline bool snapmaker_gcode_pick_valid(const std::string& s)
+{
+    return s.size() == 5 && s[0] == 'T' && s[1] >= '0' && s[1] <= '3' && s.compare(2, 3, " A0") == 0;
+}
+// Filament config (page `cb2`, 39735-39762; format 148170-148175): SET_PRINT_FILAMENT_CONFIG then K='v' pairs separated by one space, in
+// the order CONFIG_EXTRUDER, [FILAMENT_TYPE], [FILAMENT_SUBTYPE], [FILAMENT_COLOR_RGBA], SAVE, [VENDOR] (the page omits null fields).
+// CONFIG_EXTRUDER '0'..'3', SAVE '1', COLOR 8 upper-case hex digits (the page appends FF to 6), TYPE/SUBTYPE/VENDOR 1..32 chars of
+// [A-Za-z0-9 ._+/-] (narrower than the page, which sends whatever the filament library holds: no quote, backslash, ';', '#', newline).
+inline bool snapmaker_gcode_filament_value_valid(const std::string& key, const std::string& v)
+{
+    if (key == "CONFIG_EXTRUDER") return v.size() == 1 && v[0] >= '0' && v[0] <= '3';
+    if (key == "SAVE") return v == "1";
+    if (key == "FILAMENT_COLOR_RGBA") {
+        if (v.size() != 8) return false;
+        for (char c : v)
+            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))) return false;
+        return true;
+    }
+    if (v.empty() || v.size() > kFilamentValueMax) return false;
+    for (unsigned char c : v)
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == ' ' || c == '.' || c == '_' || c == '+' ||
+              c == '/' || c == '-'))
+            return false;
     return true;
 }
-// The agent's check of the `script` string it is about to send: the scripts the bridge joined with '\n', each valid, at most 4.
-inline bool snapmaker_nozzle_script_joined_valid(const std::string& script)
+inline bool snapmaker_gcode_filament_config_valid(const std::string& s)
 {
-    std::size_t begin = 0, count = 0;
-    while (true) {
-        const std::size_t nl = script.find('\n', begin);
-        const std::string line = script.substr(begin, nl == std::string::npos ? std::string::npos : nl - begin);
-        if (++count > kNozzleScriptMax || !snapmaker_nozzle_script_line_valid(line)) return false;
-        if (nl == std::string::npos) return true;
-        begin = nl + 1;
+    static const std::string prefix = "SET_PRINT_FILAMENT_CONFIG";
+    if (s.compare(0, prefix.size(), prefix) != 0) return false;
+    struct Field { const char* key; bool required; };
+    static const Field fields[] = {{"CONFIG_EXTRUDER", true}, {"FILAMENT_TYPE", false}, {"FILAMENT_SUBTYPE", false},
+                                   {"FILAMENT_COLOR_RGBA", false}, {"SAVE", true}, {"VENDOR", false}};
+    std::size_t pos = prefix.size();
+    for (const Field& f : fields) {
+        const std::string lead = std::string(" ") + f.key + "='";
+        if (s.compare(pos, lead.size(), lead) != 0) {
+            if (f.required) return false;
+            continue;
+        }
+        const std::size_t vbeg = pos + lead.size();
+        const std::size_t vend = s.find('\'', vbeg);
+        if (vend == std::string::npos || !snapmaker_gcode_filament_value_valid(f.key, s.substr(vbeg, vend - vbeg))) return false;
+        pos = vend + 1;
     }
+    return pos == s.size();
+}
+// Every one of these shapes except the heater is refused unless the machine is idle (bridge and agent both fresh-query the state).
+inline bool snapmaker_gcode_kind_needs_idle(SnapmakerGcodeKind k) { return k != SnapmakerGcodeKind::None && k != SnapmakerGcodeKind::Heater; }
+
+// The classification of one script string as it goes on the wire (the bridge's joined form): heater scripts (1..4 lines, each valid) or
+// exactly one of the other shapes. Non-heater shapes are taken verbatim: length <= 256 and only printable ASCII plus '\n'.
+inline SnapmakerGcodeKind snapmaker_gcode_classify(const std::string& script)
+{
+    {
+        std::size_t begin = 0, count = 0;
+        bool        heater = true;
+        while (true) {
+            const std::size_t nl = script.find('\n', begin);
+            if (++count > kNozzleScriptMax || !snapmaker_nozzle_script_line_valid(script.substr(begin, nl == std::string::npos ? std::string::npos : nl - begin))) { heater = false; break; }
+            if (nl == std::string::npos) break;
+            begin = nl + 1;
+        }
+        if (heater) return SnapmakerGcodeKind::Heater;
+    }
+    if (script.empty() || script.size() > kGcodeScriptMaxBytes) return SnapmakerGcodeKind::None;
+    for (unsigned char c : script)
+        if (!((c >= 0x20 && c <= 0x7E) || c == '\n')) return SnapmakerGcodeKind::None;
+    if (snapmaker_gcode_jog_valid(script)) return SnapmakerGcodeKind::Jog;
+    if (snapmaker_gcode_home_valid(script)) return SnapmakerGcodeKind::Home;
+    if (snapmaker_gcode_extrude_mode_valid(script)) return SnapmakerGcodeKind::ExtrudeMode;
+    if (snapmaker_gcode_extrude_valid(script)) return SnapmakerGcodeKind::Extrude;
+    if (snapmaker_gcode_park_valid(script)) return SnapmakerGcodeKind::Park;
+    if (snapmaker_gcode_pick_valid(script)) return SnapmakerGcodeKind::Pick;
+    if (snapmaker_gcode_filament_config_valid(script)) return SnapmakerGcodeKind::FilamentConfig;
+    return SnapmakerGcodeKind::None;
+}
+// The page's `script` param -> the string to send and its kind. A string is one script (trailing whitespace is dropped only for a heater
+// script, and only one heater line); an array (at most 4 strings) is accepted only as heater scripts, joined with '\n'. Kind None = refused.
+inline SnapmakerGcodeKind snapmaker_gcode_script_prepare(const nlohmann::json& script, std::string& joined)
+{
+    const auto rtrim = [](std::string s) {
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        return s;
+    };
+    joined.clear();
+    if (script.is_string()) {
+        const std::string& raw = script.get_ref<const std::string&>();
+        // one string = one script: several heater lines in one string stay refused (they are accepted only as an array, as before)
+        const std::string t = rtrim(raw);
+        if (snapmaker_nozzle_script_line_valid(t)) { joined = t; return SnapmakerGcodeKind::Heater; }
+        const SnapmakerGcodeKind k = snapmaker_gcode_classify(raw);
+        if (k == SnapmakerGcodeKind::Heater) return SnapmakerGcodeKind::None;
+        if (k != SnapmakerGcodeKind::None) joined = raw;
+        return k;
+    }
+    if (!script.is_array() || script.empty() || script.size() > kNozzleScriptMax) return SnapmakerGcodeKind::None;
+    for (const auto& e : script) {
+        if (!e.is_string()) return SnapmakerGcodeKind::None;
+        const std::string line = rtrim(e.get_ref<const std::string&>());
+        if (!snapmaker_nozzle_script_line_valid(line)) return SnapmakerGcodeKind::None;
+        joined += (joined.empty() ? "" : "\n") + line;
+    }
+    return snapmaker_gcode_classify(joined) == SnapmakerGcodeKind::Heater ? SnapmakerGcodeKind::Heater : SnapmakerGcodeKind::None;
+}
+
+// The machine is idle for a gcode that moves or reconfigures it: print_stats.state in {standby, complete, cancelled} (the page's
+// ready/completed spellings too) AND machine_state_manager.main_state == 0 (the page's own idle test, bundle 157651/157766), both read from
+// one fresh query reply ({"status": {...}}). Anything missing, mistyped or failed is "not idle".
+inline bool snapmaker_machine_idle(const nlohmann::json& result)
+{
+    if (!result.is_object() || !result.contains("status") || !result["status"].is_object()) return false;
+    const auto& st = result["status"];
+    if (!st.contains("print_stats") || !st["print_stats"].is_object() || !st["print_stats"].contains("state") || !st["print_stats"]["state"].is_string()) return false;
+    const std::string state = st["print_stats"]["state"].get<std::string>();
+    if (state != "standby" && state != "complete" && state != "cancelled" && state != "ready" && state != "completed") return false;
+    if (!st.contains("machine_state_manager") || !st["machine_state_manager"].is_object() || !st["machine_state_manager"].contains("main_state")) return false;
+    const auto& ms = st["machine_state_manager"]["main_state"];
+    return ms.is_number_integer() && ms.get<long long>() == 0;
 }
 
 // The whitelist for timelapse_list_async() and the page bridge (#90): an object with page_index (integer 0..10000), page_rows (integer

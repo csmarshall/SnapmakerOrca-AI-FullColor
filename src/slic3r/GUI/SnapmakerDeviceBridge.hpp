@@ -7,6 +7,7 @@
 #ifndef slic3r_GUI_SnapmakerDeviceBridge_hpp_
 #define slic3r_GUI_SnapmakerDeviceBridge_hpp_
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -228,6 +229,8 @@ public:
         // the dialog and this bridge from it. Null = fn waits in a queue that tick() drains. preprint_done fires at most once per bridge,
         // also from shutdown() and the destructor (F8: they close the session and pass its real started state), and never for a stale epoch.
         std::function<void(std::function<void()> fn)>        preprint_post;
+        // Clock for the in-flight timeouts (a lost callback must not lock a button for good). Null = steady_clock::now. Tests inject one.
+        std::function<std::chrono::steady_clock::time_point()> now;
     };
 
     explicit SnapmakerDeviceBridge(Options options);
@@ -291,7 +294,20 @@ private:
     nlohmann::json                      m_last_devices = nlohmann::json::array();
     bool                                m_closed       = false;
     std::shared_ptr<bool>               m_alive        = std::make_shared<bool>(true); // delayed replies check it
-    bool                                m_print_control_busy = false; // a pause/resume/cancel (state query or RPC) is in flight
+    // One in-flight slot with a deadline: begin() refuses while a flight is live and not past its deadline (a lost callback cannot lock it
+    // for good); a stale flight's end() does not clear a newer flight (token).
+    struct Flight
+    {
+        std::uint64_t                         token = 0;
+        std::chrono::steady_clock::time_point deadline{};
+    };
+    std::chrono::steady_clock::time_point flight_now() const { return m_options.now ? m_options.now() : std::chrono::steady_clock::now(); }
+    std::uint64_t                         flight_begin(Flight& f, std::chrono::seconds limit);
+    void                                  flight_end(Flight& f, std::uint64_t token) { if (f.token == token) f.token = 0; }
+    Flight                              m_print_control_busy; // a pause/resume (state query or RPC) is in flight
+    Flight                              m_cancel_busy;        // a cancel is in flight: it never waits for the above, only a second cancel is refused
+    Flight                              m_gcode_busy;         // one motion/config gcode at a time (state query or RPC)
+    std::uint64_t                       m_flight_seq = 0;
     std::vector<std::string>            m_state_objects; // the subscription's / SetSubscribeFilter's object names
     nlohmann::json                      m_last_state_status; // last pushed `status`
     bool                                m_state_in_flight = false;
