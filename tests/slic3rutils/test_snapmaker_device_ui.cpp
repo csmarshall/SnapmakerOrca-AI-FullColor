@@ -3058,6 +3058,72 @@ TEST_CASE("agent: the second layer refuses every shape the classifier refuses an
     CHECK_FALSE(agent.gcode_gate()->busy_now());
 }
 
+namespace {
+// Observes what control_async asks the machine: records every state query (objects, and whether the gcode gate was held) and answers
+// it with the canned reply. A machine-less agent (empty url) fails the RPC at once, so a gated call that PASSES the idle read ends in done(false).
+struct QueryProbeAgent : MoonrakerPrinterAgent
+{
+    QueryProbeAgent() : MoonrakerPrinterAgent("") {}
+    std::vector<std::vector<std::string>> asked;
+    std::vector<bool>                     gate_held;
+    json                                  reply = json::object();
+    bool                                  reply_ok = false;
+    void query_machine_objects_async(const std::vector<std::string>& objects, std::function<void(bool, json)> done) override
+    {
+        asked.push_back(objects);
+        gate_held.push_back(gcode_gate()->busy_now());
+        done(reply_ok, reply);
+    }
+};
+} // namespace
+
+TEST_CASE("agent: control_async sends every idle-only kind through the fresh idle read, and the heater around it", "[SSWCP][device_ui][gcode][agent]")
+{
+    const std::vector<std::string> idle_only = {"G91\nG1 X+10 F3600\nG90", "G28", "G28 Z", "G28 X Y", "M83", "G1 E10 F300", "PARK_EXTRUDER2", "T1 A0",
+                                                "SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER='0' SAVE='1'"};
+    for (const std::string& script : idle_only) {
+        CAPTURE(script);
+        QueryProbeAgent agent;
+        int calls = 0; bool ok = true;
+        agent.control_async("printer.gcode.script", {{"script", script}}, [&](bool o, json) { ++calls; ok = o; });
+        REQUIRE(agent.asked.size() == 1);
+        CHECK(agent.asked[0] == std::vector<std::string>{"print_stats", "machine_state_manager"});
+        CHECK(agent.gate_held[0]); // the gcode gate is held across the read
+        CHECK(calls == 1);
+        CHECK_FALSE(ok);
+        CHECK_FALSE(agent.gcode_gate()->busy_now());
+    }
+    SECTION("the heater never reads the state") {
+        QueryProbeAgent agent;
+        int calls = 0;
+        agent.control_async("printer.gcode.script", {{"script", "SET_HEATER_TEMPERATURE HEATER=extruder TARGET=200"}}, [&](bool, json) { ++calls; });
+        CHECK(agent.asked.empty());
+        CHECK(calls == 1); // machine-less: the RPC itself failed at once
+    }
+    SECTION("another control method never reads the state either") {
+        QueryProbeAgent agent;
+        agent.control_async("printer.control.led", {{"name", "cavity_led"}, {"white", 0}}, [](bool, json) {});
+        CHECK(agent.asked.empty());
+    }
+}
+
+TEST_CASE("snapmaker_machine_idle: ready and completed print_stats count as idle only together with main_state 0", "[SSWCP][device_ui][gcode][agent]")
+{
+    const auto st = [](const json& state, const json& ms) { return json{{"status", {{"print_stats", {{"state", state}}}, {"machine_state_manager", {{"main_state", ms}}}}}}; };
+    for (const char* s : {"ready", "completed", "standby", "complete", "cancelled"}) {
+        CAPTURE(s);
+        CHECK(snapmaker_machine_idle(st(s, 0)));
+        CHECK_FALSE(snapmaker_machine_idle(st(s, 1)));
+        CHECK_FALSE(snapmaker_machine_idle(st(s, 2)));
+        CHECK_FALSE(snapmaker_machine_idle(st(s, nullptr)));
+        CHECK_FALSE(snapmaker_machine_idle(st(s, "0")));
+    }
+    for (const char* s : {"printing", "paused", "error", "Ready", "idle", ""}) {
+        CAPTURE(s);
+        CHECK_FALSE(snapmaker_machine_idle(st(s, 0)));
+    }
+}
+
 TEST_CASE("agent: gcode timeouts (homing is not cut at 5 s) and gates (cancel and gcode have their own)", "[SSWCP][device_ui][gcode][agent]")
 {
     using namespace std::chrono_literals;
