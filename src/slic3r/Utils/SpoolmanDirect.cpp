@@ -10,10 +10,11 @@ namespace Slic3r { namespace Spoolman {
 
 namespace {
 
+// Leaked on purpose: the detached sync worker (SpoolmanSyncRun) may still be using the cache while static destructors run at exit.
 CatalogCache &direct_cache()
 {
-    static CatalogCache cache;
-    return cache;
+    static CatalogCache *cache = new CatalogCache();
+    return *cache;
 }
 
 // The value of the LAST Location header in the accumulated header text ("" when none).
@@ -44,6 +45,8 @@ int direct_http_fetch(const std::string &url, std::string &location, std::string
     auto http = Http::get(url); // GET: there is no body or method parameter anywhere on this path
     // Nothing the app adds globally (extra headers) may reach a user-entered server; no auth is ever set here.
     http.headers_clear()
+        .tls_verify(true)  // Http forces verification off globally (inherited default); this path talks to a user-entered server
+        .no_proxy(true)    // a LAN server: never via an environment proxy
         .follow_redirects(false)
         .report_redirects(true)
         .timeout_connect(kDirectConnectTimeoutSeconds)

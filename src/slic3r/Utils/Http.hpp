@@ -134,6 +134,8 @@ public:
 	// shared client for compatibility with self-signed print hosts; opt in for any
 	// request carrying authentication credentials or sensitive user data.
 	Http& tls_verify(bool enable);
+	// Bypass every proxy (environment included) for this request: CURLOPT_NOPROXY "*". For LAN-only servers.
+	Http& no_proxy(bool enable);
 
 	Http& form_clear();
 	// Add a HTTP multipart form field

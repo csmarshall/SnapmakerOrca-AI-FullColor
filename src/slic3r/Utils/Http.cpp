@@ -673,6 +673,13 @@ Http& Http::tls_verify(bool enable)
 	return *this;
 }
 
+Http& Http::no_proxy(bool enable)
+{
+	if (p)
+		::curl_easy_setopt(p->curl, CURLOPT_NOPROXY, enable ? "*" : "");
+	return *this;
+}
+
 Http& Http::form_clear() {
 	if (p) {
         if (p->form) {

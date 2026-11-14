@@ -5,6 +5,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 
@@ -13,11 +14,13 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/streambuf.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/asio/write.hpp>
 
 #include "libslic3r/Spoolman/SpoolmanTransport.hpp"
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/SpoolmanDirect.hpp"
+#include "spoolman_test_tls_cert.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::Spoolman;
@@ -214,4 +217,109 @@ TEST_CASE("Spoolman direct redirects over a real socket", "[Spoolman][SpoolmanDi
         CHECK(status == 302);
         CHECK(reqs.size() == 3);
     }
+}
+
+namespace {
+
+// TLS loopback listener with the throwaway self-signed certificate. Counts completed handshakes; answers 200 "[]" to whoever completes one.
+class TlsServer
+{
+public:
+    TlsServer() : m_ctx(net::ssl::context::tls_server), m_acceptor(m_ioc, tcp::endpoint(net::ip::make_address("127.0.0.1"), 0))
+    {
+        m_ctx.use_certificate_chain(net::buffer(std::string(kTestCertPem)));
+        m_ctx.use_private_key(net::buffer(std::string(kTestKeyPem)), net::ssl::context::pem);
+        m_thread = std::thread([this] { loop(); });
+    }
+    ~TlsServer()
+    {
+        m_stopping = true;
+        boost::system::error_code ec;
+        tcp::socket               wake{m_ioc};
+        wake.connect(m_acceptor.local_endpoint(), ec);
+        m_thread.join();
+    }
+    std::string base() const { return "https://127.0.0.1:" + std::to_string(m_acceptor.local_endpoint().port()); }
+    int         handshakes() const { return m_handshakes; }
+
+private:
+    void loop()
+    {
+        while (!m_stopping) {
+            net::ssl::stream<tcp::socket> s{m_ioc, m_ctx};
+            boost::system::error_code     ec;
+            m_acceptor.accept(s.lowest_layer(), ec);
+            if (ec || m_stopping)
+                continue;
+            s.handshake(net::ssl::stream_base::server, ec);
+            if (ec)
+                continue;
+            ++m_handshakes;
+            net::streambuf buf;
+            net::read_until(s, buf, "\r\n\r\n", ec);
+            net::write(s, net::buffer(std::string("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")), ec);
+            s.shutdown(ec);
+        }
+    }
+
+    net::io_context   m_ioc;
+    net::ssl::context m_ctx;
+    tcp::acceptor     m_acceptor;
+    std::thread       m_thread;
+    std::atomic<bool> m_stopping{false};
+    std::atomic<int>  m_handshakes{0};
+};
+
+struct EnvScope
+{
+    std::string name, saved;
+    bool        had;
+    EnvScope(const char *n, const std::string &v) : name(n)
+    {
+        const char *o = std::getenv(n);
+        had           = o != nullptr;
+        saved         = o ? o : "";
+        ::setenv(n, v.c_str(), 1);
+    }
+    ~EnvScope()
+    {
+        if (had)
+            ::setenv(name.c_str(), saved.c_str(), 1);
+        else
+            ::unsetenv(name.c_str());
+    }
+};
+
+} // namespace
+
+TEST_CASE("Spoolman direct refuses a self-signed https server (TLS is verified)", "[Spoolman][SpoolmanDirect]")
+{
+    TlsServer server;
+
+    // Control: a plain Http::get (the app-wide default, which does not verify) completes the handshake, so the server itself works.
+    {
+        unsigned status = 0;
+        Http::get(server.base() + "/api/v1/vendor").on_complete([&](std::string, unsigned s) { status = s; }).perform_sync();
+        CHECK(status == 200);
+        CHECK(server.handshakes() == 1);
+    }
+
+    std::string location, body;
+    const int   r = direct_http_fetch(server.base() + "/api/v1/vendor", location, body);
+    CHECK(r != 200);
+    CHECK(body.empty());
+    CHECK(server.handshakes() == 1); // no second completed handshake: the client aborted on the untrusted certificate
+}
+
+TEST_CASE("Spoolman direct ignores proxy environment variables (LAN server)", "[Spoolman][SpoolmanDirect]")
+{
+    LoopbackServer proxy([](const std::string &, int) { return Reply{200, "", "via-proxy"}; });
+    LoopbackServer origin([](const std::string &, int) { return Reply{200, "", "direct"}; });
+    EnvScope       a("http_proxy", proxy.base()), b("HTTP_PROXY", proxy.base()), c("all_proxy", proxy.base()), d("ALL_PROXY", proxy.base());
+    EnvScope       e("no_proxy", ""), f("NO_PROXY", "");
+
+    std::string location, body;
+    CHECK(direct_http_fetch(origin.base() + "/api/v1/vendor", location, body) == 200);
+    CHECK(body == "direct");
+    CHECK(proxy.requests().empty());
 }
