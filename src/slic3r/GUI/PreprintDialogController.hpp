@@ -131,6 +131,14 @@ public:
         return Result::Opened;
     }
 
+    // Plater: true (and the window raised) when a dialog is live, so Print plate / Print all neither shows the send dialog nor snapshots again.
+    bool raise_if_live()
+    {
+        if (!is_live()) return false;
+        if (m_view) m_view->raise();
+        return true;
+    }
+
     // The plate was re-sliced or changed: what the page holds is stale. "plate changed, reopen".
     void invalidate(const std::string& why = "The plate changed while the print window was open. Reopen Print plate.")
     {

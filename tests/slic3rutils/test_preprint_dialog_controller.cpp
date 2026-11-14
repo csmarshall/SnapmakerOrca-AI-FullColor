@@ -316,7 +316,10 @@ TEST_CASE("a second Print click raises the live dialog instead of opening anothe
     CHECK(f.views.size() == 1);
     CHECK(f.log.count("view:create") == 1);
     CHECK(f.c->capability_path() == cap);
+    CHECK(f.c->raise_if_live());
+    CHECK(f.log.count("view:raise") == 3);
     f.c->on_user_closed();
+    CHECK_FALSE(f.c->raise_if_live());
     CHECK(f.c->open(f.request()) == PreprintDialogController::Result::Opened); // closed: a new one is allowed
     CHECK(f.views.size() == 2);
 }

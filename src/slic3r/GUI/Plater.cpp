@@ -301,6 +301,7 @@
 
 #include "PhysicalPrinterDialog.hpp"
 #include "PrintHostDialogs.hpp"
+#include "PreprintDialog.hpp"
 #include "PlateSettingsDialog.hpp"
 #include "DailyTips.hpp"
 #include "CreatePresetsDialog.hpp"
@@ -7396,6 +7397,10 @@ struct Plater::priv
     // WKWebView's synchronous RunScript yields inside the modal session and never returns (#84).
     bool                  m_select_machine_dlg_running = false;
     std::function<void()> m_after_select_machine_dlg;
+    // The non-modal Snapmaker pre-print dialog's controller (send-flow S5); null until the first pre-print send.
+    std::shared_ptr<PreprintDialogController> m_preprint;
+    // Which non-Bambu route Print plate / Print all takes: the page-driven pre-print dialog (agent capability + a connected device) or legacy.
+    bool use_preprint_route() const;
     SendMultiMachinePage* m_send_multi_dlg = nullptr;
     SendToPrinterDialog* m_send_to_sdcard_dlg = nullptr;
 
@@ -13484,6 +13489,7 @@ void Plater::priv::on_export_finished(wxCommandEvent& evt)
 
 void Plater::priv::on_slicing_began()
 {
+    if (m_preprint) m_preprint->invalidate(); // a re-slice makes the page's plate stale: "plate changed, reopen"
     clear_warnings();
     notification_manager->close_notification_of_type(NotificationType::SignDetected);
     notification_manager->close_notification_of_type(NotificationType::ExportFinished);
@@ -14060,9 +14066,20 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
     if (NetworkAgentFactory::use_bambu_send_dialog(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"),
             wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent")))) {
         open_machine_select_dialog(partplate_list.get_curr_plate_index());
+    } else if (use_preprint_route()) {
+        q->send_preprint(PLATE_CURRENT_IDX);
     } else {
         q->send_gcode_legacy(PLATE_CURRENT_IDX, nullptr);
     }
+}
+
+bool Plater::priv::use_preprint_route() const
+{
+    PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
+    const std::string agent_id = wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent"));
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    MachineObject* selected = dev ? dev->get_selected_machine() : nullptr;
+    return NetworkAgentFactory::use_preprint_send_flow(agent_id, selected != nullptr && selected->is_connected());
 }
 
 void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print_type)
@@ -14191,6 +14208,8 @@ void Plater::priv::on_action_print_all(SimpleEvent&)
     if (NetworkAgentFactory::use_bambu_send_dialog(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"),
             wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent")))) {
         open_machine_select_dialog(PLATE_ALL_IDX);
+    } else if (use_preprint_route()) {
+        q->send_preprint(PLATE_ALL_IDX);
     } else {
         q->send_gcode_legacy(PLATE_ALL_IDX, nullptr);
     }
@@ -21447,6 +21466,62 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 
     p->export_gcode(fs::path(), false, std::move(upload_job));
 }
+// Send-flow S5: the page-driven Snapmaker send. PrintHostSendDialog (modal, no webview in it) comes first like Snapmaker's, then the
+// pre-print page opens in a NON-modal dialog (no ShowModal: #84). No PrintHostJob and no print_host fallback (#117) on this route.
+void Plater::send_preprint(int plate_idx)
+{
+    if (p->m_preprint && p->m_preprint->raise_if_live())
+        return;
+    if (p->model.objects.empty())
+        return;
+    const int resolved_plate_idx = plate_idx == PLATE_CURRENT_IDX || plate_idx == PLATE_ALL_IDX ? get_partplate_list().get_curr_plate_index() : plate_idx;
+    fs::path default_output_file;
+    try {
+        unsigned int state = p->update_restart_background_process(false, false);
+        if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
+            return;
+        default_output_file = p->background_process.output_filepath_for_project(into_path(p->get_project_filename(".3mf")));
+    } catch (const Slic3r::PlaceholderParserError& ex) {
+        show_error(this, ex.what(), true);
+        return;
+    } catch (const std::exception& ex) {
+        show_error(this, ex.what(), false);
+        return;
+    }
+    default_output_file = fs::path(Slic3r::fold_utf8_to_ascii(default_output_file.string()));
+
+    auto* net   = wxGetApp().getAgent();
+    auto  agent = net ? std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net->get_printer_agent()) : nullptr;
+    auto  controller = create_preprint_controller(this, std::move(agent));
+    if (!controller) {
+        show_error(this, _L("The printer is not connected."), false);
+        return;
+    }
+
+    auto* config = get_app_config();
+    PrintHostSendDialog dlg(default_output_file, PrintHostPostUploadActions(PrintHostPostUploadAction::StartPrint), wxArrayString(), wxArrayString(),
+                            wxArrayString(), config->get_bool("open_device_tab_post_upload"));
+    dlg.init();
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
+
+    PartPlate* plate = get_partplate_list().get_plate(resolved_plate_idx);
+    if (!plate) {
+        show_error(this, _L("The plate could not be found."), false);
+        return;
+    }
+    PreprintRequest req;
+    std::string     error;
+    if (!collect_preprint_request(*plate, *wxGetApp().preset_bundle, dlg.filename().generic_string(),
+                                  dlg.post_action() == PrintHostPostUploadAction::StartPrint, dlg.switch_to_device_tab(), req, error)) {
+        show_error(this, wxString::FromUTF8(error), false);
+        return;
+    }
+    p->m_preprint = controller;
+    controller->open(std::move(req));
+}
+
 int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn)
 {
     int result = 0;
@@ -22921,6 +22996,7 @@ int Plater::select_plate(int plate_index, bool need_slice)
 {
     int ret;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, need_slice %3% ")%__LINE__ %plate_index  %need_slice;
+    if (p->m_preprint && plate_index != p->partplate_list.get_curr_plate_index()) p->m_preprint->invalidate();
     take_snapshot("select partplate!");
     ret = p->partplate_list.select_plate(plate_index);
     if (!ret) {

@@ -643,6 +643,7 @@ public:
      * -2: send all gcode to target machine */
     int send_gcode(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
     void send_gcode_legacy(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
+    void send_preprint(int plate_idx = -1); // Snapmaker page-driven send (S5); see Plater.cpp
     int export_config_3mf(int plate_idx = -1, Export3mfProgressFn proFn = nullptr);
     //BBS jump to nonitor after print job finished
     void send_calibration_job_finished(wxCommandEvent &evt);
