@@ -33,6 +33,7 @@ struct PrinterAgentInfo
     std::string         plugin_identifier;     // Empty for built-ins, otherwise <plugin_key>;<uuid>;<capability_name>
     PrinterAgentFactory factory;      // Function to create the agent
     bool                needs_print_host = false; // IPrinterAgent::needs_print_host() of this agent, read once at registration
+    bool                supports_preprint_page = false; // IPrinterAgent::supports_preprint_page(), read once at registration
 
     bool is_plugin() const { return !plugin_identifier.empty(); }
     PrinterAgentInfo(const std::string& id_, const std::string& display_name_, PrinterAgentFactory factory_)
@@ -89,7 +90,7 @@ public:
      * @return true if registration succeeded, false if already registered
      */
     static bool register_printer_agent(const std::string& id, const std::string& display_name, PrinterAgentFactory factory,
-                                       bool needs_print_host = false);
+                                       bool needs_print_host = false, bool supports_preprint_page = false);
 
     /**
      * Check if an agent registry/config key is registered
@@ -121,6 +122,20 @@ public:
      * (Moonraker, Snapmaker, Creality, Qidi, ...) through the legacy dialog. Pass the resolved agent id.
      */
     static bool use_bambu_send_dialog(bool use_bbl_network, bool use_printer_agents, const std::string& agent_id);
+
+    /**
+     * IPrinterAgent::supports_preprint_page() for a registry key; false for an unknown id.
+     */
+    static bool printer_agent_supports_preprint_page(const std::string& id);
+
+    /**
+     * Which route a non-Bambu Print plate / Print all takes (send-flow S5): true = the page-driven pre-print dialog, false = the legacy
+     * print-host send dialog (Plater::send_gcode_legacy, with its #117 print_host fallback). True only when the agent advertises the
+     * capability AND a device is connected (the pre-print dialog pins the connected device; it never falls back to the preset's host).
+     * Pure: the Bambu choice (use_bambu_send_dialog) is made first and is unchanged.
+     */
+    static bool use_preprint_send_flow(bool agent_supports_preprint_page, bool device_connected);
+    static bool use_preprint_send_flow(const std::string& agent_id, bool device_connected);
 
     /**
      * Whether the Send/Print dialog offers Time-lapse, Auto Bed Leveling and Flow Calibration as real toggles: they are sent as

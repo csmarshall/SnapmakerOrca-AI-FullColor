@@ -477,6 +477,13 @@ public:
     virtual bool needs_print_host() const { return false; }
 
     /**
+     * True when this agent's printers are sent to through the page-driven pre-print dialog (the bundled Snapmaker pre-print page in a
+     * non-modal window, docs/records/snapmaker-u1-send-flow-design.md section 4) rather than the plain print-host send dialog. A capability,
+     * never a model-name check (ADR 0003). Only the Snapmaker agent says yes: generic Moonraker, OctoPrint-style and Bambu agents do not.
+     */
+    virtual bool supports_preprint_page() const { return false; }
+
+    /**
      * The reason the last connect_printer() attempt failed, empty while connecting, once connected, or when nothing
      * failed. Host and port are not secrets and may appear; keys never do. Thread-safe.
      */

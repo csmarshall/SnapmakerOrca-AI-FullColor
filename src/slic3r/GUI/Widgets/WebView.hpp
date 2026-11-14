@@ -29,6 +29,9 @@ public:
 
     // Marks "wx" as registered so CreateWebView's deferred add skips the duplicate.
     static void MarkScriptMessageHandlerAdded(wxWebView * webView);
+    // True once the "wx" script message handler is installed (it is added from a deferred CallAfter on macOS/Linux). A webview created by
+    // CreateWebView may be used for script messages only after this; the pre-print dialog waits for it with a watchdog.
+    static bool IsScriptMessageHandlerAdded(wxWebView * webView);
 
     // On Windows, a WebView2 backend created during a GUI rebuild (language switch) can come up
     // ignoring every navigation. A panel that gets true here recreates its view on first Show().

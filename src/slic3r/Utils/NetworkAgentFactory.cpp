@@ -70,6 +70,7 @@ template<typename T> void register_agent()
 {
     auto info = T::get_agent_info_static();
     const bool needs_print_host = T("").needs_print_host(); // a probe object: the capability is a virtual
+    const bool supports_preprint_page = T("").supports_preprint_page();
     NetworkAgentFactory::register_printer_agent(info.id, info.name,
                                                 [](std::shared_ptr<ICloudServiceAgent> cloud_agent,
                                                    const std::string& log_dir) -> std::shared_ptr<IPrinterAgent> {
@@ -78,18 +79,19 @@ template<typename T> void register_agent()
                                                         agent->set_cloud_agent(cloud_agent);
                                                     return agent;
                                                 },
-                                                needs_print_host);
+                                                needs_print_host, supports_preprint_page);
 }
 
 } // anonymous namespace
 
 bool NetworkAgentFactory::register_printer_agent(const std::string& id, const std::string& display_name, PrinterAgentFactory factory,
-                                                 bool needs_print_host)
+                                                 bool needs_print_host, bool supports_preprint_page)
 {
     std::lock_guard<std::mutex> lock(s_registry_mutex);
     auto& agents = get_printer_agents();
     PrinterAgentInfo info(id, display_name, std::move(factory));
     info.needs_print_host = needs_print_host;
+    info.supports_preprint_page = supports_preprint_page;
     return agents.emplace(id, std::move(info)).second;
 }
 
@@ -109,6 +111,22 @@ bool NetworkAgentFactory::printer_agent_supports_bambu_print_options(const std::
 bool NetworkAgentFactory::use_bambu_send_dialog(bool use_bbl_network, bool use_printer_agents, const std::string& agent_id)
 {
     return use_bbl_network || (use_printer_agents && printer_agent_supports_bambu_print_options(agent_id));
+}
+
+bool NetworkAgentFactory::printer_agent_supports_preprint_page(const std::string& id)
+{
+    const PrinterAgentInfo* info = get_printer_agent_info(id);
+    return info && info->supports_preprint_page;
+}
+
+bool NetworkAgentFactory::use_preprint_send_flow(bool agent_supports_preprint_page, bool device_connected)
+{
+    return agent_supports_preprint_page && device_connected;
+}
+
+bool NetworkAgentFactory::use_preprint_send_flow(const std::string& agent_id, bool device_connected)
+{
+    return use_preprint_send_flow(printer_agent_supports_preprint_page(agent_id), device_connected);
 }
 
 bool NetworkAgentFactory::printer_agent_supports_snapmaker_print_preferences(const std::string& id)

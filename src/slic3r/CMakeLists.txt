@@ -283,6 +283,9 @@ set(SLIC3R_GUI_SOURCES
     GUI/HttpServer.hpp
     GUI/PreprintCapabilityStore.cpp
     GUI/PreprintCapabilityStore.hpp
+    GUI/PreprintDialog.cpp
+    GUI/PreprintDialog.hpp
+    GUI/PreprintDialogController.hpp
     GUI/WebPageServer.cpp
     GUI/WebPageServer.hpp
     GUI/SSWCP.cpp

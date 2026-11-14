@@ -54,6 +54,7 @@ inline const char* snapmaker_preprint_decision_name(SnapmakerPreprintDecision d)
     case D::RefusedPrinterChanged: return "the printer changed";
     case D::RefusedPrinterBusy: return "the printer is not idle";
     case D::RefusedMetadata: return "the printer's copy of the file does not match";
+    case D::RefusedStartDisallowed: return "upload only: starting is not allowed";
     }
     return "refused";
 }

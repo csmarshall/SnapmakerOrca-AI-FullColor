@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
     test_print_preference.cpp
     test_snapmaker_preprint_mapping.cpp
     test_snapmaker_preprint_gate.cpp
+    test_preprint_dialog_controller.cpp
     test_moonraker_printer_agent.cpp
     test_spoolman_join.cpp
     test_spoolman_direct.cpp

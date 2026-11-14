@@ -572,3 +572,25 @@ TEST_CASE("gate: concurrent configures never exceed the cap, and configure/start
         CHECK(t.g.state() == SnapmakerPreprintState::Closed);
     }
 }
+
+// S5: upload-only in the send dialog means the context never allows a start, even in the right state with the right file.
+TEST_CASE("gate: allow_start=false refuses every start but still allows the configure", "[SnapmakerPreprintGate]")
+{
+    SnapmakerPreprintGate g;
+    auto o = open_params(false);
+    o.allow_start = false;
+    std::string err;
+    const auto e = g.open(o, err);
+    REQUIRE(e > 0);
+    CHECK(g.precheck_start(e, "job.gcode") == D::RefusedStartDisallowed);
+    CHECK(g.request_start(e, "job.gcode", kPin, kIdle, kMetaOk).decision == D::RefusedStartDisallowed);
+    CHECK(g.state() == SnapmakerPreprintState::Open);
+    auto c = g.request_configure(e, plural_golden(), kPin, kIdle);
+    CHECK(c.decision == D::Allowed);
+    CHECK(g.confirm(c.ticket, true));
+    CHECK(g.request_start(e, "job.gcode", kPin, kIdle, kMetaOk).decision == D::RefusedStartDisallowed); // Configured too
+    // default stays permissive
+    SnapmakerPreprintGate g2;
+    const auto e2 = g2.open(open_params(false), err);
+    CHECK(g2.request_start(e2, "job.gcode", kPin, kIdle, kMetaOk).decision == D::Allowed);
+}

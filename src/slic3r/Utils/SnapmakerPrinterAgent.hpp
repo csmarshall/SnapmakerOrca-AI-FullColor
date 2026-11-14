@@ -21,6 +21,7 @@ public:
     DeviceUi         device_ui() const override { return DeviceUi::SnapmakerWeb; }
 
     bool supports_print_preferences() const override { return true; }
+    bool supports_preprint_page() const override { return true; }
     bool supports_rfid_reread() const override { return true; } // #105: FILAMENT_DT_* belong to the Snapmaker firmware
 
     bool fetch_filament_info(std::string dev_id, FilamentSyncMode sync_mode = FilamentSyncMode::pull) override;

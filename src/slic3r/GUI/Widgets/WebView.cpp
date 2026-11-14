@@ -421,6 +421,12 @@ void WebView::MarkScriptMessageHandlerAdded(wxWebView * webView)
         ref->m_script_handler_added = true;
 }
 
+bool WebView::IsScriptMessageHandlerAdded(wxWebView * webView)
+{
+    const WebViewRef *ref = webview_ref(webView);
+    return ref && ref->m_script_handler_added;
+}
+
 bool WebView::NeedsRecreateOnShow()
 {
     const bool recreating = Slic3r::GUI::wxGetApp().is_recreating_gui();
