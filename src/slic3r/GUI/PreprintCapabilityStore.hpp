@@ -16,7 +16,7 @@ namespace Slic3r { namespace GUI {
 // One-shot download capabilities for WebPageServer (docs/records/snapmaker-u1-send-flow-design.md, S3).
 //
 // register_file() COPIES the caller's file into a private (0700 directory, 0600 file) snapshot, recording its size and sha256, and
-// returns the URL path "/cap/<256-bit random token>/<display_name>". The store keeps only the snapshot; the caller's path is never
+// returns the URL path "/web/flutter_web/cap/<256-bit random token>/<display_name>". The store keeps only the snapshot; the caller's path is never
 // stored, so a later re-slice or edit of the source cannot change what is served and no request can name a path.
 // Lookup is an exact match on the whole URL path (no parsing, no decoding). A capability dies after ONE full transfer, on revoke(),
 // or after the TTL; the snapshot is deleted at that point and the path then answers 410, not 404.
@@ -27,7 +27,7 @@ public:
     static constexpr std::uint64_t max_snapshot_bytes = 512ull * 1024 * 1024; // a U1 plate G-code is well below this
     static constexpr std::chrono::minutes capability_ttl{10};
     static constexpr std::size_t max_display_name = 128;
-    static constexpr const char* path_prefix = "/cap/";
+    static constexpr const char* path_prefix = "/web/flutter_web/cap/"; // under WebPageServer::url_prefix so the session cookie (Path=/web/flutter_web/) is sent; asserted in WebPageServer.cpp
 
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
 
@@ -35,7 +35,7 @@ public:
     {
         bool          ok = false;
         std::string   error;      // when !ok
-        std::string   url_path;   // "/cap/<token>/<display_name>"
+        std::string   url_path;   // "/web/flutter_web/cap/<token>/<display_name>"
         std::uint64_t size = 0;
         std::string   sha256_hex; // of the snapshot
     };

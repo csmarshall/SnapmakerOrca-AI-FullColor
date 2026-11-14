@@ -189,14 +189,14 @@ TEST_CASE("capability lookup is exact: other, traversal and encoded paths are 40
 {
     Fixture f;
     const std::string token_dir = f.reg.url_path.substr(0, f.reg.url_path.rfind('/'));
-    const std::string good_token = token_dir.substr(5);
+    const std::string good_token = token_dir.substr(std::string(PreprintCapabilityStore::path_prefix).size());
     std::string flipped = good_token; flipped[0] = flipped[0] == 'a' ? 'b' : 'a';
     for (const std::string& t : std::vector<std::string>{
-             std::string("/cap/"), std::string("/cap"), std::string("/cap/") + std::string(64, '0') + "/plate_1.gcode",
-             "/cap/" + flipped + "/plate_1.gcode", token_dir, token_dir + "/other.gcode", token_dir + "/plate_1.gcode/",
-             token_dir + "/../plate_1.gcode", "/cap/../" + good_token + "/plate_1.gcode", token_dir + "/./plate_1.gcode",
+             std::string("/web/flutter_web/cap/"), std::string("/web/flutter_web/cap"), std::string("/web/flutter_web/cap/") + std::string(64, '0') + "/plate_1.gcode",
+             "/web/flutter_web/cap/" + flipped + "/plate_1.gcode", token_dir, token_dir + "/other.gcode", token_dir + "/plate_1.gcode/",
+             token_dir + "/../plate_1.gcode", "/web/flutter_web/cap/../" + good_token + "/plate_1.gcode", token_dir + "/./plate_1.gcode",
              token_dir + "/%2e%2e/plate_1.gcode", token_dir + "/plate%5F1.gcode", token_dir + "/plate_1%2Egcode",
-             "/cap/%2e%2e/%2e%2e/etc/passwd", "/cap//" + good_token + "/plate_1.gcode", "/CAP/" + good_token + "/plate_1.gcode",
+             "/web/flutter_web/cap/%2e%2e/%2e%2e/etc/passwd", "/web/flutter_web/cap//" + good_token + "/plate_1.gcode", "/web/flutter_web/CAP/" + good_token + "/plate_1.gcode",
              token_dir + "%2Fplate_1.gcode", token_dir + "\\plate_1.gcode" }) {
         INFO(t);
         CHECK(get(f.server, t).status == 404);
@@ -313,8 +313,9 @@ TEST_CASE("capability tokens are 256-bit and unique", "[PreprintCapability]")
     for (int i = 0; i < 200; ++i) {
         const auto reg = store.register_file(tmp.path / "a", "a.gcode");
         REQUIRE(reg.ok);
-        REQUIRE(reg.url_path.compare(0, 5, "/cap/") == 0);
-        const std::string token = reg.url_path.substr(5, reg.url_path.find('/', 5) - 5);
+        REQUIRE(reg.url_path.compare(0, std::string(PreprintCapabilityStore::path_prefix).size(), PreprintCapabilityStore::path_prefix) == 0);
+        const std::size_t plen = std::string(PreprintCapabilityStore::path_prefix).size();
+        const std::string token = reg.url_path.substr(plen, reg.url_path.find('/', plen) - plen);
         CHECK(token.size() == 64);
         CHECK(token.find_first_not_of("0123456789abcdef") == std::string::npos);
         tokens.insert(token);
@@ -360,21 +361,59 @@ TEST_CASE("without a registered capability store WebPageServer still has no file
 {
     WebPageServer s(bundle_root(), real_csp()); // no set_capability_store()
     REQUIRE(s.start());
-    CHECK(get(s, "/cap/" + std::string(64, 'a') + "/plate.gcode").status == 404);
+    CHECK(get(s, "/web/flutter_web/cap/" + std::string(64, 'a') + "/plate.gcode").status == 404);
     for (const char* m : {"POST", "PUT", "DELETE", "PATCH"}) {
         Opts o; o.method = m;
         INFO(m);
         CHECK(get(s, "/web/flutter_web/index.html", o).status == 405);
-        CHECK(get(s, "/cap/" + std::string(64, 'a') + "/plate.gcode", o).status == 405);
+        CHECK(get(s, "/web/flutter_web/cap/" + std::string(64, 'a') + "/plate.gcode", o).status == 405);
     }
     CHECK(get(s, "/upload").status == 404);
 
-    // A store with no entry registered adds nothing either: everything under /cap/ is 404, and non-GET stays refused.
+    // A store with no entry registered adds nothing either: everything under /web/flutter_web/cap/ is 404, and non-GET stays refused.
     WebPageServer s2(bundle_root(), real_csp());
     REQUIRE(s2.set_capability_store(std::make_shared<PreprintCapabilityStore>()));
     REQUIRE(s2.start());
-    CHECK(get(s2, "/cap/" + std::string(64, 'a') + "/plate.gcode").status == 404);
+    CHECK(get(s2, "/web/flutter_web/cap/" + std::string(64, 'a') + "/plate.gcode").status == 404);
     Opts post; post.method = "POST";
     CHECK(get(s2, "/web/flutter_web/index.html", post).status == 405);
     CHECK_FALSE(s2.set_capability_store(nullptr)); // not changeable while running
+}
+
+TEST_CASE("capability is reachable by a client that follows the cookie Path rule; the old /cap/ prefix is 404", "[PreprintCapability]")
+{
+    Fixture f;
+    // A browser sends a cookie only to paths under its Path attribute: reproduce that rule, with the Path the server really sets.
+    const std::string cookie_path = WebPageServer::url_prefix;
+    auto browser_get = [&](const std::string& path) {
+        Opts o;
+        o.cookie = path.compare(0, cookie_path.size(), cookie_path) == 0;
+        return get(f.server, path, o);
+    };
+    CHECK(f.reg.url_path.compare(0, cookie_path.size(), cookie_path) == 0); // so the cookie is sent
+    const Reply r = browser_get(f.reg.url_path);
+    REQUIRE(r.status == 200);
+    CHECK(r.body() == f.bytes);
+
+    // The retired top-level prefix: no cookie would be sent there (403 for a browser), and with the cookie it is a plain 404.
+    const std::string old_path = "/cap/" + f.reg.url_path.substr(std::string(PreprintCapabilityStore::path_prefix).size());
+    CHECK(browser_get(old_path).status == 403);
+    CHECK(get(f.server, old_path).status == 404);
+}
+
+TEST_CASE("capability prefix is matched before the bundle and nothing crosses over", "[PreprintCapability]")
+{
+    Fixture f;
+    const std::string rest = f.reg.url_path.substr(std::string(PreprintCapabilityStore::path_prefix).size());
+    // Encoded 'cap' or a dot segment before it is not the cap prefix: it goes to the bundle layer, which refuses it. Never the snapshot.
+    for (const std::string& t : std::vector<std::string>{"/web/flutter_web/%63ap/" + rest, "/web/flutter_web/./cap/" + rest,
+                                                         "/web/flutter_web/x/../cap/" + rest, "/web/flutter_web/cap%2f" + rest}) {
+        INFO(t);
+        const Reply r = get(f.server, t);
+        CHECK((r.status == 403 || r.status == 404));
+        CHECK(r.raw.find(f.bytes.substr(1000, 64)) == std::string::npos);
+    }
+    // And a bundle file is not reachable through the cap prefix.
+    CHECK(get(f.server, std::string(PreprintCapabilityStore::path_prefix) + "../index.html").status == 404);
+    CHECK(get(f.server, f.reg.url_path).status == 200); // still unconsumed
 }

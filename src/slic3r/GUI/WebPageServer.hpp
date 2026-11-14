@@ -28,9 +28,9 @@ class PreprintCapabilityStore;
 //    (DNS rebinding and cross-site requests);
 //  * never sends Access-Control-Allow-Origin or any other CORS header;
 //  * GET and HEAD only; no directory listing; no endpoint that serves a file by caller-supplied path, and no POST/upload endpoint.
-//    The ONE exception is opt-in: after set_capability_store(), GET /cap/<256-bit token>/<name> serves the private snapshot
-//    registered under exactly that path (PreprintCapabilityStore), once, with the session cookie required. Without a store the
-//    /cap/ prefix is just another 404;
+//    The ONE exception is opt-in: after set_capability_store(), GET /web/flutter_web/cap/<256-bit token>/<name> serves the private snapshot
+//    registered under exactly that path (PreprintCapabilityStore), once, with the session cookie required. That prefix is matched BEFORE the static-bundle lookup, so
+//    nothing under it falls through to the bundle. Without a store it is just another (404) bundle path;
 //  * every response (200, 302, 403, 404, 405, HEAD...) carries the Content-Security-Policy read at start() from
 //    flutter_web.csp next to the bundle: default-src 'none', hashes for the bundle's few inline blocks, frame-src 'none',
 //    no unsafe-inline / unsafe-eval. A missing, empty or malformed policy file makes start() fail (fail closed): the server
@@ -55,7 +55,7 @@ public:
     // fixed at start(): a machine change after that needs a restart (docs/third-party/flutter_web.md).
     bool set_extra_origin(const std::string& origin);
 
-    // Opt-in one-shot download capabilities (/cap/...). Must be called before start(); returns false if already running.
+    // Opt-in one-shot download capabilities (PreprintCapabilityStore::path_prefix). Must be called before start(); returns false if already running.
     bool set_capability_store(std::shared_ptr<PreprintCapabilityStore> store);
 
     // Returns false (and logs) if the root does not exist, the policy file is missing/empty/malformed, or the socket cannot be bound.

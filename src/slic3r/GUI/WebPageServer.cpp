@@ -18,6 +18,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -29,6 +30,9 @@ namespace fs    = boost::filesystem;
 namespace Slic3r { namespace GUI {
 
 namespace {
+
+static_assert(std::string_view(PreprintCapabilityStore::path_prefix).substr(0, std::string_view(WebPageServer::url_prefix).size()) == std::string_view(WebPageServer::url_prefix),
+              "the capability prefix must live under the bundle prefix so the session cookie reaches it");
 
 constexpr std::size_t k_header_limit    = 16 * 1024;
 constexpr std::size_t k_max_connections = 64;
