@@ -24,8 +24,11 @@ namespace Slic3r { class ICloudServiceAgent; }
 
 namespace Slic3r {
 
+class MoonrakerPreprintPrinter;
+
 class MoonrakerPrinterAgent : public IPrinterAgent
 {
+    friend class MoonrakerPreprintPrinter; // S4c: the pre-print adapter reads the connection and sends through the private helpers; nothing else is widened
 public:
     explicit MoonrakerPrinterAgent(std::string log_dir);
     ~MoonrakerPrinterAgent() override;

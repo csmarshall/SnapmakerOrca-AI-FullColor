@@ -57,6 +57,29 @@ struct SnapmakerPreprintPin
     bool operator!=(const SnapmakerPreprintPin& o) const { return !(*this == o); }
 };
 
+// The remote name of the pre-print file, which also goes into SDCARD_PRINT_FILE FILENAME="...": characters [A-Za-z0-9._ -] and '/' only, the
+// ".gcode" suffix, no empty / "." / ".." segment (so no leading or trailing '/'), at most 512 bytes. Stricter than the Device tab's name check on
+// purpose (no quote, backslash, '#', ';', '=', control characters, non-ASCII).
+inline bool snapmaker_preprint_filename_ok(const std::string& n)
+{
+    static const std::string suffix = ".gcode";
+    if (n.size() <= suffix.size() || n.size() > 512 || n.compare(n.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= n.size(); ++i) {
+        if (i < n.size()) {
+            const unsigned char c = n[i];
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == ' ' || c == '-' || c == '/';
+            if (!ok) return false;
+        }
+        if (i == n.size() || n[i] == '/') {
+            const std::string seg = n.substr(start, i - start);
+            if (seg.empty() || seg == "." || seg == "..") return false;
+            start = i + 1;
+        }
+    }
+    return true;
+}
+
 namespace preprint_gate_detail {
 
 // Decimal digits only, no sign, no leading zero, at most 2 digits.
@@ -310,6 +333,30 @@ public:
         return m_state;
     }
 
+    // F6: the cheap refusals of request_configure / request_start (no printer data needed), so the caller can refuse a closed, stale, busy or
+    // malformed request WITHOUT reading the printer. Pure: changes nothing. Allowed here does not mean request_* will allow.
+    SnapmakerPreprintDecision precheck_configure(std::uint64_t epoch, const std::string& script) const
+    {
+        std::vector<int> filaments;
+        int              extruders = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (auto d = state_refusal(epoch, /*start=*/false); d != D::Allowed) return d;
+            if (m_configures >= snapmaker_preprint_max_configures) return D::RefusedTooManyScripts;
+            filaments = m_open.plate_filaments;
+            extruders = m_open.extruder_count;
+        }
+        return validate_snapmaker_preprint_gcode(script, filaments, extruders).ok ? D::Allowed : D::RefusedInvalid;
+    }
+    SnapmakerPreprintDecision precheck_start(std::uint64_t epoch, const std::string& filename) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (auto d = state_refusal(epoch, /*start=*/true); d != D::Allowed) return d;
+        if (m_open.configure_required && m_state != SnapmakerPreprintState::Configured) return D::RefusedNotConfigured;
+        if (filename.empty() || filename != m_open.remote_filename) return D::RefusedFilename;
+        return D::Allowed;
+    }
+
     // Validates one sw_SendGCodes string. Allowed = forward `script` now, then confirm(). Nothing is sent here. A throwing predicate
     // is a refusal. The state becomes Configured only on confirm(ticket, true).
     SnapmakerPreprintResult request_configure(std::uint64_t epoch, const std::string& script, const SnapmakerPreprintPin& current_printer,
@@ -393,7 +440,7 @@ private:
     static std::string validate_open(const SnapmakerPreprintOpen& o)
     {
         if (o.printer.host.empty() || o.printer.port.empty() || o.printer.serial.empty()) return "the pinned printer identity is incomplete";
-        if (o.remote_filename.empty()) return "no remote filename";
+        if (!snapmaker_preprint_filename_ok(o.remote_filename)) return "the remote file name is not usable";
         if (o.extruder_count < 1 || o.extruder_count > snapmaker_max_extruders) return "invalid extruder count";
         if (o.plate_filaments.empty()) return "the plate uses no filaments";
         std::set<int> seen;

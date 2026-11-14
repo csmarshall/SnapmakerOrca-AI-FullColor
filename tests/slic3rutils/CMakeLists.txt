@@ -69,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
     test_sswcp.cpp
     test_snapmaker_device_ui.cpp
     test_snapmaker_preprint_profile.cpp
+    test_moonraker_preprint_printer.cpp
     test_print_host_agents.cpp
     test_imgui_wrapper.cpp
     test_user_manager.cpp

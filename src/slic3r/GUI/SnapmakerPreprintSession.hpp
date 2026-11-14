@@ -16,30 +16,9 @@
 
 #include "SnapmakerDeviceBridge.hpp"
 #include "slic3r/Utils/SnapmakerPreprintGate.hpp"
+#include "slic3r/Utils/SnapmakerPreprintPrinter.hpp" // the printer-facing interface (implemented by MoonrakerPreprintPrinter)
 
 namespace Slic3r { namespace GUI {
-
-// Everything the pre-print profile asks of the printer. The real implementation sits on the Snapmaker Moonraker agent's connection;
-// tests use a fake. No method may fall back to the printer preset's print_host (#117): the pin is the agent's connected device.
-class SnapmakerPreprintPrinter
-{
-public:
-    virtual ~SnapmakerPreprintPrinter() = default;
-    enum class Known { Yes, No, Unreadable };
-    // The agent's connected device right now (host, port, serial as exact strings, canonicalised the same way every call). Empty
-    // fields = nothing connected or the serial could not be read; the gate then refuses (it never matches a complete pin).
-    virtual SnapmakerPreprintPin connected_pin() = 0;
-    // print_stats.state from a fresh GET, never a cached status; nullopt when it could not be read.
-    virtual std::optional<std::string> print_state() = 0;
-    // server.files.metadata(filename).size; nullopt when the file or the answer is missing.
-    virtual std::optional<std::uint64_t> remote_file_size(const std::string& filename) = 0;
-    // Whether the printer registers the G-code command (/printer/gcode/help).
-    virtual Known command_known(const std::string& command) = 0;
-    // printer.gcode.script through the agent's send_gcode_sync.
-    virtual bool send_gcode(const std::string& script) = 0;
-    // The start only: SDCARD_PRINT_FILE FILENAME="<filename>" (the map/preference lines were already sent by send_gcode).
-    virtual bool start_print(const std::string& filename) = 0;
-};
 
 // A reply for the page. ok => code 200 with `data`; otherwise code + message.
 struct SnapmakerPreprintReply
@@ -91,10 +70,10 @@ public:
     {}
 
     // Opens (or reopens: every earlier epoch becomes stale). Returns the epoch (> 0) the bridge must present; 0 with `error` set otherwise.
-    // The remote file name is refused when it could not be a plain gcode name or could break out of SDCARD_PRINT_FILE FILENAME="...".
+    // The remote file name is refused unless snapmaker_preprint_filename_ok() (allowlist; it also goes into SDCARD_PRINT_FILE FILENAME="...").
     std::uint64_t open(Open o, std::string& error)
     {
-        if (!snapmaker_valid_gcode_name(o.gate.remote_filename) || o.gate.remote_filename.find('"') != std::string::npos) {
+        if (!snapmaker_preprint_filename_ok(o.gate.remote_filename)) {
             m_gate.close();
             set_epoch(0);
             error = "the remote file name is not usable";
@@ -150,6 +129,9 @@ public:
         const std::string script = params["script"].get<std::string>();
         SnapmakerPreprintGcode parsed;
         SnapmakerPreprintResult r;
+        // F6: the cheap refusals first, so a page that keeps calling after Closed (or with a bad script) causes no printer traffic.
+        if (const auto d = m_gate.precheck_configure(epoch, script); d != SnapmakerPreprintDecision::Allowed)
+            return SnapmakerPreprintReply::fail(std::string("refused: ") + snapmaker_preprint_decision_name(d));
         try {
             r = m_gate.request_configure(epoch, script, m_printer->connected_pin(), [this] { return printer_idle(); }, &parsed);
         } catch (...) {
@@ -177,6 +159,8 @@ public:
         if (!params.is_object() || !params.contains("filename") || !params["filename"].is_string()) return SnapmakerPreprintReply::fail("failure");
         const std::string filename = params["filename"].get<std::string>();
         SnapmakerPreprintResult r;
+        if (const auto d = m_gate.precheck_start(epoch, filename); d != SnapmakerPreprintDecision::Allowed) // F6, see configure()
+            return SnapmakerPreprintReply::fail(std::string("refused: ") + snapmaker_preprint_decision_name(d));
         try {
             r = m_gate.request_start(
                 epoch, filename, m_printer->connected_pin(), [this] { return printer_idle(); },
