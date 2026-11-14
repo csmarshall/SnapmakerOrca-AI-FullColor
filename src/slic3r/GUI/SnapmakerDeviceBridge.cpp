@@ -736,6 +736,54 @@ nlohmann::json snapmaker_state_reply(bool ok, nlohmann::json result, const std::
     return out;
 }
 
+bool SnapmakerPreprintContext::set(const SnapmakerPreprintPlate& plate, const std::map<std::string, std::string>& metadata, std::string& error)
+{
+    nlohmann::json mapping;
+    nlohmann::json meta = nlohmann::json::object();
+    for (const char* key : {"DesignModelId", "DesignProfileId", "DesignRegion"}) {
+        const auto it = metadata.find(key);
+        if (it != metadata.end() && preprint_detail::clean_text(it->second, 256))
+            meta[key] = it->second;
+    }
+    std::string why;
+    const bool  ok = !plate.display_name.empty() && build_snapmaker_preprint_mapping_json(plate, mapping, why);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!ok) {
+        m_active = false;
+        m_file = m_mapping = nlohmann::json::object();
+        error  = plate.display_name.empty() ? "the pre-print file has no name" : why;
+        return false;
+    }
+    m_file    = {{"file_name", plate.display_name}, {"metadata", std::move(meta)}};
+    m_mapping = std::move(mapping);
+    m_active  = true;
+    error.clear();
+    return true;
+}
+void SnapmakerPreprintContext::clear()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_active = false;
+    m_file = m_mapping = nlohmann::json::object();
+}
+bool SnapmakerPreprintContext::active() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_active;
+}
+bool SnapmakerPreprintContext::active_file(nlohmann::json& out) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_active) out = m_file;
+    return m_active;
+}
+bool SnapmakerPreprintContext::filament_mapping(nlohmann::json& out) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_active) out = m_mapping;
+    return m_active;
+}
+
 void SnapmakerDeviceBridge::register_commands()
 {
     // --- the connected machine ---
@@ -774,6 +822,28 @@ void SnapmakerDeviceBridge::register_commands()
             when_serial_known(i, [this](SSWCP_Instance& inst) { inst.reply_ok(snapmaker_devices_to_json(current_devices())); });
         },
         false);
+
+    // --- pre-print page (S2): the one active file's metadata and filament mapping, from the context the dialog set. Params are ignored
+    // (sw_GetFileFilamentMapping's `filename` and sw_GetActiveFile's `is_zip` are never read), nothing touches the machine or the disk. ---
+    if (m_options.preprint) {
+        auto preprint = m_options.preprint;
+        m_sswcp.register_command(
+            "sw_GetActiveFile",
+            [preprint](SSWCP_Instance& i) {
+                nlohmann::json out;
+                if (preprint->active_file(out)) i.reply_ok(std::move(out));
+                else i.handle_general_fail(SSWCPCode::Failure, "no file is being prepared");
+            },
+            false);
+        m_sswcp.register_command(
+            "sw_GetFileFilamentMapping",
+            [preprint](SSWCP_Instance& i) {
+                nlohmann::json out;
+                if (preprint->filament_mapping(out)) i.reply_ok(std::move(out));
+                else i.handle_general_fail(SSWCPCode::Failure, "no file is being prepared");
+            },
+            false);
+    }
 
     // --- navigation: the Home card's Control button sends sw_SwitchTab {target:"Monitor"} ---
     m_sswcp.register_command(

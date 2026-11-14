@@ -11,14 +11,39 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "nlohmann/json.hpp"
 #include "SSWCP.hpp"
+#include "slic3r/Utils/SnapmakerPreprintMapping.hpp"
 
 namespace Slic3r { namespace GUI {
+
+// The one file the Snapmaker pre-print page is about (send-flow port S2). The later dialog fills it from the current plate before it shows the
+// page and clears it when the dialog ends; sw_GetActiveFile and sw_GetFileFilamentMapping answer from it and from nothing else (no caller-
+// supplied path or file name is read, no printer is contacted). Thread-safe: the dialog may set/clear from any thread while the bridge reads on the UI thread.
+class SnapmakerPreprintContext
+{
+public:
+    // Builds the mapping JSON from `plate` (S1 builder, strict bounds) and keeps it with the display name and the metadata whitelist
+    // (DesignModelId, DesignProfileId, DesignRegion; values clean text up to 256 bytes, anything else dropped). False and
+    // `error` set, and the context left EMPTY, when the plate data is rejected or the display name is empty.
+    bool set(const SnapmakerPreprintPlate& plate, const std::map<std::string, std::string>& metadata, std::string& error);
+    void clear();
+    bool active() const;
+    // Copies of the stored data; false when no context is set.
+    bool active_file(nlohmann::json& out) const;      // {file_name, metadata:{...}}
+    bool filament_mapping(nlohmann::json& out) const; // the S1 object
+
+private:
+    mutable std::mutex m_mutex;
+    bool               m_active = false;
+    nlohmann::json     m_file    = nlohmann::json::object();
+    nlohmann::json     m_mapping = nlohmann::json::object();
+};
 
 // One machine as the bridge knows it. snapmaker_devices_to_json() turns it into the record the Flutter page
 // builds a device card from (docs/snapmaker-page-contract.md section 3; the page rejects a record without `sn`).
@@ -180,6 +205,9 @@ public:
         // Machine control (#75): IPrinterAgent::control_async with a method from the forklifted table and its validated params; `done(ok,
         // result)` on the UI thread, exactly once. Null = no machine source (the commands fail).
         std::function<void(const std::string& method, const nlohmann::json& params, std::function<void(bool ok, nlohmann::json result)> done)> control;
+        // The pre-print context (S2). sw_GetActiveFile and sw_GetFileFilamentMapping are registered only when this is non-null, and answer
+        // with a failure reply while it holds nothing. Local data only: neither reaches the machine.
+        std::shared_ptr<SnapmakerPreprintContext> preprint;
         // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
         std::function<bool(SnapmakerTab)>                    switch_tab;
     };

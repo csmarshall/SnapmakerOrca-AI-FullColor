@@ -15,9 +15,11 @@ REGISTERED sw_ControlPrintSpeed
 REGISTERED sw_FileGetStatus
 REGISTERED sw_FileLog
 REGISTERED sw_FilesThumbnailsBase64
+REGISTERED sw_GetActiveFile  # local only: the pre-print context's file name + metadata whitelist; registered when the bridge has a context (S2), no path/url/checksum yet
 REGISTERED sw_GetCache
 REGISTERED sw_GetCameraTimelapseInstance  # read-only: camera.get_timelapse_instance over the websocket, covers inline, reply sanitised (#90)
 REGISTERED sw_GetConnectedMachine
+REGISTERED sw_GetFileFilamentMapping  # local only: the pre-print context's S1 mapping JSON; the page's `filename` param is ignored (S2)
 REGISTERED sw_GetFileListPage  # read-only: GET /server/files/list?root=gcodes, sorted and paged host-side
 REGISTERED sw_GetLocalDevices
 REGISTERED sw_GetMachineState
@@ -75,9 +77,7 @@ DENIED sw_DownloadMachineFile
 DENIED sw_Exit
 DENIED sw_FileView  # RISKY
 DENIED sw_FinishFilamentMapping
-DENIED sw_GetActiveFile
 DENIED sw_GetDeviceDataStorageSpace
-DENIED sw_GetFileFilamentMapping
 DENIED sw_GetFileStream  # RISKY
 DENIED sw_GetFilesFromDir  # RISKY
 DENIED sw_GetMachineFilamentMapping

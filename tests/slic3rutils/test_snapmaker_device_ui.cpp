@@ -98,6 +98,7 @@ struct BridgeHarness
     std::vector<json>                 timelapse_calls;
     bool                              timelapse_ok = true;
     json                              timelapse_result = json::object();
+    std::shared_ptr<SnapmakerPreprintContext> preprint = std::make_shared<SnapmakerPreprintContext>();
     SnapmakerDeviceBridge             bridge;
 
     BridgeHarness()
@@ -105,6 +106,7 @@ struct BridgeHarness
               SnapmakerDeviceBridge::Options o;
               o.port       = 5000;
               o.http_host  = "http://127.0.0.1:5000";
+              o.preprint   = preprint;
               o.run_script = [this](const std::string& js) { sent.push_back(js); };
               o.devices    = [this] { return devices; };
               o.query_state = [this](const std::vector<std::string>& objs, std::function<void(bool, json)> done) {
@@ -577,13 +579,15 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_GetCameraTimelapseInstance",
         // read-only file listing (#75)
         "sw_GetFileListPage",
+        // pre-print page (S2): local data from the pre-print context only
+        "sw_GetActiveFile", "sw_GetFileFilamentMapping",
         // machine control (#75, #79): LED, speed, fans, bed temperature, pause/resume/cancel; nozzle temperature, purifier, device name
         // and the bed-mesh abort stay denied
         "sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp", "sw_MachinePrintPause",
         "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 52);
+    CHECK(expected.size() == 54);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -1043,7 +1047,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 52);
+    CHECK(registered.size() == 54);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
@@ -2436,4 +2440,116 @@ TEST_CASE("no write-class timelapse method is ever emitted", "[SSWCP][device_ui]
         REQUIRE(h.sent.size() == 1);
         CHECK(h.reply(0)["payload"]["code"] == 501);
     }
+}
+
+// ---- pre-print page (send-flow port S2): sw_GetActiveFile / sw_GetFileFilamentMapping answer from the context, never from params ----
+
+namespace {
+SnapmakerPreprintPlate preprint_plate()
+{
+    SnapmakerPreprintPlate p;
+    p.filament_colour       = {"#FF0000", "#00FF00"};
+    p.filament_type         = {"PLA", "PETG"};
+    p.nozzle_diameter       = {0.4, 0.4, 0.4, 0.4};
+    p.filament_extruder_map = {{0, 2}, {1, 0}};
+    p.machine_model         = "Snapmaker U1";
+    p.display_name          = "plate_1.gcode";
+    return p;
+}
+std::string preprint_msg(const std::string& cmd, const json& params)
+{
+    return json{{"header", {{"id", 1}}}, {"payload", {{"cmd", cmd}, {"params", params}}}}.dump();
+}
+} // namespace
+
+TEST_CASE("preprint commands: failure while the context is empty, data while it is set, failure again once cleared", "[SSWCP][device_ui][preprint]")
+{
+    BridgeHarness h;
+    for (const char* cmd : {"sw_GetActiveFile", "sw_GetFileFilamentMapping"}) {
+        CAPTURE(cmd);
+        h.sent.clear();
+        h.bridge.on_script_message(h.good, preprint_msg(cmd, json::object()));
+        REQUIRE(h.sent.size() == 1);
+        CHECK(h.reply(0)["payload"]["code"] == SSWCPCode::Failure);
+    }
+    std::string err;
+    REQUIRE(h.preprint->set(preprint_plate(), {{"DesignModelId", "m1"}, {"DesignRegion", "EU"}, {"Evil", "x"}}, err));
+    h.sent.clear();
+    h.bridge.on_script_message(h.good, preprint_msg("sw_GetActiveFile", json::object()));
+    h.bridge.on_script_message(h.good, preprint_msg("sw_GetFileFilamentMapping", json::object()));
+    REQUIRE(h.sent.size() == 2);
+    const json file = h.reply(0)["payload"]["data"];
+    CHECK(file == json::parse(R"({"file_name":"plate_1.gcode","metadata":{"DesignModelId":"m1","DesignRegion":"EU"}})")); // Evil dropped; no path, url, checksum
+    const json map = h.reply(1)["payload"]["data"];
+    CHECK(map["filename"] == "plate_1.gcode");
+    CHECK(map["filament_extruder_map"] == json::parse(R"({"0":"2","1":"0"})"));
+    CHECK(map["filament_color"] == json::array({0xFF0000, 0x00FF00}));
+    CHECK_FALSE(map.contains("filepath"));
+    h.preprint->clear();
+    h.sent.clear();
+    h.bridge.on_script_message(h.good, preprint_msg("sw_GetFileFilamentMapping", json::object()));
+    CHECK(h.reply(0)["payload"]["code"] == SSWCPCode::Failure);
+    // local data only: nothing was sent to the machine
+    CHECK(h.fetched.empty());
+    CHECK(h.queries.empty());
+    CHECK(h.control_calls.empty());
+}
+
+TEST_CASE("preprint commands ignore every caller-supplied path, name and flag", "[SSWCP][device_ui][preprint]")
+{
+    BridgeHarness h;
+    std::string err;
+    REQUIRE(h.preprint->set(preprint_plate(), {}, err));
+    const json hostile = {{"filename", "/etc/passwd"}, {"file_path", "../../secret"}, {"is_zip", true}, {"path", "/"}};
+    h.bridge.on_script_message(h.good, preprint_msg("sw_GetFileFilamentMapping", hostile));
+    h.bridge.on_script_message(h.good, preprint_msg("sw_GetActiveFile", hostile));
+    REQUIRE(h.sent.size() == 2);
+    CHECK(h.reply(0)["payload"]["data"]["filename"] == "plate_1.gcode");
+    CHECK(h.reply(0)["payload"]["data"].dump().find("passwd") == std::string::npos);
+    CHECK(h.reply(1)["payload"]["data"]["file_name"] == "plate_1.gcode");
+    CHECK(h.reply(1)["payload"]["data"].dump().find("secret") == std::string::npos);
+    CHECK(h.reply(1)["payload"]["data"].size() == 2);
+    CHECK(h.fetched.empty());
+}
+
+TEST_CASE("preprint context: invalid plate data leaves it empty; not registered without a context", "[SSWCP][device_ui][preprint]")
+{
+    SnapmakerPreprintContext ctx;
+    std::string err;
+    REQUIRE(ctx.set(preprint_plate(), {}, err));
+    auto bad = preprint_plate();
+    bad.filament_extruder_map = {{0, 7}}; // extruder out of range
+    CHECK_FALSE(ctx.set(bad, {}, err));
+    CHECK_FALSE(err.empty());
+    CHECK_FALSE(ctx.active());          // a rejected set must not leave the previous plate's data behind
+    bad = preprint_plate();
+    bad.display_name.clear();
+    CHECK_FALSE(ctx.set(bad, {}, err));
+    json out;
+    CHECK_FALSE(ctx.active_file(out));
+    CHECK_FALSE(ctx.filament_mapping(out));
+    // a bridge built without a context does not register them (the dispatcher answers 501)
+    SnapmakerDeviceBridge::Options o;
+    o.port = 5000; o.http_host = "http://127.0.0.1:5000";
+    std::vector<std::string> sent;
+    o.run_script = [&sent](const std::string& js) { sent.push_back(js); };
+    SnapmakerDeviceBridge bridge(std::move(o));
+    CHECK_FALSE(bridge.sswcp().is_registered("sw_GetActiveFile"));
+    CHECK_FALSE(bridge.sswcp().is_registered("sw_GetFileFilamentMapping"));
+}
+
+TEST_CASE("preprint context: concurrent set/clear/read is safe", "[SSWCP][device_ui][preprint]")
+{
+    SnapmakerPreprintContext ctx;
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        std::string err;
+        while (!stop) { ctx.set(preprint_plate(), {}, err); ctx.clear(); }
+    });
+    for (int i = 0; i < 20000; ++i) {
+        json out;
+        if (ctx.filament_mapping(out)) CHECK(out["filename"] == "plate_1.gcode"); // never a half-written object
+    }
+    stop = true;
+    writer.join();
 }
