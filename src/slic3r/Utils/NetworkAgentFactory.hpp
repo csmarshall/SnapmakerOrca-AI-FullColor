@@ -135,6 +135,13 @@ public:
      * Pure: the Bambu choice (use_bambu_send_dialog) is made first and is unchanged.
      */
     static bool use_preprint_send_flow(bool agent_supports_preprint_page, bool device_connected);
+
+    /**
+     * The whole Print plate / Print all decision in one pure function, so the ORDER is tested: Bambu first (use_bambu_send_dialog, unchanged),
+     * then the pre-print flow, else legacy.
+     */
+    enum class SendRoute { Bambu, Preprint, Legacy };
+    static SendRoute choose_send_route(bool use_bbl_network, bool use_printer_agents, const std::string& agent_id, bool device_connected);
     static bool use_preprint_send_flow(const std::string& agent_id, bool device_connected);
 
     /**

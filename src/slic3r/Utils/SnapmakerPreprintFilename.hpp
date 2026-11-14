@@ -6,6 +6,7 @@
 // rewritten HERE, before the context opens, and the rewritten name is what is pinned, shown to the user and sent; the gate itself never rewrites.
 
 #include <cctype>
+#include <cstdint>
 #include <string>
 
 #include "SnapmakerPreprintGate.hpp"
@@ -16,17 +17,31 @@ struct SnapmakerPreprintName
 {
     std::string name;            // always passes snapmaker_preprint_filename_ok()
     bool        changed = false; // name differs from the requested text (so the user must be told)
+    bool        lossy   = false; // characters or segments were replaced/dropped/truncated: a hash of the original is part of the name
 };
+
+// 8 lower-case hex digits of the 32-bit FNV-1a hash of `s` (stable across platforms and runs, unlike std::hash).
+inline std::string snapmaker_preprint_name_hash8(const std::string& s)
+{
+    std::uint32_t h = 2166136261u;
+    for (unsigned char c : s) { h ^= c; h *= 16777619u; }
+    static const char* hex = "0123456789abcdef";
+    std::string out(8, '0');
+    for (int i = 7; i >= 0; --i, h >>= 4) out[i] = hex[h & 0xF];
+    return out;
+}
 
 inline SnapmakerPreprintName snapmaker_preprint_sanitise_filename(const std::string& requested)
 {
     static const std::string suffix = ".gcode";
     // 1. Per code point: allowlist characters stay, every other UTF-8 code point (or invalid byte) becomes one '_'. '\\' counts as a separator.
+    bool        lossy = false;
     std::string mapped;
     for (std::size_t i = 0; i < requested.size(); ++i) {
         const unsigned char c = requested[i];
-        if (c >= 0x80 && c < 0xC0) continue; // continuation byte of a code point already replaced (or a stray one: dropped)
+        if (c >= 0x80 && c < 0xC0) { lossy = true; continue; } // continuation byte of a code point already replaced (or a stray one: dropped)
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == ' ' || c == '-' || c == '/';
+        if (!ok && c != '\\') lossy = true;
         mapped += c == '\\' ? '/' : ok ? char(c) : '_';
     }
     // 2. Segments: trim spaces at both ends, drop empty / "." / ".." ones (no traversal, no absolute path, no empty segment).
@@ -38,6 +53,7 @@ inline SnapmakerPreprintName snapmaker_preprint_sanitise_filename(const std::str
         start = i + 1;
         const auto b = seg.find_first_not_of(' ');
         seg = b == std::string::npos ? std::string() : seg.substr(b, seg.find_last_not_of(' ') - b + 1);
+        if (seg == "." || seg == "..") lossy = true; // a traversal segment was removed
         if (seg.empty() || seg == "." || seg == "..") continue;
         if (!joined.empty()) joined += '/';
         joined += seg;
@@ -50,16 +66,19 @@ inline SnapmakerPreprintName snapmaker_preprint_sanitise_filename(const std::str
     }
     // Removing the suffix can leave trailing spaces or a trailing '/' ("dir/.gcode"); strip them, and give an empty stem a name.
     while (!joined.empty() && (joined.back() == ' ' || joined.back() == '/')) joined.pop_back();
-    if (joined.empty()) joined = "print";
-    // 4. Length: keep the front, the suffix always fits.
-    const std::size_t max_stem = 512 - suffix.size();
+    if (joined.empty()) { joined = "print"; lossy = true; }
+    // 4. Length: keep the front; the suffix and, for a lossy name, "_<8 hex>" always fit.
+    const std::size_t max_stem = 512 - suffix.size() - 9;
     if (joined.size() > max_stem) {
+        lossy = true;
         joined.resize(max_stem);
         while (!joined.empty() && (joined.back() == ' ' || joined.back() == '/')) joined.pop_back();
         if (joined.empty()) joined = "print";
     }
     SnapmakerPreprintName out;
-    out.name = joined + suffix;
+    // A name that lost information carries a short deterministic hash of the ORIGINAL, so two different originals never share a remote name.
+    out.lossy = lossy;
+    out.name  = joined + (lossy ? "_" + snapmaker_preprint_name_hash8(requested) : std::string()) + suffix;
     if (!snapmaker_preprint_filename_ok(out.name)) out.name = "print" + suffix; // unreachable by construction; fail closed to a fixed name
     out.changed = out.name != requested;
     return out;

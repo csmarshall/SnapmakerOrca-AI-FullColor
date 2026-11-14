@@ -42,6 +42,10 @@ public:
     bool                         send_gcode(const std::string& script) override;
     bool                         start_print(const std::string& filename) override;
 
+    // "http://<host>" of the agent's CURRENT connected device (no HTTP, no serial read), "" when nothing is connected or the address is not a
+    // plain host. Used to build the page's CSP origin from the SAME device the pin is taken from (never from the Device tab's selection).
+    std::string                  connected_origin() const;
+
     // The exact start line for a pinned name, or empty when snapmaker_preprint_filename_ok() refuses the name (allowlist, see the gate).
     static std::string start_line(const std::string& filename);
     // "host" and "port" (scheme default when the URL has none) of a base URL such as http://u1.local:7125; both empty when unparseable.

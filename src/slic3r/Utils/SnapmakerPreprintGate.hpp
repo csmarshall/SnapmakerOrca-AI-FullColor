@@ -268,7 +268,7 @@ enum class SnapmakerPreprintDecision {
     RefusedPrinterChanged,
     RefusedPrinterBusy,    // print_stats not idle, a throwing predicate, or no predicate (fail closed)
     RefusedMetadata,       // remote size differs from the snapshot, a throwing predicate, or no predicate (fail closed)
-    RefusedStartDisallowed // the user chose upload-only in the send dialog: no start is ever allowed in this context
+    RefusedStartDisallowed // the user chose upload-only in the send dialog: neither a start nor a SET_PRINT_* script is ever allowed
 };
 
 struct SnapmakerPreprintOpen
@@ -279,7 +279,7 @@ struct SnapmakerPreprintOpen
     int                   extruder_count = 0;
     std::uint64_t         snapshot_size = 0;
     bool                  configure_required = false; // the page's options are non-empty: a validated script must precede the start
-    bool                  allow_start = true;         // false = upload-only (PrintHostSendDialog chose "no post action"): every start is refused
+    bool                  allow_start = true;         // false = upload-only (PrintHostSendDialog chose "no post action"): every start and every configure script is refused
 };
 
 // Proof that a request was Allowed. The caller must forward the script / start to the printer IMMEDIATELY and then call
@@ -344,6 +344,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (auto d = state_refusal(epoch, /*start=*/false); d != D::Allowed) return d;
+            if (!m_open.allow_start) return D::RefusedStartDisallowed; // upload-only is read-only toward the printer: no SET_PRINT_* either
             if (m_configures >= snapmaker_preprint_max_configures) return D::RefusedTooManyScripts;
             filaments = m_open.plate_filaments;
             extruders = m_open.extruder_count;
@@ -371,6 +372,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (auto d = state_refusal(epoch, /*start=*/false); d != D::Allowed) return {d, {}};
+            if (!m_open.allow_start) return {D::RefusedStartDisallowed, {}};
             if (m_configures >= snapmaker_preprint_max_configures) return {D::RefusedTooManyScripts, {}};
             if (current_printer != m_open.printer) return {D::RefusedPrinterChanged, {}};
             filaments = m_open.plate_filaments;

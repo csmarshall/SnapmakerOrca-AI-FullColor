@@ -57,32 +57,40 @@ TEST_CASE("pre-print file names are sanitised deterministically onto the gate's 
         {"plate_1.gcode", "plate_1.gcode", false},
         {"my part.gcode", "my part.gcode", false},                            // spaces are allowed
         {"dir/sub dir/a-b_c.1.gcode", "dir/sub dir/a-b_c.1.gcode", false},
-        {"Bob's part.gcode", "Bob_s part.gcode", true},                      // apostrophe
-        {"caf\xC3\xA9 \xE2\x82\xAC.gcode", "caf_ _.gcode", true},            // unicode: one '_' per code point
-        {"\xF0\x9F\x98\x80.gcode", "_.gcode", true},                          // 4-byte code point -> one '_'
+        {"Bob's part.gcode", "Bob_s part{H}.gcode", true},                      // apostrophe
+        {"caf\xC3\xA9 \xE2\x82\xAC.gcode", "caf_ _{H}.gcode", true},            // unicode: one '_' per code point
+        {"\xF0\x9F\x98\x80.gcode", "_{H}.gcode", true},                          // 4-byte code point -> one '_'
         {"name", "name.gcode", true},                                         // suffix added
         {"name.GCODE", "name.gcode", true},                                   // suffix normalised, not doubled
         {"a.gcode.gcode", "a.gcode.gcode", false},                            // only one suffix is stripped and re-added
-        {"../../etc/passwd", "etc/passwd.gcode", true},                        // traversal segments dropped
+        {"../../etc/passwd", "etc/passwd{H}.gcode", true},                        // traversal segments dropped
         {"/abs/path.gcode", "abs/path.gcode", true},
         {"a\\b.gcode", "a/b.gcode", true},                                    // backslash is a separator
-        {"a//b/./c.gcode", "a/b/c.gcode", true},
+        {"a//b/./c.gcode", "a/b/c{H}.gcode", true},
         {"  spaced  .gcode", "spaced.gcode", true},
-        {"q\"uote;semi#hash=eq.gcode", "q_uote_semi_hash_eq.gcode", true},
-        {"tab\there\nnl.gcode", "tab_here_nl.gcode", true},
-        {"", "print.gcode", true},
-        {".gcode", "print.gcode", true},
-        {"///", "print.gcode", true},
+        {"q\"uote;semi#hash=eq.gcode", "q_uote_semi_hash_eq{H}.gcode", true},
+        {"tab\there\nnl.gcode", "tab_here_nl{H}.gcode", true},
+        {"", "print{H}.gcode", true},
+        {".gcode", "print{H}.gcode", true},
+        {"///", "print{H}.gcode", true},
         {"dir/.gcode", "dir.gcode", true},
     };
     for (const auto& r : rows) {
         INFO("in: " << r.in);
         const auto n = snapmaker_preprint_sanitise_filename(r.in);
-        CHECK(n.name == r.out);
+        std::string expect = r.out;
+        const auto  at     = expect.find("{H}");
+        if (at != std::string::npos) expect.replace(at, 3, "_" + snapmaker_preprint_name_hash8(r.in));
+        CHECK(n.name == expect);
+        CHECK(n.lossy == (at != std::string::npos));
         CHECK(n.changed == r.changed);
         CHECK(snapmaker_preprint_filename_ok(n.name));
         CHECK(snapmaker_preprint_sanitise_filename(n.name).name == n.name); // idempotent
     }
+    // Collisions: different originals that sanitise to the same text get different names (hash of the original).
+    CHECK(snapmaker_preprint_sanitise_filename("a b'.gcode").name != snapmaker_preprint_sanitise_filename("a b\".gcode").name);
+    CHECK(snapmaker_preprint_sanitise_filename("\xC3\xA9.gcode").name != snapmaker_preprint_sanitise_filename("\xC3\xA8.gcode").name);
+    CHECK(snapmaker_preprint_sanitise_filename("x'.gcode").name == snapmaker_preprint_sanitise_filename("x'.gcode").name); // deterministic
     // Length cap: a very long name still passes and keeps the suffix.
     const auto longn = snapmaker_preprint_sanitise_filename(std::string(2000, 'x') + ".gcode");
     CHECK(longn.name.size() <= 512);
@@ -110,7 +118,14 @@ struct FakeScheduler : PreprintScheduler
     std::chrono::steady_clock::time_point now() override { return t; }
     void call_after(std::function<void()> fn) override { tasks.push_back({t, std::move(fn)}); }
     void call_later(ms d, std::function<void()> fn) override { tasks.push_back({t + d, std::move(fn)}); }
-    void run_background(std::function<void()> work, std::function<void()> on_ui) override { work(); call_after(std::move(on_ui)); }
+    bool hold_bg = false; // keep the UI continuation of a background job until release_held()
+    std::vector<std::function<void()>> held;
+    void run_background(std::function<void()> work, std::function<void()> on_ui) override
+    {
+        work();
+        if (hold_bg) held.push_back(std::move(on_ui)); else on_ui();
+    }
+    void release_held() { auto h = std::move(held); held.clear(); for (auto& f : h) f(); }
     // Runs every task due up to now+d in due order, moving the clock; tasks they add are honoured.
     void advance(ms d)
     {
@@ -142,6 +157,7 @@ struct FakeView : PreprintView
     std::shared_ptr<ViewState> s;
     Log& log;
     FakeView(std::shared_ptr<ViewState> st, Log& l) : s(std::move(st)), log(l) { log.add("view:create"); }
+    ~FakeView() override { log.add("view:dtor"); }
     bool script_handler_added() override { return s->handler; }
     void show() override { log.add("view:show"); }
     void raise() override { log.add("view:raise"); }
@@ -172,7 +188,7 @@ struct Fixture
     std::shared_ptr<SnapmakerPreprintSession> session = std::make_shared<SnapmakerPreprintSession>(ctx, printer);
     std::shared_ptr<PreprintDialogController> c;
     std::vector<std::shared_ptr<ViewState>> views;
-    std::vector<std::string> errors;
+    std::vector<std::string> errors, infos;
     int switches = 0;
     fs::path dir = fs::temp_directory_path() / fs::unique_path("preprint-ctl-%%%%-%%%%");
     fs::path gcode;
@@ -188,11 +204,12 @@ struct Fixture
         d.context   = ctx;
         d.session   = session;
         d.bind_printer = [this] { log.add("bind"); return printer->pin; };
-        d.make_view = [this]() -> std::unique_ptr<PreprintView> {
+        d.make_view = [this](std::uint64_t) -> std::unique_ptr<PreprintView> {
             views.push_back(std::make_shared<ViewState>());
             return std::make_unique<FakeView>(views.back(), log);
         };
         d.report_error = [this](const std::string& m) { errors.push_back(m); log.add("error"); };
+        d.notify_info = [this](const std::string& m) { infos.push_back(m); };
         d.switch_to_device_tab = [this] { ++switches; log.add("switch_tab"); };
         c = PreprintDialogController::create(std::move(d));
     }
@@ -249,9 +266,11 @@ TEST_CASE("controller waits for the script handler before loading the page, with
     CHECK(f.log.index("bind") < f.log.index("view:attach_bridge"));
     CHECK(f.log.index("view:attach_bridge") < f.log.index("view:load_page"));
     // The title shows the sanitised name, and the user is told it changed.
-    CHECK(f.views.back()->title == "Bob_s part.gcode");
-    CHECK(f.c->remote_filename() == "Bob_s part.gcode");
+    CHECK(f.c->remote_filename() == snapmaker_preprint_sanitise_filename("Bob's part.gcode").name);
+    CHECK(f.views.back()->title == f.c->remote_filename() + " -> u1.local"); // the target printer is in the title
     CHECK(f.c->name_changed());
+    REQUIRE(f.infos.size() == 1); // the user is told about the rename
+    CHECK(f.infos[0].find(f.c->remote_filename()) != std::string::npos);
 }
 
 TEST_CASE("snapshot is registered before the session opens and is revoked on close", "[SendDialog][Preprint]")
@@ -273,7 +292,7 @@ TEST_CASE("snapshot is registered before the session opens and is revoked on clo
     REQUIRE(serve.status == PreprintCapabilityStore::Status::Ok);
     CHECK(serve.size == 10); // "G28\nG1 X1\n"
     f.store->finish_serve(cap, false);
-    f.c->on_user_closed();
+    f.c->on_user_closed(f.c->open_id());
     CHECK(f.store->begin_serve(cap).status == PreprintCapabilityStore::Status::Gone);
     CHECK_FALSE(f.store->has_live_entries());
     CHECK(f.session->state() == SnapmakerPreprintState::Closed);
@@ -318,7 +337,7 @@ TEST_CASE("a second Print click raises the live dialog instead of opening anothe
     CHECK(f.c->capability_path() == cap);
     CHECK(f.c->raise_if_live());
     CHECK(f.log.count("view:raise") == 3);
-    f.c->on_user_closed();
+    f.c->on_user_closed(f.c->open_id());
     CHECK_FALSE(f.c->raise_if_live());
     CHECK(f.c->open(f.request()) == PreprintDialogController::Result::Opened); // closed: a new one is allowed
     CHECK(f.views.size() == 2);
@@ -347,7 +366,7 @@ TEST_CASE("the Device-tab switch happens only after the dialog is destroyed, in 
 {
     Fixture f;
     f.open_live(true, true);
-    f.c->on_page_done(true);
+    f.c->on_page_done(f.c->open_id(), true);
     CHECK(f.log.count("view:destroy") == 1);
     CHECK(f.switches == 0); // not from inside the callback
     f.sched->pump();
@@ -355,17 +374,17 @@ TEST_CASE("the Device-tab switch happens only after the dialog is destroyed, in 
     CHECK(f.log.index("view:destroy") < f.log.index("switch_tab"));
     f.sched->advance(ms(1000));
     CHECK(f.switches == 1);
-    f.c->on_page_done(true); // a late second completion changes nothing
+    f.c->on_page_done(f.c->open_id(), true); // a late second completion changes nothing
     f.sched->pump();
     CHECK(f.switches == 1);
 }
 
 TEST_CASE("no tab switch when not asked, when the start did not happen, or when the user closed the window", "[SendDialog][Preprint]")
 {
-    {   Fixture f; f.open_live(true, false); f.c->on_page_done(true); f.sched->advance(ms(100)); CHECK(f.switches == 0); }
-    {   Fixture f; f.open_live(true, true);  f.c->on_page_done(false); f.sched->advance(ms(100)); CHECK(f.switches == 0); } // start wanted, not started
-    {   Fixture f; f.open_live(true, true);  f.c->on_user_closed(); f.sched->advance(ms(100)); CHECK(f.switches == 0); }
-    {   Fixture f; f.open_live(false, true); f.c->on_page_done(false); f.sched->advance(ms(100)); CHECK(f.switches == 1); } // upload only: done = success
+    {   Fixture f; f.open_live(true, false); f.c->on_page_done(f.c->open_id(), true); f.sched->advance(ms(100)); CHECK(f.switches == 0); }
+    {   Fixture f; f.open_live(true, true);  f.c->on_page_done(f.c->open_id(), false); f.sched->advance(ms(100)); CHECK(f.switches == 0); } // start wanted, not started
+    {   Fixture f; f.open_live(true, true);  f.c->on_user_closed(f.c->open_id()); f.sched->advance(ms(100)); CHECK(f.switches == 0); }
+    {   Fixture f; f.open_live(false, true); f.c->on_page_done(f.c->open_id(), false); f.sched->advance(ms(100)); CHECK(f.switches == 1); } // upload only: done = success
 }
 
 TEST_CASE("upload-only configures the gate so no start is ever allowed", "[SendDialog][Preprint]")
@@ -384,6 +403,153 @@ TEST_CASE("upload-only configures the gate so no start is ever allowed", "[SendD
     CHECK_FALSE(r2.ok);                                                  // not configured yet...
     CHECK(r2.message.find("upload only") == std::string::npos);          // ...but for that reason, not the upload-only one
     CHECK(r2.message.find("preferences") != std::string::npos);
+}
+
+TEST_CASE("upload-only also refuses the configure script (read-only toward the printer)", "[SendDialog][Preprint]")
+{
+    Fixture f;
+    f.open_live(/*start=*/false);
+    const auto r = f.session->configure(f.views.back()->epoch,
+                                        nlohmann::json{{"script", build_snapmaker_plural_preference_script({0, 1}, {})}});
+    CHECK_FALSE(r.ok);
+    CHECK(r.message.find("upload only") != std::string::npos);
+}
+
+TEST_CASE("close or invalidate while waiting for the handler leaves nothing behind", "[SendDialog][Preprint]")
+{
+    Fixture f;
+    REQUIRE(f.c->open(f.request()) == PreprintDialogController::Result::Opened);
+    const std::string cap = f.c->capability_path();
+    f.c->on_user_closed(f.c->open_id());
+    CHECK(f.c->state() == PreprintDialogController::State::Closed);
+    CHECK(f.views.back()->destroyed);
+    CHECK(f.store->begin_serve(cap).status == PreprintCapabilityStore::Status::Gone);
+    f.views.back()->handler = true; // a stale poll must not bind or open anything
+    f.sched->advance(kPreprintHandlerWatchdog * 2);
+    CHECK(f.log.index("bind") < 0);
+    CHECK(f.session->epoch() == 0);
+    CHECK(f.errors.empty());
+}
+
+TEST_CASE("a bind that finishes after the close does nothing", "[SendDialog][Preprint]")
+{
+    Fixture f;
+    REQUIRE(f.c->open(f.request()) == PreprintDialogController::Result::Opened);
+    f.views.back()->handler = true;
+    f.sched->hold_bg = true;
+    f.sched->advance(kPreprintPollInterval * 2);
+    REQUIRE(f.c->state() == PreprintDialogController::State::Binding);
+    f.c->invalidate();
+    f.sched->hold_bg = false;
+    f.sched->release_held();
+    CHECK(f.c->state() == PreprintDialogController::State::Closed);
+    CHECK(f.session->epoch() == 0);
+    CHECK(f.log.index("view:attach_bridge") < 0);
+    CHECK(f.log.index("view:load_page") < 0);
+}
+
+TEST_CASE("an invalidate during the snapshot copy revokes the late snapshot", "[SendDialog][Preprint]")
+{
+    Fixture f;
+    f.sched->hold_bg = true;
+    REQUIRE(f.c->open(f.request()) == PreprintDialogController::Result::Opened);
+    CHECK(f.c->state() == PreprintDialogController::State::Snapshotting);
+    CHECK(f.c->raise_if_live()); // already counts as live: a second click opens nothing
+    CHECK(f.c->open(f.request()) == PreprintDialogController::Result::AlreadyOpen);
+    f.c->invalidate();
+    f.sched->hold_bg = false;
+    f.sched->release_held();
+    CHECK(f.log.index("view:create") < 0);
+    CHECK_FALSE(f.store->has_live_entries());
+    CHECK(f.c->state() == PreprintDialogController::State::Closed);
+}
+
+TEST_CASE("a late callback of an earlier open cannot close a later one", "[SendDialog][Preprint]")
+{
+    Fixture f;
+    f.open_live();
+    const auto first = f.c->open_id();
+    f.c->on_user_closed(first);
+    f.open_live();
+    REQUIRE(f.c->open_id() != first);
+    f.c->on_page_done(first, true);
+    f.c->on_user_closed(first);
+    f.c->on_page_error(first, "x");
+    f.sched->advance(ms(100));
+    CHECK(f.c->state() == PreprintDialogController::State::Live);
+    CHECK(f.switches == 0);
+    f.c->on_page_done(f.c->open_id(), true);
+    f.sched->pump();
+    CHECK(f.switches == 1);
+}
+
+TEST_CASE("destroying the controller destroys a live window exactly once", "[SendDialog][Preprint]")
+{
+    Fixture f;
+    f.open_live();
+    const std::string cap = f.c->capability_path();
+    f.c.reset();
+    CHECK(f.log.count("view:destroy") == 1);
+    CHECK(f.log.index("view:destroy") < f.log.index("view:dtor"));
+    CHECK(f.views.back()->destroyed);
+    CHECK(f.store->begin_serve(cap).status == PreprintCapabilityStore::Status::Gone);
+    f.sched->advance(std::chrono::minutes(15)); // pending timers hold only weak references
+    CHECK(f.switches == 0);
+}
+
+TEST_CASE("page-load watchdog, page errors and the capability TTL close with a message", "[SendDialog][Preprint]")
+{
+    {   // the page never says anything
+        Fixture f; f.open_live();
+        f.sched->advance(kPreprintPageLoadWatchdog - ms(500));
+        CHECK(f.c->state() == PreprintDialogController::State::Live);
+        f.sched->advance(ms(1000));
+        CHECK(f.c->state() == PreprintDialogController::State::Closed);
+        CHECK(f.errors.size() == 1);
+    }
+    {   // the page spoke: the watchdog stays quiet
+        Fixture f; f.open_live();
+        f.c->on_page_message(f.c->open_id());
+        f.sched->advance(kPreprintPageLoadWatchdog * 2);
+        CHECK(f.c->state() == PreprintDialogController::State::Live);
+    }
+    {   // a webview error
+        Fixture f; f.open_live();
+        f.c->on_page_error(f.c->open_id(), "net::ERR");
+        CHECK(f.c->state() == PreprintDialogController::State::Closed);
+        REQUIRE(f.errors.size() == 1);
+        CHECK(f.errors[0].find("net::ERR") != std::string::npos);
+    }
+    {   // TTL: a warning a minute before, then a clear close
+        Fixture f; f.open_live();
+        f.c->on_page_message(f.c->open_id());
+        const auto ttl = std::chrono::duration_cast<ms>(PreprintCapabilityStore::capability_ttl);
+        f.sched->advance(ttl - kPreprintTtlWarning - ms(1000));
+        CHECK(f.infos.size() == 1); // only the rename notice so far
+        f.sched->advance(ms(2000));
+        CHECK(f.infos.size() == 2);
+        CHECK(f.c->state() == PreprintDialogController::State::Live);
+        f.sched->advance(kPreprintTtlWarning);
+        CHECK(f.c->state() == PreprintDialogController::State::Closed);
+        REQUIRE(f.errors.size() == 1);
+        CHECK(f.errors[0].find("expired") != std::string::npos);
+    }
+}
+
+TEST_CASE("send route: Bambu first, then pre-print, else legacy", "[SendDialog][Routing]")
+{
+    NetworkAgentFactory::register_all_agents();
+    using R = NetworkAgentFactory::SendRoute;
+    const auto route = [](bool bbl, bool agents, const char* id, bool conn) { return NetworkAgentFactory::choose_send_route(bbl, agents, id, conn); };
+    CHECK(route(true, false, BBL_PRINTER_AGENT_ID, true) == R::Bambu);
+    CHECK(route(true, true, SNAPMAKER_PRINTER_AGENT_ID, true) == R::Bambu); // Bambu network wins even with a Snapmaker agent id
+    CHECK(route(false, true, BBL_PRINTER_AGENT_ID, false) == R::Bambu);
+    CHECK(route(false, true, SNAPMAKER_PRINTER_AGENT_ID, true) == R::Preprint);
+    CHECK(route(false, false, SNAPMAKER_PRINTER_AGENT_ID, true) == R::Preprint);
+    CHECK(route(false, true, SNAPMAKER_PRINTER_AGENT_ID, false) == R::Legacy);
+    CHECK(route(false, true, MOONRAKER_PRINTER_AGENT_ID, true) == R::Legacy);
+    CHECK(route(false, true, "crealityprint", true) == R::Legacy);
+    CHECK(route(false, true, "", true) == R::Bambu); // empty id counts as Bambu, as before
 }
 
 TEST_CASE("a failed bind or an unusable pin refuses and cleans up", "[SendDialog][Preprint]")
@@ -406,7 +572,7 @@ TEST_CASE("a missing plate G-code is refused before any window exists", "[SendDi
     Fixture f;
     auto r = f.request();
     r.gcode_path = f.dir / "nope.gcode";
-    CHECK(f.c->open(std::move(r)) == PreprintDialogController::Result::Refused);
+    f.c->open(std::move(r)); // the snapshot runs in the background; the refusal arrives as a notification
     CHECK(f.log.index("view:create") < 0);
     CHECK(f.errors.size() == 1);
     CHECK(f.c->state() != PreprintDialogController::State::Live);
@@ -420,18 +586,41 @@ std::string read_all(const fs::path& p)
     return ss.str();
 }
 
-TEST_CASE("the pre-print path never uses ShowModal", "[SendDialog][Preprint]")
+TEST_CASE("the pre-print path uses no modal API", "[SendDialog][Preprint]")
 {
-    // Source scan, not behaviour: the new dialog and controller must stay non-modal (#84). PrintHostSendDialog (webview-free) is shown
-    // modally from Plater.cpp on purpose, first, like Snapmaker; it is not part of these files.
+    // Source scan, not behaviour: the new dialog, the controller and Plater::send_preprint must stay free of modal loops (#84). The ONE
+    // deliberate modal call is PrintHostSendDialog in Plater.cpp's marked helper (no webview in it, destroyed before the page's webview exists).
+    const char* banned[] = {"ShowModal", "EndModal", "ErrorDialog", "show_error", "wxMessageBox", "RichMessageDialog", "MessageDialog", "Yield("};
     const fs::path src = fs::path(__FILE__).parent_path().parent_path().parent_path() / "src" / "slic3r" / "GUI";
+    auto scan = [&](const std::string& label, const std::string& text) {
+        for (const char* b : banned) {
+            INFO(label << " contains " << b);
+            CHECK(text.find(b) == std::string::npos);
+        }
+    };
     for (const char* name : {"PreprintDialogController.hpp", "PreprintDialog.hpp", "PreprintDialog.cpp"}) {
-        INFO(name);
         REQUIRE(fs::exists(src / name));
-        const std::string text = read_all(src / name);
-        CHECK(text.find("ShowModal") == std::string::npos);
-        CHECK(text.find("EndModal") == std::string::npos);
+        scan(name, read_all(src / name));
     }
+    const std::string plater = read_all(src / "Plater.cpp");
+    const auto section = [&](const char* begin, const char* end) {
+        const auto a = plater.find(begin);
+        const auto b = plater.find(end);
+        REQUIRE(a != std::string::npos);
+        REQUIRE(b != std::string::npos);
+        REQUIRE(b > a);
+        return plater.substr(a, b - a);
+    };
+    const std::string body = section("// BEGIN send_preprint", "// END send_preprint");
+    REQUIRE(body.size() > 500); // the markers really bracket the function
+    REQUIRE(body.find("controller->open(") != std::string::npos);
+    scan("Plater::send_preprint", body);
+    const std::string helper = section("// BEGIN preprint send dialog helper", "// END preprint send dialog helper");
+    CHECK(helper.find("ShowModal") != std::string::npos);
+    std::size_t modal_calls = 0;
+    for (auto at = helper.find("ShowModal("); at != std::string::npos; at = helper.find("ShowModal(", at + 1)) ++modal_calls;
+    CHECK(modal_calls == 1);
+    CHECK(helper.find("wxWebView") == std::string::npos);
 }
 
 } // namespace

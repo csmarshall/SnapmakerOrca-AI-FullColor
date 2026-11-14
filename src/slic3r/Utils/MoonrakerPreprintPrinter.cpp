@@ -18,6 +18,12 @@ MoonrakerPreprintPrinter::Snapshot MoonrakerPreprintPrinter::snapshot() const
     return {m_agent->device_info.base_url, m_agent->device_info.api_key, m_agent->device_info.dev_id};
 }
 
+std::string MoonrakerPreprintPrinter::connected_origin() const
+{
+    const SnapmakerPreprintPin ep = endpoint_of(snapshot().base_url);
+    return ep.host.empty() ? std::string() : "http://" + ep.host;
+}
+
 SnapmakerPreprintPin MoonrakerPreprintPrinter::endpoint_of(const std::string& base_url)
 {
     std::string rest;

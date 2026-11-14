@@ -574,7 +574,7 @@ TEST_CASE("gate: concurrent configures never exceed the cap, and configure/start
 }
 
 // S5: upload-only in the send dialog means the context never allows a start, even in the right state with the right file.
-TEST_CASE("gate: allow_start=false refuses every start but still allows the configure", "[SnapmakerPreprintGate]")
+TEST_CASE("gate: allow_start=false refuses every start and every configure (read-only upload)", "[SnapmakerPreprintGate]")
 {
     SnapmakerPreprintGate g;
     auto o = open_params(false);
@@ -585,10 +585,10 @@ TEST_CASE("gate: allow_start=false refuses every start but still allows the conf
     CHECK(g.precheck_start(e, "job.gcode") == D::RefusedStartDisallowed);
     CHECK(g.request_start(e, "job.gcode", kPin, kIdle, kMetaOk).decision == D::RefusedStartDisallowed);
     CHECK(g.state() == SnapmakerPreprintState::Open);
-    auto c = g.request_configure(e, plural_golden(), kPin, kIdle);
-    CHECK(c.decision == D::Allowed);
-    CHECK(g.confirm(c.ticket, true));
-    CHECK(g.request_start(e, "job.gcode", kPin, kIdle, kMetaOk).decision == D::RefusedStartDisallowed); // Configured too
+    // Upload-only is read-only toward the printer: the configure script is refused as well (the page's send route is not shown to need it).
+    CHECK(g.precheck_configure(e, plural_golden()) == D::RefusedStartDisallowed);
+    CHECK(g.request_configure(e, plural_golden(), kPin, kIdle).decision == D::RefusedStartDisallowed);
+    CHECK(g.state() == SnapmakerPreprintState::Open);
     // default stays permissive
     SnapmakerPreprintGate g2;
     const auto e2 = g2.open(open_params(false), err);

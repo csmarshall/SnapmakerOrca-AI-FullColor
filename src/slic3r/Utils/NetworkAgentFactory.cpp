@@ -124,6 +124,14 @@ bool NetworkAgentFactory::use_preprint_send_flow(bool agent_supports_preprint_pa
     return agent_supports_preprint_page && device_connected;
 }
 
+NetworkAgentFactory::SendRoute NetworkAgentFactory::choose_send_route(bool use_bbl_network, bool use_printer_agents, const std::string& agent_id,
+                                                                      bool device_connected)
+{
+    if (use_bambu_send_dialog(use_bbl_network, use_printer_agents, agent_id))
+        return SendRoute::Bambu;
+    return use_preprint_send_flow(agent_id, device_connected) ? SendRoute::Preprint : SendRoute::Legacy;
+}
+
 bool NetworkAgentFactory::use_preprint_send_flow(const std::string& agent_id, bool device_connected)
 {
     return use_preprint_send_flow(printer_agent_supports_preprint_page(agent_id), device_connected);

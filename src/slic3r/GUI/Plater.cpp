@@ -7399,8 +7399,8 @@ struct Plater::priv
     std::function<void()> m_after_select_machine_dlg;
     // The non-modal Snapmaker pre-print dialog's controller (send-flow S5); null until the first pre-print send.
     std::shared_ptr<PreprintDialogController> m_preprint;
-    // Which non-Bambu route Print plate / Print all takes: the page-driven pre-print dialog (agent capability + a connected device) or legacy.
-    bool use_preprint_route() const;
+    // The route Print plate / Print all takes: Bambu dialog, the page-driven pre-print dialog (agent capability + a connected device) or legacy.
+    NetworkAgentFactory::SendRoute send_route() const;
     SendMultiMachinePage* m_send_multi_dlg = nullptr;
     SendToPrinterDialog* m_send_to_sdcard_dlg = nullptr;
 
@@ -14062,24 +14062,21 @@ void Plater::priv::on_action_print_plate(SimpleEvent&)
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print plate event\n" ;
     }
 
-    PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
-    if (NetworkAgentFactory::use_bambu_send_dialog(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"),
-            wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent")))) {
-        open_machine_select_dialog(partplate_list.get_curr_plate_index());
-    } else if (use_preprint_route()) {
-        q->send_preprint(PLATE_CURRENT_IDX);
-    } else {
-        q->send_gcode_legacy(PLATE_CURRENT_IDX, nullptr);
+    switch (send_route()) {
+    case NetworkAgentFactory::SendRoute::Bambu:    open_machine_select_dialog(partplate_list.get_curr_plate_index()); break;
+    case NetworkAgentFactory::SendRoute::Preprint: q->send_preprint(PLATE_CURRENT_IDX); break;
+    case NetworkAgentFactory::SendRoute::Legacy:   q->send_gcode_legacy(PLATE_CURRENT_IDX, nullptr); break;
     }
 }
 
-bool Plater::priv::use_preprint_route() const
+NetworkAgentFactory::SendRoute Plater::priv::send_route() const
 {
     PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
     const std::string agent_id = wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent"));
     DeviceManager* dev = wxGetApp().getDeviceManager();
     MachineObject* selected = dev ? dev->get_selected_machine() : nullptr;
-    return NetworkAgentFactory::use_preprint_send_flow(agent_id, selected != nullptr && selected->is_connected());
+    return NetworkAgentFactory::choose_send_route(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"), agent_id,
+                                                  selected != nullptr && selected->is_connected());
 }
 
 void Plater::priv::open_machine_select_dialog(int plate_idx, PrintFromType print_type)
@@ -14204,14 +14201,10 @@ void Plater::priv::on_action_print_all(SimpleEvent&)
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received print all event\n" ;
     }
 
-    PresetBundle& preset_bundle = *wxGetApp().preset_bundle;
-    if (NetworkAgentFactory::use_bambu_send_dialog(preset_bundle.use_bbl_network(), wxGetApp().app_config->get_bool("use_printer_agents"),
-            wxGetApp().resolve_printer_agent_id(preset_bundle.printers.get_edited_preset().config.opt_string("printer_agent")))) {
-        open_machine_select_dialog(PLATE_ALL_IDX);
-    } else if (use_preprint_route()) {
-        q->send_preprint(PLATE_ALL_IDX);
-    } else {
-        q->send_gcode_legacy(PLATE_ALL_IDX, nullptr);
+    switch (send_route()) {
+    case NetworkAgentFactory::SendRoute::Bambu:    open_machine_select_dialog(PLATE_ALL_IDX); break;
+    case NetworkAgentFactory::SendRoute::Preprint: q->send_preprint(PLATE_ALL_IDX); break;
+    case NetworkAgentFactory::SendRoute::Legacy:   q->send_gcode_legacy(PLATE_ALL_IDX, nullptr); break;
     }
 }
 
@@ -21466,8 +21459,32 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 
     p->export_gcode(fs::path(), false, std::move(upload_job));
 }
+// BEGIN preprint send dialog helper (the ONLY modal call of the pre-print path; the dialog has no webview and is destroyed before the page's
+// webview is created, like Snapmaker's PrintHostSendDialog-then-WebPreprintDialog order)
+namespace {
+struct PreprintSendChoice { bool ok = false; std::string name; bool start = true; bool switch_tab = false; };
+PreprintSendChoice ask_preprint_send_options(const fs::path& default_name)
+{
+    PreprintSendChoice out;
+    auto* config = get_app_config();
+    PrintHostSendDialog dlg(default_name, PrintHostPostUploadActions(PrintHostPostUploadAction::StartPrint), wxArrayString(), wxArrayString(),
+                            wxArrayString(), config->get_bool("open_device_tab_post_upload"));
+    dlg.init();
+    if (dlg.ShowModal() != wxID_OK)
+        return out;
+    config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
+    out.ok         = true;
+    out.name       = dlg.filename().generic_string();
+    out.start      = dlg.post_action() == PrintHostPostUploadAction::StartPrint;
+    out.switch_tab = dlg.switch_to_device_tab();
+    return out;
+}
+} // namespace
+// END preprint send dialog helper
+
 // Send-flow S5: the page-driven Snapmaker send. PrintHostSendDialog (modal, no webview in it) comes first like Snapmaker's, then the
-// pre-print page opens in a NON-modal dialog (no ShowModal: #84). No PrintHostJob and no print_host fallback (#117) on this route.
+// pre-print page opens in a NON-modal dialog (no ShowModal, no modal error box: #84). No PrintHostJob and no print_host fallback (#117).
+// BEGIN send_preprint
 void Plater::send_preprint(int plate_idx)
 {
     if (p->m_preprint && p->m_preprint->raise_if_live())
@@ -21475,17 +21492,25 @@ void Plater::send_preprint(int plate_idx)
     if (p->model.objects.empty())
         return;
     const int resolved_plate_idx = plate_idx == PLATE_CURRENT_IDX || plate_idx == PLATE_ALL_IDX ? get_partplate_list().get_curr_plate_index() : plate_idx;
+    PartPlate* plate = get_partplate_list().get_plate(resolved_plate_idx);
+    // Only a finished slice is offered; nothing here may start one under the snapshot.
+    if (!plate || !plate->is_slice_result_valid() || !plate->is_slice_result_ready_for_print()) {
+        notify_preprint("Slice the plate first.", true);
+        return;
+    }
     fs::path default_output_file;
     try {
+        // Applies pending settings so the file-name template expands; if that invalidates the slice the plate is re-checked right after.
         unsigned int state = p->update_restart_background_process(false, false);
         if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
         default_output_file = p->background_process.output_filepath_for_project(into_path(p->get_project_filename(".3mf")));
-    } catch (const Slic3r::PlaceholderParserError& ex) {
-        show_error(this, ex.what(), true);
-        return;
     } catch (const std::exception& ex) {
-        show_error(this, ex.what(), false);
+        notify_preprint(ex.what(), true);
+        return;
+    }
+    if (!plate->is_slice_result_valid() || !plate->is_slice_result_ready_for_print()) {
+        notify_preprint("The settings changed and the plate is being sliced again. Slice the plate first.", true);
         return;
     }
     default_output_file = fs::path(Slic3r::fold_utf8_to_ascii(default_output_file.string()));
@@ -21493,34 +21518,24 @@ void Plater::send_preprint(int plate_idx)
     auto* net   = wxGetApp().getAgent();
     auto  agent = net ? std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net->get_printer_agent()) : nullptr;
     auto  controller = create_preprint_controller(this, std::move(agent));
-    if (!controller) {
-        show_error(this, _L("The printer is not connected."), false);
+    if (!controller) { // no legacy fallback and no print_host here: say what is wrong
+        notify_preprint("The connected printer agent cannot take part in the print window. Reconnect the printer and try again.", true);
         return;
     }
 
-    auto* config = get_app_config();
-    PrintHostSendDialog dlg(default_output_file, PrintHostPostUploadActions(PrintHostPostUploadAction::StartPrint), wxArrayString(), wxArrayString(),
-                            wxArrayString(), config->get_bool("open_device_tab_post_upload"));
-    dlg.init();
-    if (dlg.ShowModal() != wxID_OK)
+    const PreprintSendChoice choice = ask_preprint_send_options(default_output_file); // destroyed again before any webview exists
+    if (!choice.ok)
         return;
-    config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
-
-    PartPlate* plate = get_partplate_list().get_plate(resolved_plate_idx);
-    if (!plate) {
-        show_error(this, _L("The plate could not be found."), false);
-        return;
-    }
     PreprintRequest req;
     std::string     error;
-    if (!collect_preprint_request(*plate, *wxGetApp().preset_bundle, dlg.filename().generic_string(),
-                                  dlg.post_action() == PrintHostPostUploadAction::StartPrint, dlg.switch_to_device_tab(), req, error)) {
-        show_error(this, wxString::FromUTF8(error), false);
+    if (!collect_preprint_request(*plate, *wxGetApp().preset_bundle, choice.name, choice.start, choice.switch_tab, req, error)) {
+        notify_preprint(error, true);
         return;
     }
     p->m_preprint = controller;
     controller->open(std::move(req));
 }
+// END send_preprint
 
 int Plater::send_gcode(int plate_idx, Export3mfProgressFn proFn)
 {

@@ -25,6 +25,9 @@ namespace Slic3r { namespace GUI {
 // producing the non-modal dialog under `parent`. Null when `agent` is null.
 std::shared_ptr<PreprintDialogController> create_preprint_controller(wxWindow* parent, std::shared_ptr<MoonrakerPrinterAgent> agent);
 
+// A non-modal plater notification (error or warning style); safe from any thread; nothing in the pre-print path uses a modal dialog.
+void notify_preprint(const std::string& message, bool error);
+
 // Fills a request from the plate (G-code path, filaments, colours, nozzle data, print time); false + error when the plate has no usable data.
 // `name`/`start`/`switch_tab` come from PrintHostSendDialog.
 bool collect_preprint_request(PartPlate& plate, const PresetBundle& bundle, const std::string& name, bool start, bool switch_tab,

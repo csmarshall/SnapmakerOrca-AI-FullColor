@@ -373,6 +373,9 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
         WKWebView * wkWebView = (WKWebView *) webView->GetNativeBackend();
         Slic3r::GUI::WKWebView_setTransparentBackground(wkWebView);
 #endif
+        // F1: the ref data (which carries m_script_handler_added) must exist BEFORE the handler is added: on Windows the add below runs
+        // synchronously inside this function, and with no ref data the flag was never recorded (IsScriptMessageHandlerAdded stayed false).
+        webView->SetRefData(new WebViewRef(webView));
         auto addScriptMessageHandler = [] (wxWebView *webView) {
             // Skip if SendAPIKey() already registered "wx"; a duplicate add throws an
             // uncatchable NSException on WKWebView, killing the app at startup.
@@ -410,7 +413,8 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": failed. Use fake web view.";
         webView = new FakeWebView;
     }
-    webView->SetRefData(new WebViewRef(webView));
+    if (!webView->GetRefData())
+        webView->SetRefData(new WebViewRef(webView));
     g_webviews.push_back(webView);
     return webView;
 }
