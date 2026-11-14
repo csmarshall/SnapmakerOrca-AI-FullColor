@@ -15,6 +15,10 @@ namespace Slic3r {
 //
 // One "SET_PRINT_PREFERENCE KEY=<key> VALUE=<v>" line per key, joined with "\n" and no trailing newline, in the page's map order:
 // bed_level, flow_calibrate, time_lapse_camera.
+// The preference keys the page may set, lower-case (the singular SET_PRINT_PREFERENCE form); each takes 0 or 1. The plural
+// SET_PRINT_PREFERENCES form upper-cases them. The send-flow gate (SnapmakerPreprintGate.hpp) validates page gcode against this table.
+constexpr const char* snapmaker_print_preference_keys[] = {"bed_level", "flow_calibrate", "time_lapse_camera"};
+
 inline std::string build_snapmaker_print_preference_script(bool flow_calibrate, bool time_lapse, bool bed_level)
 {
     auto line = [](const char* key, bool on) { return std::string("SET_PRINT_PREFERENCE KEY=") + key + " VALUE=" + (on ? "1" : "0"); };
