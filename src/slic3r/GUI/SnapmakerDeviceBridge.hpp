@@ -22,6 +22,8 @@
 
 namespace Slic3r { namespace GUI {
 
+class SnapmakerPreprintSession; // SnapmakerPreprintSession.hpp
+
 // The one file the Snapmaker pre-print page is about (send-flow port S2). The later dialog fills it from the current plate before it shows the
 // page and clears it when the dialog ends; sw_GetActiveFile and sw_GetFileFilamentMapping answer from it and from nothing else (no caller-
 // supplied path or file name is read, no printer is contacted). Thread-safe: the dialog may set/clear from any thread while the bridge reads on the UI thread.
@@ -210,6 +212,18 @@ public:
         std::shared_ptr<SnapmakerPreprintContext> preprint;
         // Makes the host show a tab (sw_SwitchTab). Returns false if it cannot.
         std::function<bool(SnapmakerTab)>                    switch_tab;
+        // The PRE-PRINT profile (send-flow S4b). A non-null session turns this bridge into the pre-print dialog's: it registers ONLY the
+        // core's built-in commands plus sw_GetActiveFile, sw_GetFileFilamentMapping, sw_SendGCodes, sw_MachinePrintStart, sw_StartLocalPrint,
+        // sw_SetFilamentMappingComplete and sw_FinishFilamentMapping, each answered by the session (the Device-tab commands, uploads, deletes
+        // and controls are not registered). `preprint` (the context) should be the session's. `preprint_epoch` is what session->open() returned;
+        // a reopen makes it stale and every request is then refused. Leave the Device-tab members above (query_state, control, ...) null.
+        // The Device tab's bridge never sets these: its registered set is unchanged (pinned by tests and snapmaker_bridge_commands.txt).
+        std::shared_ptr<SnapmakerPreprintSession>            preprint_session;
+        std::uint64_t                                        preprint_epoch = 0;
+        // Runs the session's BLOCKING printer calls: `work` off the UI thread, then `on_ui` (exactly once) on the UI thread. Null = both inline.
+        std::function<void(std::function<void()> work, std::function<void()> on_ui)> preprint_run;
+        // The page finished (sw_SetFilamentMappingComplete / sw_FinishFilamentMapping); `started` = the print had been started. UI thread.
+        std::function<void(bool started)>                    preprint_done;
     };
 
     explicit SnapmakerDeviceBridge(Options options);
@@ -245,6 +259,7 @@ private:
     // Throttled machine-state pushes: every kStatePushEveryTicks ticks (tick() is about 1 s) while someone subscribes.
     static constexpr int kStatePushEveryTicks = 3;
     void register_commands();
+    void register_preprint_commands(); // the pre-print profile (Options::preprint_session)
     // The objects a request names, split by the allow-list. `requested` is false when it named none.
     struct Selection { std::vector<std::string> allowed, rejected; bool requested = false; };
     Selection select_objects(const nlohmann::json& params) const;

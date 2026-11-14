@@ -289,6 +289,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/SSWCP.hpp
     GUI/SnapmakerDeviceBridge.cpp
     GUI/SnapmakerDeviceBridge.hpp
+    GUI/SnapmakerPreprintSession.hpp
     GUI/SnapmakerDevicePage.cpp
     GUI/SnapmakerDevicePage.hpp
     GUI/RemoteAPI/RemoteAPIConfig.cpp

@@ -34,6 +34,12 @@ add_test(NAME snapmaker_bridge_commands_classified
         -DBUNDLE_DIR=${CMAKE_SOURCE_DIR}/resources/web/flutter_web
         -DCOMMANDS=${CMAKE_SOURCE_DIR}/resources/web/snapmaker_bridge_commands.txt
         -P ${CMAKE_SOURCE_DIR}/scripts/verify_bridge_commands.cmake)
+# The pre-print bridge profile (send-flow S4b) has its own list, held to the same bundle gate.
+add_test(NAME snapmaker_preprint_bridge_commands_classified
+    COMMAND ${CMAKE_COMMAND}
+        -DBUNDLE_DIR=${CMAKE_SOURCE_DIR}/resources/web/flutter_web
+        -DCOMMANDS=${CMAKE_SOURCE_DIR}/resources/web/snapmaker_preprint_bridge_commands.txt
+        -P ${CMAKE_SOURCE_DIR}/scripts/verify_bridge_commands.cmake)
 # ... and the gate must fail on an incomplete list (a new, unclassified bundle command).
 add_test(NAME snapmaker_bridge_commands_gate_fails_on_unclassified
     COMMAND ${CMAKE_COMMAND}

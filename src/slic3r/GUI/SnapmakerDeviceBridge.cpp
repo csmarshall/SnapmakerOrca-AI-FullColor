@@ -1,4 +1,5 @@
 #include "SnapmakerDeviceBridge.hpp"
+#include "SnapmakerPreprintSession.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -784,8 +785,68 @@ bool SnapmakerPreprintContext::filament_mapping(nlohmann::json& out) const
     return m_active;
 }
 
+void SnapmakerDeviceBridge::register_preprint_commands()
+{
+    auto session = m_options.preprint_session;
+    const std::uint64_t epoch = m_options.preprint_epoch;
+    auto reply = [](SSWCP_Instance& i, const SnapmakerPreprintReply& r) {
+        if (r.ok) i.reply_ok(r.data);
+        else i.handle_general_fail(r.code, r.message);
+    };
+    // Local, quick: answered inline.
+    m_sswcp.register_command(
+        "sw_GetActiveFile", [session, epoch, reply, this](SSWCP_Instance& i) { reply(i, session->active_file(epoch, m_options.http_host)); }, false);
+    m_sswcp.register_command(
+        "sw_GetFileFilamentMapping", [session, epoch, reply](SSWCP_Instance& i) { reply(i, session->filament_mapping(epoch)); }, false);
+    // Printer-facing: the session's calls block, so they go through preprint_run; the reply is dropped when the bridge is gone.
+    auto run = [this, reply](SSWCP_Instance& i, std::function<SnapmakerPreprintReply()> work) {
+        auto result = std::make_shared<SnapmakerPreprintReply>();
+        auto weak   = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+        auto alive  = m_alive;
+        auto job    = [result, work = std::move(work)] { *result = work(); };
+        auto done   = [result, weak, alive, reply] {
+            if (!*alive) return;
+            if (auto inst = weak.lock()) reply(*inst, *result);
+        };
+        if (m_options.preprint_run) m_options.preprint_run(std::move(job), std::move(done));
+        else { job(); done(); }
+    };
+    m_sswcp.register_command(
+        "sw_SendGCodes",
+        [session, epoch, run](SSWCP_Instance& i) {
+            const nlohmann::json params = i.params();
+            run(i, [session, epoch, params] { return session->configure(epoch, params); });
+        },
+        false);
+    m_sswcp.register_command(
+        "sw_MachinePrintStart",
+        [session, epoch, run](SSWCP_Instance& i) {
+            const nlohmann::json params = i.params();
+            run(i, [session, epoch, params] { return session->start(epoch, params); });
+        },
+        false);
+    // Answered -1/"failure" so the page falls back to the validated script + printer.print.start (a recorded difference from Snapmaker).
+    m_sswcp.register_command(
+        "sw_StartLocalPrint", [reply](SSWCP_Instance& i) { reply(i, SnapmakerPreprintSession::start_local_print()); }, false);
+    auto finish = [this, session](SSWCP_Instance& i) {
+        const nlohmann::json& p = i.params();
+        if (i.cmd() == "sw_FinishFilamentMapping" && p.is_object() && p.contains("event") && p["event"] == 1)
+            BOOST_LOG_TRIVIAL(info) << "SnapmakerDeviceBridge: pre-print page asked for the filament regroup dialog (event 1): ignored";
+        const bool started = session->finish();
+        i.reply_ok();
+        if (m_options.preprint_done) m_options.preprint_done(started);
+    };
+    m_sswcp.register_command("sw_SetFilamentMappingComplete", finish, false);
+    // event 1 (CustomFlowRegroup) would open Snapmaker's filament-group dialog: ignored; the page's finish just closes the context.
+    m_sswcp.register_command("sw_FinishFilamentMapping", finish, false);
+}
+
 void SnapmakerDeviceBridge::register_commands()
 {
+    if (m_options.preprint_session) {
+        register_preprint_commands();
+        return;
+    }
     // --- the connected machine ---
     // The page keys a machine by the sn of the record it first receives and connects it under that key. If the sn changes
     // afterwards (dev_id replaced by the machine's serial) it sees a new, never-connected device and shows "Unconnected" (#77).
