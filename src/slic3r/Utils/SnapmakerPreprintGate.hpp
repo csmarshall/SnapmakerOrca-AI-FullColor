@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -328,6 +329,15 @@ public:
         if (m_state != SnapmakerPreprintState::Idle) m_state = SnapmakerPreprintState::Closed;
         ++m_op;
         m_in_flight = m_start_in_flight = false;
+    }
+    // The printer pinned at open(), only while `epoch` is the live one (Open/Configured/Started); nullopt otherwise. Pure: contacts nothing.
+    std::optional<SnapmakerPreprintPin> pinned_printer(std::uint64_t epoch) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const bool live = epoch != 0 && epoch == m_epoch &&
+                          (m_state == SnapmakerPreprintState::Open || m_state == SnapmakerPreprintState::Configured || m_state == SnapmakerPreprintState::Started);
+        if (!live) return std::nullopt;
+        return m_open.printer;
     }
     SnapmakerPreprintState state() const
     {

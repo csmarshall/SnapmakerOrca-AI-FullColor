@@ -388,6 +388,21 @@ SnapmakerDeviceBridge::SnapmakerDeviceBridge(Options options) : m_options(std::m
 std::vector<SnapmakerDeviceInfo> SnapmakerDeviceBridge::current_devices() const
 {
     std::vector<SnapmakerDeviceInfo> devices = m_options.devices ? m_options.devices() : std::vector<SnapmakerDeviceInfo>{};
+    // Pre-print profile (#124): the only machine is the one the session pinned, and only while this bridge's epoch is live. Built from
+    // what the app already knows; no scan, no printer contact, no cloud. Stale/closed/never-opened -> none (fail closed).
+    if (m_options.preprint_session && !m_options.devices) {
+        if (const auto pin = m_options.preprint_session->pinned_printer(m_options.preprint_epoch)) {
+            SnapmakerDeviceInfo d;
+            d.dev_id    = pin->host;
+            d.sn        = pin->serial;
+            d.name      = pin->host;
+            d.ip        = pin->host;
+            d.model     = m_options.preprint_session->context_machine_model();
+            d.online    = true;
+            d.connected = true;
+            devices.push_back(std::move(d));
+        }
+    }
     for (auto& d : devices)
         if (d.sn.empty())
             if (auto it = m_serials.find(d.dev_id); it != m_serials.end())

@@ -684,6 +684,62 @@ TEST_CASE("the pre-print profile registers exactly the REGISTERED lines of snapm
     CHECK(device.size() == 54);
 }
 
+// ---- #124: sw_GetLocalDevices answers the one pinned printer, and nothing else ----
+
+TEST_CASE("pre-print sw_GetLocalDevices returns only the pinned printer, from what the app already knows", "[SSWCP][preprint_profile][local_devices]")
+{
+    Profile h(true, false);
+    h.printer->pin = SnapmakerPreprintPin{"192.0.2.10", "7125", "SNPLACEHOLDER"};
+    REQUIRE(h.open(true) != 0);
+    h.bridge = h.make();
+    h.printer->forget();
+
+    const json r = h.call("sw_GetLocalDevices");
+    REQUIRE(is_ok(r));
+    REQUIRE(r["data"].is_array());
+    REQUIRE(r["data"].size() == 1);
+    const json& d = r["data"][0];
+    CHECK(d["sn"] == "SNPLACEHOLDER");
+    CHECK(d["dev_id"] == "192.0.2.10");
+    CHECK(d["ip"] == "192.0.2.10");
+    CHECK(d["link_mode"] == "lan");
+    CHECK(d["machine_type"] == "Snapmaker U1");
+    CHECK(d["connected"] == true);
+    CHECK(d["online"] == true);
+    CHECK(d.contains("name"));
+    CHECK(d.contains("clientId"));
+    CHECK(d.contains("port"));
+    CHECK(d["error"] == "");
+    CHECK(h.printer->calls.empty()); // answered from the pinned identity: the printer was not contacted
+}
+
+TEST_CASE("pre-print sw_GetLocalDevices is empty when no printer is pinned, the bridge is stale or the context is closed", "[SSWCP][preprint_profile][local_devices]")
+{
+    SECTION("stale epoch") {
+        Profile h;
+        auto stale = h.make(h.epoch + 1);
+        const json r = h.call("sw_GetLocalDevices", json::object(), stale.get());
+        CHECK(is_ok(r));
+        CHECK(r["data"].is_array());
+        CHECK(r["data"].empty());
+    }
+    SECTION("closed context") {
+        Profile h;
+        h.session->finish(h.epoch);
+        const json r = h.call("sw_GetLocalDevices");
+        CHECK(r["data"].is_array());
+        CHECK(r["data"].empty());
+    }
+    SECTION("never opened") {
+        Profile h(true, false);
+        h.session->finish(h.epoch);
+        h.bridge = h.make(0);
+        const json r = h.call("sw_GetLocalDevices");
+        CHECK(r["data"].is_array());
+        CHECK(r["data"].empty());
+    }
+}
+
 // ---- review addendum (F2, F3, F4, F7, F8) ----
 
 namespace {

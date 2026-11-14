@@ -104,6 +104,16 @@ public:
         return m_epoch;
     }
     SnapmakerPreprintState state() const { return m_gate.state(); }
+    // The pinned printer while `epoch` is live (the one printer the send flow targets); nullopt otherwise.
+    std::optional<SnapmakerPreprintPin> pinned_printer(std::uint64_t epoch) const { return m_gate.pinned_printer(epoch); }
+    // The context's machine model ("" if none), for the local-device record. No printer contact.
+    std::string context_machine_model() const
+    {
+        nlohmann::json out;
+        if (m_context && m_context->filament_mapping(out) && out.is_object() && out.contains("machine_model") && out["machine_model"].is_string())
+            return out["machine_model"].get<std::string>();
+        return {};
+    }
 
     // sw_GetActiveFile: the context's file name + metadata whitelist plus the capability URL (host + path), size and base64 sha256.
     // No filesystem path. Fails once closed, reopened or never opened.
