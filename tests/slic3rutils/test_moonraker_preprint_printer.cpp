@@ -471,6 +471,8 @@ TEST_CASE("preprint adapter: end to end through SnapmakerPreprintSession and the
     bo.preprint_epoch   = epoch;
     bo.run_script       = [&](const std::string& js) { sent.push_back(js); };
     bo.preprint_done    = [&](bool started) { done.push_back(started); };
+    std::vector<std::function<void()>> posted;
+    bo.preprint_post    = [&](std::function<void()> fn) { posted.push_back(std::move(fn)); };
     bo.preprint_run     = [](std::function<void()> work, std::function<void()> on_ui) { work(); on_ui(); };
     SnapmakerDeviceBridge bridge(std::move(bo));
     const std::string page = "http://127.0.0.1:5000/web/flutter_web/index.html";
@@ -508,6 +510,8 @@ TEST_CASE("preprint adapter: end to end through SnapmakerPreprintSession and the
                                 "POST /printer/gcode/script " + json{{"script", "SDCARD_PRINT_FILE FILENAME=\"plate_1.gcode\""}}.dump()});
 
     CHECK(call("sw_SetFilamentMappingComplete", {{"status", "success"}, {"message", "ok"}})["code"] == 200);
+    CHECK(done.empty()); // deferred out of the handler
+    for (auto& f : posted) f();
     CHECK(done == std::vector<bool>{true});
 }
 
@@ -627,7 +631,7 @@ TEST_CASE("preprint adapter: F6 a closed, stale or malformed request causes no p
     CHECK_FALSE(session->configure(epoch, {{"script", "G28"}}).ok);                // not an accepted script
     CHECK_FALSE(session->configure(epoch + 1, {{"script", good}}).ok);             // stale epoch
     CHECK_FALSE(session->start(epoch + 1, {{"filename", "plate_1.gcode"}}).ok);
-    session->finish();
+    session->finish(epoch);
     CHECK_FALSE(session->configure(epoch, {{"script", good}}).ok);                 // closed
     CHECK_FALSE(session->start(epoch, {{"filename", "plate_1.gcode"}}).ok);
     CHECK(r.fake.requests().empty());

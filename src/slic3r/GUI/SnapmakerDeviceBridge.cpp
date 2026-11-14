@@ -828,17 +828,39 @@ void SnapmakerDeviceBridge::register_preprint_commands()
     // Answered -1/"failure" so the page falls back to the validated script + printer.print.start (a recorded difference from Snapmaker).
     m_sswcp.register_command(
         "sw_StartLocalPrint", [reply](SSWCP_Instance& i) { reply(i, SnapmakerPreprintSession::start_local_print()); }, false);
-    auto finish = [this, session](SSWCP_Instance& i) {
+    auto finish = [this](SSWCP_Instance& i) {
         const nlohmann::json& p = i.params();
         if (i.cmd() == "sw_FinishFilamentMapping" && p.is_object() && p.contains("event") && p["event"] == 1)
             BOOST_LOG_TRIVIAL(info) << "SnapmakerDeviceBridge: pre-print page asked for the filament regroup dialog (event 1): ignored";
-        const bool started = session->finish();
+        preprint_finish(/*from_handler=*/true);
         i.reply_ok();
-        if (m_options.preprint_done) m_options.preprint_done(started);
     };
     m_sswcp.register_command("sw_SetFilamentMappingComplete", finish, false);
     // event 1 (CustomFlowRegroup) would open Snapmaker's filament-group dialog: ignored; the page's finish just closes the context.
     m_sswcp.register_command("sw_FinishFilamentMapping", finish, false);
+}
+
+void SnapmakerDeviceBridge::fire_preprint_done(bool started)
+{
+    if (m_preprint_done_fired) return; // once per bridge, and never re-entered from inside the callback
+    m_preprint_done_fired = true;
+    const auto done = m_options.preprint_done; // a copy: the callback may destroy this bridge, so nothing here (or in the callers, after) touches a member
+    if (done) done(started);
+}
+
+// Closes the session for THIS bridge's epoch (a stale bridge does nothing and reports nothing). From a handler the report is deferred (F3).
+void SnapmakerDeviceBridge::preprint_finish(bool from_handler)
+{
+    if (!m_options.preprint_session) return;
+    const std::optional<bool> started = m_options.preprint_session->finish(m_options.preprint_epoch);
+    if (!started) return;
+    (void) from_handler; // only the handler path calls this: the report is always deferred (F3)
+    auto alive = m_alive;
+    auto fn    = [this, alive, s = *started] {
+        if (*alive) fire_preprint_done(s);
+    };
+    if (m_options.preprint_post) m_options.preprint_post(std::move(fn));
+    else m_preprint_queue.push_back(std::move(fn));
 }
 
 void SnapmakerDeviceBridge::register_commands()
@@ -1269,6 +1291,12 @@ void SnapmakerDeviceBridge::set_active(bool active)
 
 void SnapmakerDeviceBridge::tick()
 {
+    if (!m_preprint_queue.empty()) { // F3: deferred preprint_done (no preprint_post hook). The callback may destroy this bridge: touch nothing after.
+        auto queued = std::move(m_preprint_queue);
+        m_preprint_queue.clear();
+        for (auto& fn : queued) fn();
+        return;
+    }
     if (m_closed)
         return;
     ++m_ticks;
@@ -1312,12 +1340,25 @@ void SnapmakerDeviceBridge::stop_camera_if_running()
     m_options.camera_monitor(false, params, [](bool, nlohmann::json) {}); // best effort, nobody waits for the reply
 }
 
+SnapmakerDeviceBridge::~SnapmakerDeviceBridge()
+{
+    stop_camera_if_running();
+    // F8: close the session (voids in-flight tickets) and report the real started state, once. Last: the callback may re-enter.
+    std::optional<bool> started;
+    if (!m_closed && m_options.preprint_session) started = m_options.preprint_session->finish(m_options.preprint_epoch);
+    *m_alive = false;
+    if (started) fire_preprint_done(*started);
+}
+
 void SnapmakerDeviceBridge::shutdown()
 {
     stop_camera_if_running();
+    std::optional<bool> started; // F8: close the session, report the real started state, once
+    if (!m_closed && m_options.preprint_session) started = m_options.preprint_session->finish(m_options.preprint_epoch);
     m_closed = true;
     *m_alive = false;
     m_sswcp.drop_all_subscriptions();
+    if (started) fire_preprint_done(*started); // last: the host may destroy this bridge from the callback
 }
 
 }} // namespace Slic3r::GUI

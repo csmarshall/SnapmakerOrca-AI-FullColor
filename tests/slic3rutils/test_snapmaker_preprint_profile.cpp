@@ -75,6 +75,8 @@ struct Profile
     std::shared_ptr<SnapmakerPreprintSession> session = std::make_shared<SnapmakerPreprintSession>(ctx, printer);
     std::vector<std::string>                  sent;
     std::vector<bool>                         done_calls;
+    std::vector<std::function<void()>>        posted; // F3: the fixture's "CallAfter": preprint_done is only ever queued here by a handler
+    void pump() { auto q = std::move(posted); posted.clear(); for (auto& f : q) f(); }
     std::vector<std::pair<std::function<void()>, std::function<void()>>> held;
     bool                                      hold = false;
     std::uint64_t                             epoch = 0;
@@ -113,6 +115,7 @@ struct Profile
         o.preprint_epoch   = e == ~std::uint64_t(0) ? epoch : e;
         o.run_script       = [this](const std::string& js) { sent.push_back(js); };
         o.preprint_done    = [this](bool started) { done_calls.push_back(started); };
+        o.preprint_post    = [this](std::function<void()> fn) { posted.push_back(std::move(fn)); };
         o.preprint_run     = [this](std::function<void()> work, std::function<void()> on_ui) {
             if (hold) held.emplace_back(std::move(work), std::move(on_ui));
             else { work(); on_ui(); }
@@ -172,6 +175,8 @@ TEST_CASE("pre-print profile: happy path in order, one send and one start reach 
     CHECK(h.printer->starts == 1);
 
     REQUIRE(is_ok(h.call("sw_SetFilamentMappingComplete", {{"status", "success"}, {"message", "ok"}})));
+    CHECK(h.done_calls.empty()); // F3: nothing fired inside the handler
+    h.pump();
     CHECK(h.done_calls == std::vector<bool>{true});
     CHECK(h.session->state() == SnapmakerPreprintState::Closed);
     CHECK(h.printer->sends == 1);
@@ -485,6 +490,8 @@ TEST_CASE("pre-print profile: SetFilamentMappingComplete and FinishFilamentMappi
         Profile h;
         REQUIRE(is_ok(h.gcodes(plural())));
         REQUIRE(is_ok(h.call(cmd, {{"event", 1}}))); // event 1 (CustomFlowRegroup) is ignored, the context still closes
+        CHECK(h.done_calls.empty()); // F3: deferred
+        h.pump();
         CHECK(h.done_calls == std::vector<bool>{false}); // closed before the start
         CHECK(h.session->state() == SnapmakerPreprintState::Closed);
         CHECK_FALSE(h.ctx->active());
@@ -675,4 +682,235 @@ TEST_CASE("the pre-print profile registers exactly the REGISTERED lines of snapm
     const auto device = registered_in("snapmaker_bridge_commands.txt", &device_denied);
     for (const char* n : {"sw_MachinePrintStart", "sw_StartLocalPrint", "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping"}) CHECK(device_denied.count(n) == 1);
     CHECK(device.size() == 54);
+}
+
+// ---- review addendum (F2, F3, F4, F7, F8) ----
+
+namespace {
+struct ThrowingPrinter : FakePrinter
+{
+    std::set<std::string> throws;
+    void maybe(const char* k) { if (throws.count(k)) throw std::runtime_error(k); }
+    SnapmakerPreprintPin connected_pin() override { maybe("pin"); return FakePrinter::connected_pin(); }
+    std::optional<std::string> print_state() override { maybe("state"); return FakePrinter::print_state(); }
+    std::optional<std::uint64_t> remote_file_size(const std::string& f) override { maybe("size"); return FakePrinter::remote_file_size(f); }
+    Known command_known(const std::string& c) override { maybe("known"); return FakePrinter::command_known(c); }
+    bool send_gcode(const std::string& s) override { maybe("send"); return FakePrinter::send_gcode(s); }
+    bool start_print(const std::string& f) override { maybe("start"); return FakePrinter::start_print(f); }
+};
+} // namespace
+
+TEST_CASE("pre-print session: a throwing printer refuses and never starts (every catch)", "[SSWCP][preprint_profile]")
+{
+    for (const char* where : {"pin", "state", "known", "send"}) {
+        CAPTURE(where);
+        auto tp = std::make_shared<ThrowingPrinter>();
+        auto ctx = std::make_shared<SnapmakerPreprintContext>();
+        SnapmakerPreprintSession session(ctx, tp);
+        std::string err;
+        REQUIRE(ctx->set(plate(), {}, err));
+        SnapmakerPreprintSession::Open o;
+        o.gate = {tp->pin, kFile, {0, 1}, 4, kSize, true};
+        o.capability_path = kCap;
+        o.sha256_hex = kSha;
+        const auto e = session.open(o, err);
+        REQUIRE(e != 0);
+        tp->throws = {where};
+        CHECK_FALSE(session.configure(e, {{"script", plural()}}).ok);
+        CHECK(tp->sends == 0);
+        tp->throws.clear();
+        CHECK(session.configure(e, {{"script", plural()}}).ok); // the failed attempt left the gate usable
+    }
+    for (const char* where : {"pin", "state", "size", "start"}) {
+        CAPTURE(where);
+        auto tp = std::make_shared<ThrowingPrinter>();
+        auto ctx = std::make_shared<SnapmakerPreprintContext>();
+        SnapmakerPreprintSession session(ctx, tp);
+        std::string err;
+        REQUIRE(ctx->set(plate(), {}, err));
+        SnapmakerPreprintSession::Open o;
+        o.gate = {tp->pin, kFile, {0, 1}, 4, kSize, false};
+        o.capability_path = kCap;
+        o.sha256_hex = kSha;
+        const auto e = session.open(o, err);
+        REQUIRE(e != 0);
+        tp->throws = {where};
+        CHECK_FALSE(session.start(e, {{"filename", kFile}}).ok);
+        CHECK(session.state() != SnapmakerPreprintState::Started);
+        tp->throws.clear();
+        CHECK(session.start(e, {{"filename", kFile}}).ok);
+    }
+}
+
+TEST_CASE("pre-print session: forwarded but closed meanwhile is success with context_closed, and the start is still reported", "[SSWCP][preprint_profile]")
+{
+    SECTION("start")
+    {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        h.printer->in_start = [&] { h.session->finish(h.epoch); }; // the page finishes while the start is on the wire
+        const json r = h.start();
+        CHECK(is_ok(r));
+        CHECK(r["data"]["context_closed"] == true);
+        CHECK(h.printer->starts == 1);
+        CHECK(h.session->started_forwarded());
+    }
+    SECTION("script")
+    {
+        Profile h;
+        h.printer->in_send = [&] { h.session->finish(h.epoch); };
+        const json r = h.gcodes(plural());
+        CHECK(is_ok(r));
+        CHECK(r["data"]["context_closed"] == true);
+    }
+    SECTION("finish during an in-flight start reports started")
+    {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        std::optional<bool> during;
+        h.printer->in_start = [&] { during = h.session->finish(h.epoch); };
+        h.start();
+        REQUIRE(during.has_value());
+        CHECK(*during == true); // a start is on the wire: not "not started"
+    }
+}
+
+TEST_CASE("pre-print session: F2 a stale bridge closes nothing and reports nothing", "[SSWCP][preprint_profile]")
+{
+    Profile h;
+    const std::uint64_t old_epoch = h.epoch;
+    auto old_bridge = h.make(old_epoch);
+    REQUIRE(h.open() != 0); // reopen: old_epoch is stale
+    CHECK(h.epoch != old_epoch);
+    CHECK_FALSE(h.session->finish(old_epoch).has_value());
+    CHECK(h.session->state() == SnapmakerPreprintState::Open);
+    CHECK(h.ctx->active());
+    h.call("sw_SetFilamentMappingComplete", {}, old_bridge.get());
+    h.pump();
+    CHECK(h.done_calls.empty());
+    CHECK(h.session->state() == SnapmakerPreprintState::Open);
+    old_bridge->shutdown();
+    old_bridge.reset();
+    CHECK(h.done_calls.empty());
+    CHECK(h.session->state() == SnapmakerPreprintState::Open); // the new epoch's gate is untouched
+}
+
+TEST_CASE("pre-print session: F4 a bad checksum or capability path is refused at open", "[SSWCP][preprint_profile]")
+{
+    for (int mode = 0; mode < 8; ++mode) {
+        Profile h;
+        std::string err;
+        SnapmakerPreprintSession::Open o;
+        o.gate = {h.printer->pin, kFile, {0, 1}, 4, kSize, true};
+        o.capability_path = kCap;
+        o.sha256_hex = kSha;
+        switch (mode) {
+        case 0: o.sha256_hex = kSha.substr(1); break;
+        case 1: o.sha256_hex = kSha + "0"; break;
+        case 2: o.sha256_hex = std::string(64, 'g'); break;
+        case 3: o.sha256_hex.clear(); break;
+        case 4: o.capability_path.clear(); break;
+        case 5: o.capability_path = "/other/path/x.gcode"; break;
+        case 6: o.capability_path = "/web/flutter_web/cap/"; break;
+        default: o.capability_path = "/web/flutter_web/cap/T/a\"b.gcode"; break;
+        }
+        INFO("mode " << mode);
+        CHECK(h.session->open(o, err) == 0);
+    }
+}
+
+TEST_CASE("pre-print session: F7 a dropped preference command is said in the reply", "[SSWCP][preprint_profile]")
+{
+    Profile h;
+    h.printer->known["SET_PRINT_PREFERENCES"] = Known::No;
+    const json r = h.gcodes(plural());
+    REQUIRE(is_ok(r));
+    CHECK(r["data"]["dropped_preferences"] == true);
+    Profile g;
+    const json r2 = g.gcodes(plural());
+    REQUIRE(is_ok(r2));
+    CHECK_FALSE(r2["data"].contains("dropped_preferences"));
+}
+
+TEST_CASE("pre-print bridge: F3 preprint_done is deferred and re-entrancy safe; F8 shutdown and destructor report once", "[SSWCP][preprint_profile]")
+{
+    SECTION("deferred out of the handler; the callback destroys the bridge")
+    {
+        Profile h;
+        h.bridge->on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_SetFilamentMappingComplete"}, {"params", json::object()}}}}.dump());
+        CHECK(h.done_calls.empty());
+        REQUIRE(h.posted.size() == 1);
+        // the host destroys the bridge from inside preprint_done
+        int fired = 0;
+        auto b = std::move(h.bridge);
+        SnapmakerDeviceBridge* raw = b.get();
+        (void) raw;
+        h.pump();
+        CHECK(h.done_calls == std::vector<bool>{false});
+        b.reset(); // the destructor must not fire a second time
+        CHECK(h.done_calls.size() == 1);
+        (void) fired;
+    }
+    SECTION("callback re-enters shutdown()")
+    {
+        Profile h(true, false);
+        SnapmakerDeviceBridge* bp = nullptr;
+        int calls = 0;
+        SnapmakerDeviceBridge::Options o;
+        o.port = 5000; o.http_host = "http://127.0.0.1:5000"; o.preprint = h.ctx; o.preprint_session = h.session; o.preprint_epoch = h.epoch;
+        o.run_script = [&](const std::string&) {};
+        o.preprint_done = [&](bool) { ++calls; if (bp) bp->shutdown(); };
+        auto b = std::make_unique<SnapmakerDeviceBridge>(std::move(o));
+        bp = b.get();
+        b->shutdown();
+        CHECK(calls == 1);
+        b.reset();
+        CHECK(calls == 1);
+    }
+    SECTION("destructor closes the session and reports the real started state (F8)")
+    {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        REQUIRE(is_ok(h.start()));
+        h.bridge.reset();
+        CHECK(h.done_calls == std::vector<bool>{true});
+        CHECK(h.session->state() == SnapmakerPreprintState::Closed);
+    }
+    SECTION("shutdown() closes the session and voids an in-flight ticket (F8)")
+    {
+        Profile h;
+        h.printer->in_send = [&] { h.bridge->shutdown(); };
+        h.bridge->on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_SendGCodes"}, {"params", {{"script", plural()}}}}}}.dump());
+        CHECK(h.session->state() == SnapmakerPreprintState::Closed);
+        CHECK(h.done_calls == std::vector<bool>{false});
+        CHECK(h.sent.empty()); // the bridge is shut down: the late reply is dropped
+    }
+    SECTION("without a post hook the report waits for tick()")
+    {
+        Profile h(true, false);
+        SnapmakerDeviceBridge::Options o;
+        int calls = 0;
+        o.port = 5000; o.http_host = "http://127.0.0.1:5000"; o.preprint = h.ctx; o.preprint_session = h.session; o.preprint_epoch = h.epoch;
+        o.run_script = [&](const std::string&) {};
+        o.preprint_done = [&](bool) { ++calls; };
+        SnapmakerDeviceBridge b(std::move(o));
+        b.on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_FinishFilamentMapping"}, {"params", json::object()}}}}.dump());
+        CHECK(calls == 0);
+        b.tick();
+        CHECK(calls == 1);
+    }
+}
+
+TEST_CASE("pre-print bridge: the alive flag drops a reply when the bridge was shut down but its instance is still held", "[SSWCP][preprint_profile]")
+{
+    Profile h;
+    h.hold = true;
+    h.bridge->on_script_message(h.good, json{{"header", {{"id", 1}}}, {"payload", {{"cmd", "sw_SendGCodes"}, {"params", {{"script", plural()}}}}}}.dump());
+    REQUIRE(h.held.size() == 1);
+    auto jobs = std::move(h.held);
+    h.held.clear();
+    jobs[0].first();
+    h.bridge->shutdown(); // the bridge object (and so m_sswcp and the instance) still exist; only the alive flag is false
+    jobs[0].second();
+    CHECK(h.sent.empty());
 }

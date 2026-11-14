@@ -224,12 +224,16 @@ public:
         std::function<void(std::function<void()> work, std::function<void()> on_ui)> preprint_run;
         // The page finished (sw_SetFilamentMappingComplete / sw_FinishFilamentMapping); `started` = the print had been started. UI thread.
         std::function<void(bool started)>                    preprint_done;
+        // F3: runs `fn` later on the UI thread (wx CallAfter). preprint_done is NEVER called from inside the SSWCP handler: the host may destroy
+        // the dialog and this bridge from it. Null = fn waits in a queue that tick() drains. preprint_done fires at most once per bridge,
+        // also from shutdown() and the destructor (F8: they close the session and pass its real started state), and never for a stale epoch.
+        std::function<void(std::function<void()> fn)>        preprint_post;
     };
 
     explicit SnapmakerDeviceBridge(Options options);
     SnapmakerDeviceBridge(const SnapmakerDeviceBridge&)            = delete;
     SnapmakerDeviceBridge& operator=(const SnapmakerDeviceBridge&) = delete;
-    ~SnapmakerDeviceBridge() { stop_camera_if_running(); *m_alive = false; }
+    ~SnapmakerDeviceBridge();
 
     // Returns false (and does nothing) after shutdown() or when `page_url` is not the page's own origin.
     bool on_script_message(const std::string& page_url, const std::string& message);
@@ -260,6 +264,10 @@ private:
     static constexpr int kStatePushEveryTicks = 3;
     void register_commands();
     void register_preprint_commands(); // the pre-print profile (Options::preprint_session)
+    void preprint_finish(bool from_handler); // closes the session for this bridge's epoch; fires preprint_done once
+    void fire_preprint_done(bool started);
+    std::vector<std::function<void()>> m_preprint_queue; // preprint_post == null: drained by tick()
+    bool m_preprint_done_fired = false;
     // The objects a request names, split by the allow-list. `requested` is false when it named none.
     struct Selection { std::vector<std::string> allowed, rejected; bool requested = false; };
     Selection select_objects(const nlohmann::json& params) const;

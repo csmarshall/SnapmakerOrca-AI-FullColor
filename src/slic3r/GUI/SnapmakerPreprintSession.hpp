@@ -14,6 +14,9 @@
 #include <optional>
 #include <string>
 
+#include <boost/log/trivial.hpp>
+
+#include "PreprintCapabilityStore.hpp"
 #include "SnapmakerDeviceBridge.hpp"
 #include "slic3r/Utils/SnapmakerPreprintGate.hpp"
 #include "slic3r/Utils/SnapmakerPreprintPrinter.hpp" // the printer-facing interface (implemented by MoonrakerPreprintPrinter)
@@ -79,12 +82,19 @@ public:
             error = "the remote file name is not usable";
             return 0;
         }
+        if (!capability_path_ok(o.capability_path) || !sha256_hex_ok(o.sha256_hex)) { // F4
+            m_gate.close();
+            set_epoch(0);
+            error = "the capability path or the checksum is not usable";
+            return 0;
+        }
         const std::uint64_t epoch = m_gate.open(o.gate, error);
         std::lock_guard<std::mutex> lock(m_mutex);
         m_epoch = epoch;
         m_capability_path = epoch ? std::move(o.capability_path) : std::string();
         m_sha256_hex      = epoch ? std::move(o.sha256_hex) : std::string();
         m_size            = epoch ? o.gate.snapshot_size : 0;
+        m_started_forwarded = false;
         return epoch;
     }
     std::uint64_t epoch() const
@@ -140,17 +150,21 @@ public:
         if (!r.allowed()) return SnapmakerPreprintReply::fail(std::string("refused: ") + snapmaker_preprint_decision_name(r.decision));
 
         bool sent = false;
+        bool dropped = false;
         std::string why = "the printer did not accept the script";
         try {
             std::string to_send = script;
-            if (probe_script(script, parsed, to_send, why)) sent = m_printer->send_gcode(to_send);
+            if (probe_script(script, parsed, to_send, why, dropped)) sent = m_printer->send_gcode(to_send);
         } catch (...) {
             sent = false;
         }
         const bool applied = m_gate.confirm(r.ticket, sent);
         if (!sent) return SnapmakerPreprintReply::fail("refused: " + why);
-        if (!applied) return SnapmakerPreprintReply::fail("refused: pre-print context closed");
-        return SnapmakerPreprintReply::success();
+        // F2: the printer HAS the script; a context closed meanwhile does not undo that, so this is not "refused".
+        nlohmann::json data = nlohmann::json::object();
+        if (dropped) data["dropped_preferences"] = true; // F7: the printer has no preference command: only the map and used lines were sent
+        if (!applied) data["context_closed"] = true;
+        return SnapmakerPreprintReply::success(std::move(data));
     }
 
     // sw_MachinePrintStart {filename}: one start of the pinned file.
@@ -173,29 +187,44 @@ public:
         }
         if (!r.allowed()) return SnapmakerPreprintReply::fail(std::string("refused: ") + snapmaker_preprint_decision_name(r.decision));
         bool started = false;
+        set_start_forwarding(true);
         try {
             started = m_printer->start_print(filename);
         } catch (...) {
             started = false;
         }
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_start_forwarding = false;
+            if (started) m_started_forwarded = true; // recorded even when the context was closed meanwhile
+        }
         const bool applied = m_gate.confirm(r.ticket, started);
         if (!started) return SnapmakerPreprintReply::fail("refused: the printer did not start the print");
-        if (!applied) return SnapmakerPreprintReply::fail("refused: pre-print context closed");
-        return SnapmakerPreprintReply::success();
+        nlohmann::json data = nlohmann::json::object();
+        if (!applied) data["context_closed"] = true; // F2: started on the printer; the page just closed first
+        return SnapmakerPreprintReply::success(std::move(data));
     }
 
     // sw_StartLocalPrint: always -1 / "failure" so the page falls back to the validated gcode plus printer.print.start. A recorded
     // difference from Snapmaker (docs/u1-differences-from-snapmaker.md). Touches nothing.
     static SnapmakerPreprintReply start_local_print() { return SnapmakerPreprintReply::fail("failure"); }
 
-    // sw_SetFilamentMappingComplete / sw_FinishFilamentMapping: the page is done. Closes the gate and clears the context. Returns whether
-    // the print had been started.
-    bool finish()
+    // sw_SetFilamentMappingComplete / sw_FinishFilamentMapping, and the bridge's shutdown: the page (or host) is done. F2: bound to the
+    // bridge's epoch: a stale bridge (the context was reopened) closes nothing and returns nullopt, so it must not fire preprint_done either.
+    // Otherwise closes the gate (voiding in-flight tickets), clears the context and returns whether the print was started: true also when a
+    // start request is on the wire right now (it may land; reporting "not started" then would be the dangerous answer).
+    std::optional<bool> finish(std::uint64_t epoch)
     {
-        const bool started = m_gate.state() == SnapmakerPreprintState::Started;
+        if (epoch == 0 || epoch != this->epoch()) return std::nullopt;
         m_gate.close();
         if (m_context) m_context->clear();
-        return started;
+        return started_forwarded();
+    }
+    // True when a start was sent to the printer and it answered cleanly, or one is being sent right now.
+    bool started_forwarded() const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_started_forwarded || m_start_forwarding;
     }
 
 private:
@@ -203,6 +232,26 @@ private:
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_epoch = e;
+    }
+    void set_start_forwarding(bool v)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_start_forwarding = v;
+    }
+    static bool capability_path_ok(const std::string& p)
+    {
+        const std::string prefix = PreprintCapabilityStore::path_prefix;
+        if (p.size() <= prefix.size() || p.size() > 1024 || p.compare(0, prefix.size(), prefix) != 0) return false;
+        for (unsigned char c : p)
+            if (c < 0x20 || c > 0x7e || c == '"' || c == '\\' || c == '\'' || c == '<' || c == '>') return false;
+        return true;
+    }
+    static bool sha256_hex_ok(const std::string& h)
+    {
+        if (h.size() != 64) return false;
+        for (unsigned char c : h)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+        return true;
     }
     bool live(std::uint64_t epoch) const
     {
@@ -220,7 +269,7 @@ private:
     // Asks the printer about every command of the validated script (a real /printer/gcode/help read each time). A map or used command
     // that is unknown or unreadable refuses the script; an unknown preference command only drops the preference part (#118: the map is
     // still applied); an unreadable one refuses (fail closed).
-    bool probe_script(const std::string& script, const SnapmakerPreprintGcode& g, std::string& to_send, std::string& why)
+    bool probe_script(const std::string& script, const SnapmakerPreprintGcode& g, std::string& to_send, std::string& why, bool& dropped)
     {
         for (const char* cmd : {"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}) {
             const auto k = m_printer->command_known(cmd);
@@ -236,7 +285,10 @@ private:
             why = std::string("could not tell whether the printer has ") + pref_cmd;
             return false;
         }
-        if (k == SnapmakerPreprintPrinter::Known::No) { // keep the map + used lines only (no trailing newline, like print_uploaded_file)
+        if (k == SnapmakerPreprintPrinter::Known::No) { // F7: reported in the reply data and logged
+            dropped = true;
+            BOOST_LOG_TRIVIAL(warning) << "SnapmakerPreprintSession: the printer has no " << pref_cmd << ", the print preferences are not applied (the map is)";
+            // keep the map + used lines only (no trailing newline, like print_uploaded_file)
             const std::size_t at = script.find("SET_PRINT_PREFERENCE");
             to_send = script.substr(0, at);
             while (!to_send.empty() && to_send.back() == '\n') to_send.pop_back();
@@ -262,6 +314,7 @@ private:
     std::uint64_t                             m_epoch = 0;
     std::string                               m_capability_path, m_sha256_hex;
     std::uint64_t                             m_size = 0;
+    bool                                      m_started_forwarded = false, m_start_forwarding = false;
 };
 
 }} // namespace Slic3r::GUI
