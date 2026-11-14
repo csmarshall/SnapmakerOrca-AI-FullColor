@@ -93,8 +93,14 @@ public:
     // stop the cancel, so the bridge re-checks the print state before any retry); every other control keeps kControlTimeout and the shared gate.
     static constexpr std::chrono::milliseconds kControlTimeout{5000};
     static constexpr std::chrono::milliseconds kPrintControlTimeout{20000};
+    // #123: a rename may write config on the printer (unmeasured, same class as a jog/config gcode: 20 s); the abort should return quickly (10 s,
+    // unmeasured); the purifier is a fan set-point like the other fan/LED controls and keeps kControlTimeout.
+    static constexpr std::chrono::milliseconds kRenameTimeout{20000};
+    static constexpr std::chrono::milliseconds kMeshAbortTimeout{10000};
     static std::chrono::milliseconds control_timeout_for(const std::string& method)
     {
+        if (method == "machine.set_device_name") return kRenameTimeout;
+        if (method == "printer.bed_mesh.abort_probe_mesh") return kMeshAbortTimeout;
         return control_method_is_print(method) ? kPrintControlTimeout : kControlTimeout;
     }
     // printer.gcode.script waits for Klipper to finish the script: homing and tool changes outlast the 5 s of the other controls (#31).
@@ -124,12 +130,14 @@ public:
         return control_method_is_print(method) ? m_print_gate : m_control_gate;
     }
     std::shared_ptr<InFlightGate> gcode_gate() const { return m_gcode_gate; }
+    std::shared_ptr<InFlightGate> mesh_abort_gate() const { return m_mesh_gate; }
     // The agent's second layer for the idle-only gcodes: take `gate`, ask `query` for the machine state afresh, and only when both
     // print_stats.state and machine_state_manager.main_state say idle call `run`; `done` is called exactly once, the gate released first.
     static void run_gated_by_idle(std::shared_ptr<InFlightGate> gate,
                                   std::function<void(std::function<void(bool, nlohmann::json)>)> query,
                                   std::function<void(std::function<void(bool, nlohmann::json)>)> run,
-                                  std::function<void(bool ok, nlohmann::json result)> done);
+                                  std::function<void(bool ok, nlohmann::json result)> done,
+                                  SnapmakerControlGate kind = SnapmakerControlGate::Idle);
     std::shared_ptr<InFlightGate> camera_gate() const { return m_camera_gate; }
     // The JSON-RPC request text; "" if `method` is off the allowlist or `params` is not an object (exposed for tests).
     static std::string control_request(const std::string& method, const nlohmann::json& params, int id);
@@ -415,6 +423,7 @@ private:
     std::shared_ptr<InFlightGate> m_print_gate = std::make_shared<InFlightGate>();
     std::shared_ptr<InFlightGate> m_cancel_gate = std::make_shared<InFlightGate>();
     std::shared_ptr<InFlightGate> m_gcode_gate = std::make_shared<InFlightGate>();
+    std::shared_ptr<InFlightGate> m_mesh_gate = std::make_shared<InFlightGate>(); // the bed-mesh abort: its own slot (#123)
     mutable std::recursive_mutex connect_mutex; // mutable: spoolman_endpoint() snapshots under it
     mutable std::mutex     connect_error_mutex;
     std::string            connect_error; // see last_connect_error()

@@ -794,6 +794,73 @@ inline bool snapmaker_machine_idle(const nlohmann::json& result)
     return ms.is_number_integer() && ms.get<long long>() == 0;
 }
 
+// ---- #123: the three Device page commands that are not gcode: rename, purifier, bed-mesh abort. Shared by the bridge (page request) and the
+// agent (what goes on the wire) so the two layers cannot drift. Shapes come from the page (docs/records/device-page-rename-purifier-meshabort.md);
+// this is agreement with the page and our own limits, not a statement about what the printer does with them. ----
+
+// machine_state_manager.main_state while a bed-mesh / leveling run is active. INFERRED from the page's labels (bundle "Heated bed
+// Calibrating" = 3), never observed on a printer; if a real run reports another value, this one constant is what to change.
+inline constexpr long long kSnapmakerMainStateBedMesh = 3;
+
+// rename: ^[A-Za-z0-9 ._-]{1,32}$ and no leading or trailing space. Snapmaker accepts any text (docs/u1-differences-from-snapmaker.md).
+inline bool snapmaker_device_name_valid(const std::string& v)
+{
+    if (v.empty() || v.size() > 32 || v.front() == ' ' || v.back() == ' ') return false;
+    for (unsigned char c : v)
+        if (!(ascii_alnum(c) || c == ' ' || c == '.' || c == '_' || c == '-')) return false;
+    return true;
+}
+// purifier: exactly {fan: "exhaust"|"inner", speed: integer 10..100} (the page's slider range); any other key, type or value is refused.
+inline bool snapmaker_purifier_params_valid(const nlohmann::json& p)
+{
+    if (!p.is_object() || p.size() != 2 || !p.contains("fan") || !p.contains("speed")) return false;
+    const auto& fan = p["fan"];
+    const auto& spd = p["speed"];
+    if (!fan.is_string() || (fan.get_ref<const std::string&>() != "exhaust" && fan.get_ref<const std::string&>() != "inner")) return false;
+    return spd.is_number_integer() && spd.get<long long>() >= 10 && spd.get<long long>() <= 100;
+}
+// The params each of the three methods may carry on the wire (true for every other method: they are checked where they are built).
+inline bool snapmaker_control_params_valid(const std::string& method, const nlohmann::json& p)
+{
+    if (method == "machine.set_device_name")
+        return p.is_object() && p.size() == 1 && p.contains("name") && p["name"].is_string() && snapmaker_device_name_valid(p["name"].get_ref<const std::string&>());
+    if (method == "printer.control.purifier") return snapmaker_purifier_params_valid(p);
+    if (method == "printer.bed_mesh.abort_probe_mesh") return p.is_object() && p.empty();
+    return true;
+}
+
+// Bed-mesh abort is allowed only while a bed-mesh run is active (main_state == kSnapmakerMainStateBedMesh) AND print_stats is in an idle state
+// (never printing or paused). One fresh query reply ({"status": {...}}); anything missing, mistyped or failed is "not active".
+inline bool snapmaker_bed_mesh_run_active(const nlohmann::json& result)
+{
+    if (!result.is_object() || !result.contains("status") || !result["status"].is_object()) return false;
+    const auto& st = result["status"];
+    if (!st.contains("print_stats") || !st["print_stats"].is_object() || !st["print_stats"].contains("state") || !st["print_stats"]["state"].is_string()) return false;
+    const std::string state = st["print_stats"]["state"].get<std::string>();
+    if (state != "standby" && state != "complete" && state != "cancelled" && state != "ready" && state != "completed") return false;
+    if (!st.contains("machine_state_manager") || !st["machine_state_manager"].is_object() || !st["machine_state_manager"].contains("main_state")) return false;
+    const auto& ms = st["machine_state_manager"]["main_state"];
+    return ms.is_number_integer() && ms.get<long long>() == kSnapmakerMainStateBedMesh;
+}
+
+// Which fresh-read gate a control method needs before it is sent. Idle: snapmaker_machine_idle (rename). BedMeshRun: the abort. The
+// purifier is None on purpose: Charles may adjust it mid-print by clicking (2026-11-14); the app only ever sends it on that click.
+enum class SnapmakerControlGate { None, Idle, BedMeshRun };
+inline SnapmakerControlGate snapmaker_control_gate_for(const std::string& method)
+{
+    if (method == "machine.set_device_name") return SnapmakerControlGate::Idle;
+    if (method == "printer.bed_mesh.abort_probe_mesh") return SnapmakerControlGate::BedMeshRun;
+    return SnapmakerControlGate::None;
+}
+inline bool snapmaker_control_gate_allows(SnapmakerControlGate g, const nlohmann::json& result)
+{
+    switch (g) {
+    case SnapmakerControlGate::Idle: return snapmaker_machine_idle(result);
+    case SnapmakerControlGate::BedMeshRun: return snapmaker_bed_mesh_run_active(result);
+    default: return true;
+    }
+}
+
 // The whitelist for timelapse_list_async() and the page bridge (#90): an object with page_index (integer 0..10000), page_rows (integer
 // 1..50) and optionally thumbnail_direct (only true: covers inline). Snapmaker passes the page's params through unchanged
 // (Moonraker_Mqtt::async_get_timelapse_instance, MoonRaker.cpp); anything else here is refused.

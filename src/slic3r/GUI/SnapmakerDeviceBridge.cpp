@@ -39,8 +39,6 @@ constexpr int kFanSpeedMin = 0, kFanSpeedMax = 100;      // percent
 constexpr int kBedTempMin = 0, kBedTempMax = 100;
 constexpr int kExtruderTempMin = 0, kExtruderTempMax = 300;
 constexpr int kExtruderIndexMin = 0, kExtruderIndexMax = 3, kExtruderMapMin = 0, kExtruderMapMax = 15;
-constexpr int kPurifierDelayMax = 3600, kPurifierWorkMax = 86400;
-constexpr std::size_t kNameMax = 64;
 
 struct ControlParam
 {
@@ -64,13 +62,7 @@ bool plain_identifier(const std::string& v)
         if (!(ascii_alnum(c) || c == '_' || c == '-')) return false;
     return true;
 }
-bool plain_device_name(const std::string& v)
-{
-    if (v.empty() || v.size() > kNameMax) return false;
-    for (unsigned char c : v)
-        if (c < 0x20 || c == 0x7f) return false;
-    return true;
-}
+bool plain_device_name(const std::string& v) { return snapmaker_device_name_valid(v); } // #123: ASCII [A-Za-z0-9 ._-], 1..32
 const std::vector<ControlSpec>& control_specs()
 {
     static const std::vector<ControlSpec> specs = {
@@ -80,12 +72,10 @@ const std::vector<ControlSpec>& control_specs()
         // sw_ControlPrintSpeed: percentage
         {{"sw_ControlPrintSpeed", "printer.control.print_speed"},
          {{"percentage", false, true, "percentage", kPrintSpeedMin, kPrintSpeedMax, nullptr}}},
-        // sw_ControlPurifier: params passed through as they are (fan_speed, delay_time, work_time; async_controlPurifier)
-        {{"sw_ControlPurifier", "printer.control.purifier"},
-         {{"fan_speed", false, false, "fan_speed", kFanSpeedMin, kFanSpeedMax, nullptr},
-          {"delay_time", false, false, "delay_time", 0, kPurifierDelayMax, nullptr},
-          {"work_time", false, false, "work_time", 0, kPurifierWorkMax, nullptr}},
-         true},
+        // sw_ControlPurifier (#123): the page sends {fan, speed} and Snapmaker passes it through; handled by hand in snapmaker_control_prepare
+        // (snapmaker_purifier_params_valid: exactly those two keys, fan exhaust|inner, speed integer 10..100). The old {fan_speed, delay_time,
+        // work_time} spec came from an overload nothing calls.
+        {{"sw_ControlPurifier", "printer.control.purifier"}, {}},
         // sw_ControlMainFan: speed
         {{"sw_ControlMainFan", "printer.control.main_fan"}, {{"speed", false, true, "speed", kFanSpeedMin, kFanSpeedMax, nullptr}}},
         // sw_ControlGenericFan: Snapmaker checks "name" but reports "param [fan_id] required!" - kept verbatim; the name is pinned to cavity_fan
@@ -100,8 +90,9 @@ const std::vector<ControlSpec>& control_specs()
           {"map", false, false, "map", kExtruderMapMin, kExtruderMapMax, nullptr}}},
         // sw_SetDeviceName: name (printer machine.set_device_name {name})
         {{"sw_SetDeviceName", "machine.set_device_name"}, {{"name", true, true, "name", 0, 0, ""}}},
-        // no params: sw_BedMesh_AbortProbeMesh, sw_MachinePrintPause / Resume / Cancel
+        // sw_BedMesh_AbortProbeMesh (#123): no params, and any present are refused (snapmaker_control_prepare); gated on an active bed-mesh run
         {{"sw_BedMesh_AbortProbeMesh", "printer.bed_mesh.abort_probe_mesh"}, {}},
+        // no params, ignored if given: sw_MachinePrintPause / Resume / Cancel
         {{"sw_MachinePrintPause", "printer.print.pause"}, {}},
         {{"sw_MachinePrintResume", "printer.print.resume"}, {}},
         {{"sw_MachinePrintCancel", "printer.print.cancel"}, {}},
@@ -125,10 +116,12 @@ const std::vector<SnapmakerControlCommand>& snapmaker_control_table()
 const std::vector<std::string>& snapmaker_registered_control_commands()
 {
     // Approved by Charles after the #79 review. sw_SendGCodes carries only the Device page's gcode shapes (snapmaker_gcode_classify): nozzle temperature, and, idle-only, jog, home, extrude/retract, park, pick, filament config.
-    // Left out on purpose: sw_ControlExtruderTemp and sw_ControlPurifier (the page does not use them), sw_SetDeviceName, sw_BedMesh_AbortProbeMesh.
+    // #123 added sw_ControlPurifier (no print-state gate: Snapmaker parity), sw_SetDeviceName (idle-only) and sw_BedMesh_AbortProbeMesh (active bed-mesh run only).
+    // Left out on purpose: sw_ControlExtruderTemp (the page does not use it).
     static const std::vector<std::string> registered = {"sw_ControlLed",      "sw_ControlPrintSpeed",  "sw_ControlMainFan",
                                                         "sw_ControlGenericFan", "sw_ControlBedTemp",     "sw_MachinePrintPause",
-                                                        "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"};
+                                                        "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes",
+                                                        "sw_ControlPurifier", "sw_SetDeviceName", "sw_BedMesh_AbortProbeMesh"};
     return registered;
 }
 
@@ -154,6 +147,12 @@ bool snapmaker_control_prepare(const std::string& sw_name, const nlohmann::json&
         if (it == params.end() || snapmaker_gcode_script_prepare(*it, joined) == SnapmakerGcodeKind::None) { error = "failure"; return false; }
         method     = spec->cmd.rpc_method;
         rpc_params = {{"script", joined}};
+        return true;
+    }
+    if (sw_name == "sw_ControlPurifier" || sw_name == "sw_BedMesh_AbortProbeMesh") { // #123: the exact shape or nothing, never a dropped extra key
+        if (!snapmaker_control_params_valid(spec->cmd.rpc_method, params)) { error = "failure"; return false; }
+        method     = spec->cmd.rpc_method;
+        rpc_params = params;
         return true;
     }
     nlohmann::json out = nlohmann::json::object();
@@ -1135,8 +1134,12 @@ void SnapmakerDeviceBridge::register_commands()
                 nlohmann::json rpc_params;
                 if (!snapmaker_control_prepare(cmd, i.params(), method, rpc_params, error)) { i.handle_general_fail(SSWCPCode::Failure, error); return; }
                 if (!m_options.control) { i.handle_general_fail(SSWCPCode::Failure, "Connection lost!"); return; }
-                const bool needs_idle = method == "printer.gcode.script" &&
-                                        snapmaker_gcode_kind_needs_idle(snapmaker_gcode_classify(rpc_params["script"].get<std::string>()));
+                // idle-only: the gcode shapes and (#123) the rename; the abort has its own gate (an active bed-mesh run), the purifier none
+                const SnapmakerControlGate gate_kind = snapmaker_control_gate_for(method);
+                const bool needs_idle = gate_kind == SnapmakerControlGate::Idle ||
+                                        (method == "printer.gcode.script" &&
+                                         snapmaker_gcode_kind_needs_idle(snapmaker_gcode_classify(rpc_params["script"].get<std::string>())));
+                const bool needs_mesh = gate_kind == SnapmakerControlGate::BedMeshRun;
                 auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
                 auto alive = m_alive;
                 // `release` runs when the RPC answers (the slot of this request is freed, a stale one is left alone)
@@ -1164,6 +1167,21 @@ void SnapmakerDeviceBridge::register_commands()
                             return;
                         }
                         send([this, token] { flight_end(m_gcode_busy, token); });
+                    });
+                    return;
+                }
+                if (needs_mesh) { // #123: its own slot (a rename or gcode in flight does not block the stop command); a fresh read decides
+                    if (!m_options.query_state) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                    const std::uint64_t token = flight_begin(m_mesh_busy, kGcodeFlightLimit);
+                    if (token == 0) { i.handle_general_fail(SSWCPCode::Failure, "failure"); return; }
+                    m_options.query_state({"print_stats", "machine_state_manager"}, [this, weak, alive, send, token](bool ok, nlohmann::json result) {
+                        if (!*alive) return;
+                        if (m_closed || !ok || !snapmaker_bed_mesh_run_active(result)) {
+                            flight_end(m_mesh_busy, token);
+                            if (auto inst = weak.lock()) inst->handle_general_fail(SSWCPCode::Failure, "failure");
+                            return;
+                        }
+                        send([this, token] { flight_end(m_mesh_busy, token); });
                     });
                     return;
                 }

@@ -553,6 +553,9 @@ std::string MoonrakerPrinterAgent::control_request(const std::string& method, co
         (params.size() != 1 || !params.contains("script") || !params["script"].is_string() ||
          snapmaker_gcode_classify(params["script"].get<std::string>()) == SnapmakerGcodeKind::None))
         return {};
+    // #123: rename, purifier and the bed-mesh abort carry exactly their own shape, whatever the caller checked.
+    if (!snapmaker_control_params_valid(method, params))
+        return {};
     nlohmann::json req;
     req["jsonrpc"] = "2.0";
     req["method"]  = method; // only ever a kControlRpcMethods entry
@@ -608,20 +611,36 @@ void MoonrakerPrinterAgent::control_async(const std::string& method, const nlohm
             std::move(done));
         return;
     }
+    // #123: rename (idle) and the bed-mesh abort (active run + idle print_stats) read the state afresh first, each under its own slot; a shape
+    // the request builder would refuse never reaches the read.
+    if (const SnapmakerControlGate kind = snapmaker_control_gate_for(method); kind != SnapmakerControlGate::None) {
+        if (control_request(method, params, 1).empty()) {
+            if (done) done(false, nlohmann::json::object());
+            return;
+        }
+        run_gated_by_idle(
+            kind == SnapmakerControlGate::BedMeshRun ? m_mesh_gate : m_gcode_gate,
+            [this](std::function<void(bool, nlohmann::json)> cb) { query_machine_objects_async({"print_stats", "machine_state_manager"}, std::move(cb)); },
+            [base_url, api_key, method, params, timeout](std::function<void(bool, nlohmann::json)> cb) {
+                control_run(base_url, api_key, method, params, timeout, nullptr, std::move(cb));
+            },
+            std::move(done), kind);
+        return;
+    }
     control_run(base_url, api_key, method, params, timeout, control_gate_for(method), std::move(done));
 }
 
 void MoonrakerPrinterAgent::run_gated_by_idle(std::shared_ptr<InFlightGate> gate,
                                               std::function<void(std::function<void(bool, nlohmann::json)>)> query,
                                               std::function<void(std::function<void(bool, nlohmann::json)>)> run,
-                                              std::function<void(bool ok, nlohmann::json result)> done)
+                                              std::function<void(bool ok, nlohmann::json result)> done, SnapmakerControlGate kind)
 {
     if (!gate || !query || !run || !gate->try_acquire()) { // one at a time, refused not queued
         if (done) done(false, nlohmann::json::object());
         return;
     }
-    query([gate, run, done](bool ok, nlohmann::json state) {
-        if (!ok || !snapmaker_machine_idle(state)) {
+    query([gate, run, done, kind](bool ok, nlohmann::json state) {
+        if (!ok || !snapmaker_control_gate_allows(kind, state)) {
             gate->release();
             if (done) done(false, nlohmann::json::object());
             return;

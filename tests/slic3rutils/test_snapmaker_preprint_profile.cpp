@@ -614,7 +614,7 @@ TEST_CASE("Device-tab profile is unchanged: print start, local print, uploads an
 {
     DeviceTab d;
     for (const char* cmd : {"sw_MachinePrintStart", "sw_StartLocalPrint", "sw_UploadFile", "sw_UploadFileResult", "sw_UploadFiletoMachine", "sw_SetFilamentMappingComplete",
-                            "sw_FinishFilamentMapping", "sw_GetFileStream", "sw_DownLoadFile", "sw_DownloadMachineFile", "sw_ControlExtruderTemp", "sw_ControlPurifier",
+                            "sw_FinishFilamentMapping", "sw_GetFileStream", "sw_DownLoadFile", "sw_DownloadMachineFile", "sw_ControlExtruderTemp",
                             "sw_SendCommand", "sw_RenameDevice", "sw_DeleteDevices"}) {
         CAPTURE(cmd);
         CHECK_FALSE(d.bridge.sswcp().is_registered(cmd));
@@ -681,7 +681,7 @@ TEST_CASE("the pre-print profile registers exactly the REGISTERED lines of snapm
     std::set<std::string> device_denied;
     const auto device = registered_in("snapmaker_bridge_commands.txt", &device_denied);
     for (const char* n : {"sw_MachinePrintStart", "sw_StartLocalPrint", "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping"}) CHECK(device_denied.count(n) == 1);
-    CHECK(device.size() == 54);
+    CHECK(device.size() == 57);
 }
 
 // ---- #124: sw_GetLocalDevices answers the one pinned printer, and nothing else ----

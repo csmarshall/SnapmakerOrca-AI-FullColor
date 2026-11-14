@@ -540,8 +540,7 @@ TEST_CASE("the read-only guarantee: no control action is registered, each gets a
     const std::vector<std::string> controls = {
         "sw_MachinePrintStart",
         "sw_UploadFiletoMachine", "sw_UploadFile", "sw_UploadFileResult", "sw_DeleteCameraTimelapse", "sw_DeleteRecentFiles", "sw_DeleteDevices", "sw_RenameDevice",
-        "sw_SetDeviceName", "sw_ControlPurifier",
-        "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint", "sw_BedMesh_AbortProbeMesh",
+        "sw_ControlExtruderTemp", "sw_StartLocalPrint", "sw_StartCloudPrint",
         "sw_SendCommand", "sw_Query", "sw_AddDevice", "sw_SwitchModel", "sw_UpdateDeviceInfo", "sw_mqtt_set_engine",
         "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping", "sw_DownloadMachineFile", "sw_DownLoadFile",
         "sw_PullCloudFile", "sw_ServerClientManagerSetUserinfo",
@@ -584,13 +583,13 @@ TEST_CASE("exactly the documented command set is registered", "[SSWCP][device_ui
         "sw_GetFileListPage",
         // pre-print page (S2): local data from the pre-print context only
         "sw_GetActiveFile", "sw_GetFileFilamentMapping",
-        // machine control (#75, #79): LED, speed, fans, bed temperature, pause/resume/cancel; nozzle temperature, purifier, device name
-        // and the bed-mesh abort stay denied
+        // machine control (#75, #79, #123): LED, speed, fans, bed temperature, pause/resume/cancel, gcode shapes, and (#123) purifier, device
+        // name, bed-mesh abort; nozzle temperature via ControlExtruderTemp stays denied
         "sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp", "sw_MachinePrintPause",
-        "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"};
+        "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes", "sw_ControlPurifier", "sw_SetDeviceName", "sw_BedMesh_AbortProbeMesh"};
     for (const auto& c : expected)
         CHECK(h.bridge.sswcp().is_registered(c));
-    CHECK(expected.size() == 54);
+    CHECK(expected.size() == 57);
 }
 
 TEST_CASE("the {} read-only commands answer an empty object", "[SSWCP][device_ui]")
@@ -1050,7 +1049,7 @@ TEST_CASE("the live registry equals the REGISTERED lines of snapmaker_bridge_com
         REQUIRE((cls == "REGISTERED" || cls == "DENIED"));
         (cls == "REGISTERED" ? registered : denied).insert(name);
     }
-    CHECK(registered.size() == 54);
+    CHECK(registered.size() == 57);
     BridgeHarness h;
     for (const auto& n : registered) { CAPTURE(n); CHECK(h.bridge.sswcp().is_registered(n)); }
     for (const auto& n : denied)     { CAPTURE(n); CHECK_FALSE(h.bridge.sswcp().is_registered(n)); }
@@ -1785,12 +1784,11 @@ TEST_CASE("the forklifted control table is complete, uses allowlisted methods an
     CHECK(actual == expected);
     CHECK(snapmaker_registered_control_commands() ==
           std::vector<std::string>{"sw_ControlLed", "sw_ControlPrintSpeed", "sw_ControlMainFan", "sw_ControlGenericFan", "sw_ControlBedTemp",
-                                   "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes"});
+                                   "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel", "sw_SendGCodes",
+                                   "sw_ControlPurifier", "sw_SetDeviceName", "sw_BedMesh_AbortProbeMesh"}); // #123: the last three are new
     // The unreachable entries still answer "unsupported command" (501) and never reach the machine, even with valid params.
     const std::map<std::string, json> valid = {
-        {"sw_ControlPurifier", {{"fan_speed", 50}}},
-        {"sw_ControlExtruderTemp", {{"temp", 200}, {"index", 0}}}, {"sw_SetDeviceName", {{"name", "U1"}}},
-        {"sw_BedMesh_AbortProbeMesh", json::object()}};
+        {"sw_ControlExtruderTemp", {{"temp", 200}, {"index", 0}}}};
     for (const auto& [cmd, params] : valid) {
         CAPTURE(cmd);
         CHECK_FALSE(h.bridge.sswcp().is_registered(cmd));
@@ -1851,10 +1849,12 @@ TEST_CASE("snapmaker_control_prepare: Snapmaker's required-param messages and st
     CHECK_FALSE(prep("sw_ControlExtruderTemp", {{"temp", 301}}));
     CHECK_FALSE(prep("sw_ControlExtruderTemp", {{"temp", 200}, {"index", 4}}));
 
+    // #123 (changed deliberately): the purifier takes the page's {fan, speed}; the old {fan_speed, delay_time, work_time} shape is gone
     CHECK_FALSE(prep("sw_ControlPurifier", json::object()));
-    CHECK(prep("sw_ControlPurifier", {{"fan_speed", 50}, {"delay_time", 10}, {"work_time", 60}, {"evil", 1}}));
-    CHECK(out == json{{"fan_speed", 50}, {"delay_time", 10}, {"work_time", 60}});
-    CHECK_FALSE(prep("sw_ControlPurifier", {{"fan_speed", 500}}));
+    CHECK_FALSE(prep("sw_ControlPurifier", {{"fan_speed", 50}, {"delay_time", 10}, {"work_time", 60}}));
+    CHECK(prep("sw_ControlPurifier", {{"fan", "exhaust"}, {"speed", 50}}));
+    CHECK(method == "printer.control.purifier");
+    CHECK(out == json{{"fan", "exhaust"}, {"speed", 50}});
 
     CHECK_FALSE(prep("sw_SetDeviceName", json::object()));
     CHECK(err == "param [name] required!");
@@ -1862,9 +1862,12 @@ TEST_CASE("snapmaker_control_prepare: Snapmaker's required-param messages and st
     CHECK(method == "machine.set_device_name");
     CHECK_FALSE(prep("sw_SetDeviceName", {{"name", ""}}));
     CHECK_FALSE(prep("sw_SetDeviceName", {{"name", std::string("a\nb")}}));
-    CHECK_FALSE(prep("sw_SetDeviceName", {{"name", std::string(65, 'a')}}));
+    CHECK_FALSE(prep("sw_SetDeviceName", {{"name", std::string(33, 'a')}})); // was 65 (#123: 32 now)
 
-    for (const char* cmd : {"sw_BedMesh_AbortProbeMesh", "sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel"}) {
+    CHECK(prep("sw_BedMesh_AbortProbeMesh", json::object()));
+    CHECK(out == json::object());
+    CHECK_FALSE(prep("sw_BedMesh_AbortProbeMesh", {{"x", 1}})); // #123: params are refused, not dropped
+    for (const char* cmd : {"sw_MachinePrintPause", "sw_MachinePrintResume", "sw_MachinePrintCancel"}) {
         CAPTURE(cmd);
         CHECK(prep(cmd, {{"x", 1}}));
         CHECK(out == json::object());                       // no params are forwarded
@@ -2043,11 +2046,14 @@ TEST_CASE("print.* control has its own gate and a 20 s timeout; the other contro
         CHECK(MoonrakerPrinterAgent::control_timeout_for(m) == 20000ms);
     }
     for (const char* m : {"printer.control.led", "printer.control.print_speed", "printer.control.main_fan", "printer.control.generic_fan",
-                          "printer.control.bed_temp", "printer.control.extruder_temp", "printer.bed_mesh.abort_probe_mesh"}) {
+                          "printer.control.bed_temp", "printer.control.extruder_temp", "printer.control.purifier"}) {
         CAPTURE(m);
         CHECK_FALSE(control_method_is_print(m));
         CHECK(MoonrakerPrinterAgent::control_timeout_for(m) == 5000ms);
     }
+    // #123 (changed deliberately): the abort was pinned at 5 s with the others; it is 10 s now and the rename 20 s
+    CHECK(MoonrakerPrinterAgent::control_timeout_for("printer.bed_mesh.abort_probe_mesh") == 10000ms);
+    CHECK(MoonrakerPrinterAgent::control_timeout_for("machine.set_device_name") == 20000ms);
     MoonrakerPrinterAgent agent("");
     const auto print = agent.control_gate_for("printer.print.pause");
     const auto other = agent.control_gate_for("printer.control.led");
@@ -2293,7 +2299,7 @@ TEST_CASE("the newly registered controls forward the exact RPC with no state que
     CHECK(h.control_calls[3].params == json{{"temp", 100}});
     CHECK(h.queries.empty());
     // still denied
-    for (const char* cmd : {"sw_ControlExtruderTemp", "sw_ControlPurifier", "sw_SetDeviceName", "sw_BedMesh_AbortProbeMesh"}) {
+    for (const char* cmd : {"sw_ControlExtruderTemp", "sw_RenameDevice"}) { // #123: purifier, rename and abort are registered now
         h.sent.clear();
         h.bridge.on_script_message(h.good, control_msg(cmd, json::object()));
         REQUIRE(h.sent.size() == 1);
@@ -3146,4 +3152,322 @@ TEST_CASE("agent: gcode timeouts (homing is not cut at 5 s) and gates (cancel an
     CHECK(agent.gcode_gate() != agent.control_gate_for("printer.control.led"));
     REQUIRE(agent.control_gate_for("printer.print.pause")->try_acquire());
     CHECK(cancel->try_acquire()); // a pause in flight at the agent does not drop a cancel
+}
+
+// ---- #123: Device page rename, purifier, bed-mesh abort. Placeholder values only. What these cannot show: that the printer accepts the
+// shapes or what it does with them (nothing here touches a printer), and that main_state 3 is a bed-mesh run (inferred from page labels). ----
+namespace {
+void send_cmd(BridgeHarness& h, const char* cmd, const json& params) { h.bridge.on_script_message(h.good, control_msg(cmd, params)); }
+int last_code(BridgeHarness& h) { return h.reply(h.sent.size() - 1)["payload"]["code"].get<int>(); }
+const std::vector<std::string> kBadNames = {
+    "", " lead", "trail ", " ", std::string(33, 'a'), "a;b", "a\"b", "${x}", "`id`", "a\nb", "a\rb", "a\tb", std::string("a\0b", 3), "a\x7f" "b",
+    "caf\xc3\xa9", "\xff\xfe", "a/b", "a\\b", "a'b", "a<b", "a{b}", "a%b", "a#b", "a$b", "a&b", "a|b", "a,b", "a:b", "a=b", "a+b", "a@b", "a!b", "a?b", "a*b"};
+} // namespace
+
+TEST_CASE("device name: the charset [A-Za-z0-9 ._-], 1..32, no leading or trailing space", "[SSWCP][device_ui][rename]")
+{
+    for (const char* ok : {"U1", "My Printer", "a", "a.b_c-d 1", "A B", "x.", ".x", "-", "_", "abcdefghijklmnopqrstuvwxyz012345"}) {
+        CAPTURE(ok);
+        CHECK(snapmaker_device_name_valid(ok));
+    }
+    for (const std::string& bad : kBadNames) {
+        CAPTURE(bad);
+        CHECK_FALSE(snapmaker_device_name_valid(bad));
+        std::string m, e; json out;
+        CHECK_FALSE(snapmaker_control_prepare("sw_SetDeviceName", {{"name", bad}}, m, out, e));
+        CHECK_FALSE(snapmaker_control_params_valid("machine.set_device_name", {{"name", bad}}));
+        CHECK(MoonrakerPrinterAgent::control_request("machine.set_device_name", {{"name", bad}}, 1).empty());
+    }
+    std::string m, e; json out;
+    for (const json& v : {json(5), json(nullptr), json::array({"a"}), json::object(), json(true)})
+        CHECK_FALSE(snapmaker_control_prepare("sw_SetDeviceName", {{"name", v}}, m, out, e));
+    // the exact RPC, and nothing but the name is forwarded by the bridge
+    CHECK(snapmaker_control_prepare("sw_SetDeviceName", {{"name", "My Printer"}, {"evil", 1}, {"method", "printer.gcode.script"}}, m, out, e));
+    CHECK(m == "machine.set_device_name");
+    CHECK(out == json{{"name", "My Printer"}});
+}
+
+TEST_CASE("purifier params: exactly {fan: exhaust|inner, speed: integer 10..100}", "[SSWCP][device_ui][purifier]")
+{
+    std::string m, e; json out;
+    for (const char* fan : {"exhaust", "inner"})
+        for (int speed : {10, 11, 50, 99, 100}) {
+            CAPTURE(fan, speed);
+            REQUIRE(snapmaker_control_prepare("sw_ControlPurifier", {{"fan", fan}, {"speed", speed}}, m, out, e));
+            CHECK(m == "printer.control.purifier");
+            CHECK(out == json{{"fan", fan}, {"speed", speed}});
+            CHECK(snapmaker_control_params_valid("printer.control.purifier", {{"fan", fan}, {"speed", speed}}));
+            CHECK_FALSE(MoonrakerPrinterAgent::control_request("printer.control.purifier", {{"fan", fan}, {"speed", speed}}, 1).empty());
+        }
+    const std::vector<json> bad = {
+        json::object(), json{{"fan", "exhaust"}}, json{{"speed", 50}},
+        json{{"fan", "other"}, {"speed", 50}}, json{{"fan", "EXHAUST"}, {"speed", 50}}, json{{"fan", "exhaust "}, {"speed", 50}},
+        json{{"fan", ""}, {"speed", 50}}, json{{"fan", 1}, {"speed", 50}}, json{{"fan", nullptr}, {"speed", 50}}, json{{"fan", json::array({"inner"})}, {"speed", 50}},
+        json{{"fan", "inner"}, {"speed", 9}}, json{{"fan", "inner"}, {"speed", 0}}, json{{"fan", "inner"}, {"speed", -1}}, json{{"fan", "inner"}, {"speed", 101}},
+        json{{"fan", "inner"}, {"speed", 50.5}}, json{{"fan", "inner"}, {"speed", 50.0}}, json{{"fan", "inner"}, {"speed", "50"}},
+        json{{"fan", "inner"}, {"speed", true}}, json{{"fan", "inner"}, {"speed", nullptr}},
+        json{{"fan", "inner"}, {"speed", 20}, {"mode", 3}},                 // an extra key is refused, not dropped
+        json{{"fan", "inner"}, {"speed", 20}, {"method", "printer.gcode.script"}},
+        json{{"fan_speed", 50}}, json{{"fan", "inner"}, {"fan_speed", 50}}, json{{"fan", "inner"}, {"speed", 20}, {"delay_time", 5}}};
+    for (const json& p : bad) {
+        CAPTURE(p.dump());
+        CHECK_FALSE(snapmaker_control_prepare("sw_ControlPurifier", p, m, out, e));
+        CHECK_FALSE(snapmaker_control_params_valid("printer.control.purifier", p));
+        CHECK(MoonrakerPrinterAgent::control_request("printer.control.purifier", p, 1).empty());
+    }
+    CHECK_FALSE(snapmaker_control_prepare("sw_ControlPurifier", json::array(), m, out, e));
+    CHECK(MoonrakerPrinterAgent::control_request("printer.control.purifier", json::array(), 1).empty());
+}
+
+TEST_CASE("bed-mesh abort params: none; anything present is refused", "[SSWCP][device_ui][meshabort]")
+{
+    std::string m, e; json out;
+    CHECK(snapmaker_control_prepare("sw_BedMesh_AbortProbeMesh", json::object(), m, out, e));
+    CHECK(m == "printer.bed_mesh.abort_probe_mesh");
+    CHECK(out == json::object());
+    CHECK_FALSE(MoonrakerPrinterAgent::control_request("printer.bed_mesh.abort_probe_mesh", json::object(), 1).empty());
+    for (const json& p : {json{{"x", 1}}, json{{"script", "G28"}}, json{{"method", "printer.print.cancel"}}}) {
+        CHECK_FALSE(snapmaker_control_prepare("sw_BedMesh_AbortProbeMesh", p, m, out, e));
+        CHECK_FALSE(snapmaker_control_params_valid("printer.bed_mesh.abort_probe_mesh", p));
+        CHECK(MoonrakerPrinterAgent::control_request("printer.bed_mesh.abort_probe_mesh", p, 1).empty());
+    }
+    CHECK(MoonrakerPrinterAgent::control_request("printer.bed_mesh.abort_probe_mesh", json::array(), 1).empty());
+}
+
+TEST_CASE("the gate kind per method: rename idle-only, abort needs a bed-mesh run, purifier ungated", "[SSWCP][device_ui][rename][meshabort][purifier]")
+{
+    CHECK(snapmaker_control_gate_for("machine.set_device_name") == SnapmakerControlGate::Idle);
+    CHECK(snapmaker_control_gate_for("printer.bed_mesh.abort_probe_mesh") == SnapmakerControlGate::BedMeshRun);
+    CHECK(snapmaker_control_gate_for("printer.control.purifier") == SnapmakerControlGate::None); // deliberate, recorded exception (#123)
+    CHECK(snapmaker_control_gate_for("printer.control.led") == SnapmakerControlGate::None);
+    CHECK(kSnapmakerMainStateBedMesh == 3);
+}
+
+TEST_CASE("snapmaker_bed_mesh_run_active: main_state 3 and an idle print_stats, never together with anything else", "[SSWCP][device_ui][meshabort]")
+{
+    const auto st = [](const json& state, const json& ms) {
+        json s = json::object();
+        if (!state.is_null()) s["print_stats"] = {{"state", state}};
+        if (!ms.is_null()) s["machine_state_manager"] = {{"main_state", ms}};
+        return json{{"status", s}};
+    };
+    for (const char* s : {"standby", "complete", "cancelled", "ready", "completed"}) {
+        CAPTURE(s);
+        CHECK(snapmaker_bed_mesh_run_active(st(s, 3)));
+        CHECK_FALSE(snapmaker_machine_idle(st(s, 3)));  // the two predicates are not the same thing
+        for (int ms : {0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, -1})
+            CHECK_FALSE(snapmaker_bed_mesh_run_active(st(s, ms)));
+        for (const json& ms : {json("3"), json(3.5), json(true), json(nullptr), json::array({3})})
+            CHECK_FALSE(snapmaker_bed_mesh_run_active(st(s, ms)));
+    }
+    CHECK(snapmaker_machine_idle(st("standby", 0)));
+    CHECK_FALSE(snapmaker_bed_mesh_run_active(st("standby", 0))); // idle is not a mesh run
+    for (const json& s : {json("printing"), json("paused"), json("error"), json(""), json("Standby"), json(3), json(nullptr)}) {
+        CAPTURE(s.dump());
+        CHECK_FALSE(snapmaker_bed_mesh_run_active(st(s, 3)));
+    }
+    for (const json& r : {json::object(), json("x"), json(nullptr), json{{"status", "x"}}, json{{"status", json::object()}},
+                          json{{"status", {{"print_stats", {{"state", "standby"}}}}}}, json{{"status", {{"machine_state_manager", {{"main_state", 3}}}}}},
+                          json{{"status", {{"print_stats", "standby"}, {"machine_state_manager", {{"main_state", 3}}}}}}})
+        CHECK_FALSE(snapmaker_bed_mesh_run_active(r));
+}
+
+TEST_CASE("sw_SetDeviceName: sent as the exact RPC only after a fresh idle read", "[SSWCP][device_ui][rename][gate]")
+{
+    BridgeHarness h;
+    send_cmd(h, "sw_SetDeviceName", {{"name", "My Printer"}});
+    CHECK(h.control_calls.empty());
+    answer_gcode_query(h, "standby", 0);
+    REQUIRE(h.control_calls.size() == 1);
+    CHECK(h.control_calls[0].method == "machine.set_device_name");
+    CHECK(h.control_calls[0].params == json{{"name", "My Printer"}});
+    CHECK(last_code(h) == 200);
+    for (const char* s : {"complete", "cancelled"}) {
+        BridgeHarness g;
+        send_cmd(g, "sw_SetDeviceName", {{"name", "U1"}});
+        answer_gcode_query(g, s, 0);
+        CHECK(g.control_calls.size() == 1);
+    }
+}
+
+TEST_CASE("sw_SetDeviceName: refused while printing or not idle, on any failed read, with zero RPCs", "[SSWCP][device_ui][rename][gate]")
+{
+    for (const json& state : {json("printing"), json("paused"), json("error"), json(""), json(3), json(nullptr)}) {
+        CAPTURE(state.dump());
+        BridgeHarness h;
+        send_cmd(h, "sw_SetDeviceName", {{"name", "U1"}});
+        answer_gcode_query(h, state, 0);
+        CHECK(h.control_calls.empty());
+        CHECK(last_code(h) != 200);
+    }
+    for (const json& ms : {json(1), json(2), json(3), json(14), json(-1), json(nullptr), json("0"), json(0.5), json(true)}) {
+        CAPTURE(ms.dump());
+        BridgeHarness h;
+        send_cmd(h, "sw_SetDeviceName", {{"name", "U1"}});
+        answer_gcode_query(h, "standby", ms);
+        CHECK(h.control_calls.empty());
+        CHECK(last_code(h) != 200);
+    }
+    { BridgeHarness h; send_cmd(h, "sw_SetDeviceName", {{"name", "U1"}}); answer_gcode_query(h, "standby", 0, false); CHECK(h.control_calls.empty()); CHECK(last_code(h) != 200); }
+    { BridgeHarness h; h.have_source = false; send_cmd(h, "sw_SetDeviceName", {{"name", "U1"}}); CHECK(h.control_calls.empty()); CHECK(last_code(h) != 200); }
+    BridgeHarness h; // a bad name never reads the state
+    send_cmd(h, "sw_SetDeviceName", {{"name", "a;b"}});
+    CHECK(h.queries.empty());
+    CHECK(h.control_calls.empty());
+    // the state is read per call, never cached
+    BridgeHarness g;
+    send_cmd(g, "sw_SetDeviceName", {{"name", "U1"}});
+    answer_gcode_query(g, "standby", 0);
+    send_cmd(g, "sw_SetDeviceName", {{"name", "U2"}});
+    REQUIRE(g.queries.size() == 1);
+    answer_gcode_query(g, "printing", 1);
+    CHECK(g.control_calls.size() == 1);
+}
+
+TEST_CASE("sw_SetDeviceName shares the one-at-a-time slot of the idle-only gcodes and is refused while a cancel is in flight", "[SSWCP][device_ui][rename][busy]")
+{
+    BridgeHarness h;
+    h.hold_control = true;
+    send_cmd(h, "sw_SetDeviceName", {{"name", "U1"}});
+    send_cmd(h, "sw_SetDeviceName", {{"name", "U2"}});
+    CHECK(h.queries.size() == 1);
+    CHECK(last_code(h) != 200);
+    send_gcode(h, "G28");
+    CHECK(h.queries.size() == 1);
+    answer_gcode_query(h, "standby", 0);
+    CHECK(h.control_calls.size() == 1);
+    BridgeHarness c; // cancel in flight
+    c.hold_control = true;
+    c.bridge.on_script_message(c.good, control_msg("sw_MachinePrintCancel", json::object()));
+    REQUIRE(c.queries.size() == 1);
+    send_cmd(c, "sw_SetDeviceName", {{"name", "U1"}});
+    CHECK(c.queries.size() == 1);
+    CHECK(last_code(c) != 200);
+}
+
+TEST_CASE("sw_ControlPurifier: sent at once with exactly {fan, speed}, in every print state, with no state read", "[SSWCP][device_ui][purifier][gate]")
+{
+    BridgeHarness h;
+    send_cmd(h, "sw_ControlPurifier", {{"fan", "exhaust"}, {"speed", 40}});
+    send_cmd(h, "sw_ControlPurifier", {{"fan", "inner"}, {"speed", 100}});
+    REQUIRE(h.control_calls.size() == 2);
+    CHECK(h.control_calls[0].method == "printer.control.purifier");
+    CHECK(h.control_calls[0].params == json{{"fan", "exhaust"}, {"speed", 40}});
+    CHECK(h.control_calls[1].params == json{{"fan", "inner"}, {"speed", 100}});
+    CHECK(h.queries.empty()); // NOT blocked while printing: it asks nothing, so a print cannot refuse it (Charles, 2026-11-14)
+    CHECK(last_code(h) == 200);
+    send_cmd(h, "sw_ControlPurifier", {{"fan", "inner"}, {"speed", 5}});
+    send_cmd(h, "sw_ControlPurifier", {{"fan", "inner"}, {"speed", 20}, {"mode", 3}});
+    send_cmd(h, "sw_ControlPurifier", {{"fan", "x"}, {"speed", 20}});
+    CHECK(h.control_calls.size() == 2);
+    // and at the agent: it asks nothing before the RPC
+    QueryProbeAgent agent;
+    agent.control_async("printer.control.purifier", {{"fan", "inner"}, {"speed", 50}}, [](bool, json) {});
+    CHECK(agent.asked.empty());
+}
+
+TEST_CASE("sw_BedMesh_AbortProbeMesh: sent only on a fresh read of main_state 3 with an idle print_stats", "[SSWCP][device_ui][meshabort][gate]")
+{
+    for (const char* s : {"standby", "complete", "cancelled"}) {
+        BridgeHarness h;
+        send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object());
+        CHECK(h.control_calls.empty());
+        answer_gcode_query(h, s, 3);
+        REQUIRE(h.control_calls.size() == 1);
+        CHECK(h.control_calls[0].method == "printer.bed_mesh.abort_probe_mesh");
+        CHECK(h.control_calls[0].params == json::object());
+        CHECK(last_code(h) == 200);
+    }
+}
+
+TEST_CASE("sw_BedMesh_AbortProbeMesh: refused while printing, when idle, on any other state or any failed read", "[SSWCP][device_ui][meshabort][gate]")
+{
+    for (const json& state : {json("printing"), json("paused"), json("error"), json(""), json(3), json(nullptr)}) {
+        CAPTURE(state.dump());
+        BridgeHarness h;
+        send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object());
+        answer_gcode_query(h, state, 3); // main_state 3 but a print is on: never
+        CHECK(h.control_calls.empty());
+        CHECK(last_code(h) != 200);
+    }
+    for (const json& ms : {json(0), json(1), json(2), json(4), json(14), json(-1), json(nullptr), json("3"), json(3.5), json(true)}) {
+        CAPTURE(ms.dump());
+        BridgeHarness h;
+        send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object());
+        answer_gcode_query(h, "standby", ms);
+        CHECK(h.control_calls.empty());
+        CHECK(last_code(h) != 200);
+    }
+    { BridgeHarness h; send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object()); answer_gcode_query(h, "standby", 3, false); CHECK(h.control_calls.empty()); CHECK(last_code(h) != 200); }
+    { BridgeHarness h; h.have_source = false; send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object()); CHECK(h.control_calls.empty()); CHECK(last_code(h) != 200); }
+    for (const json& r : {json::object(), json{{"status", json::object()}}, json{{"status", {{"print_stats", {{"state", "standby"}}}}}},
+                          json{{"status", {{"machine_state_manager", {{"main_state", 3}}}}}}, json("x")}) {
+        BridgeHarness h;
+        send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object());
+        REQUIRE(h.queries.size() == 1);
+        h.queries[0].done(true, r);
+        CHECK(h.control_calls.empty());
+    }
+    BridgeHarness h; // params present: no read, no RPC
+    send_cmd(h, "sw_BedMesh_AbortProbeMesh", {{"x", 1}});
+    CHECK(h.queries.empty());
+    CHECK(h.control_calls.empty());
+    // read per call: mesh run on the first read, a print on the second
+    BridgeHarness g;
+    send_cmd(g, "sw_BedMesh_AbortProbeMesh", json::object());
+    answer_gcode_query(g, "standby", 3);
+    send_cmd(g, "sw_BedMesh_AbortProbeMesh", json::object());
+    REQUIRE(g.queries.size() == 1);
+    answer_gcode_query(g, "printing", 1);
+    CHECK(g.control_calls.size() == 1);
+}
+
+TEST_CASE("sw_BedMesh_AbortProbeMesh has its own slot: not blocked by a rename or gcode in flight, one abort at a time", "[SSWCP][device_ui][meshabort][busy]")
+{
+    BridgeHarness h;
+    h.hold_control = true;
+    send_gcode(h, "G28");
+    send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object());
+    REQUIRE(h.queries.size() == 2);       // the abort asked although the gcode holds its slot
+    send_cmd(h, "sw_BedMesh_AbortProbeMesh", json::object());
+    CHECK(h.queries.size() == 2);         // a second abort is refused
+    CHECK(last_code(h) != 200);
+}
+
+TEST_CASE("agent: the gated methods read the state under their own gate; the predicate is chosen per method", "[SSWCP][device_ui][rename][meshabort][agent]")
+{
+    using Run = MoonrakerPrinterAgent;
+    for (const char* method : {"machine.set_device_name", "printer.bed_mesh.abort_probe_mesh"}) {
+        CAPTURE(method);
+        QueryProbeAgent agent;
+        const json params = std::string(method) == "machine.set_device_name" ? json{{"name", "U1"}} : json::object();
+        int calls = 0; bool ok = true;
+        agent.control_async(method, params, [&](bool o, json) { ++calls; ok = o; });
+        REQUIRE(agent.asked.size() == 1);
+        CHECK(agent.asked[0] == std::vector<std::string>{"print_stats", "machine_state_manager"});
+        CHECK(calls == 1);
+        CHECK_FALSE(ok); // the canned read fails: refused
+    }
+    { // an invalid shape reaches neither the read nor the wire
+        QueryProbeAgent agent;
+        int calls = 0;
+        agent.control_async("machine.set_device_name", {{"name", "a;b"}}, [&](bool o, json) { ++calls; CHECK_FALSE(o); });
+        agent.control_async("printer.bed_mesh.abort_probe_mesh", {{"x", 1}}, [&](bool o, json) { ++calls; CHECK_FALSE(o); });
+        CHECK(agent.asked.empty());
+        CHECK(calls == 2);
+    }
+    const auto state = [](const json& s, const json& ms) { return json{{"status", {{"print_stats", {{"state", s}}}, {"machine_state_manager", {{"main_state", ms}}}}}}; };
+    struct Row { SnapmakerControlGate kind; json s, ms; bool runs; };
+    for (const Row& r : std::vector<Row>{{SnapmakerControlGate::Idle, "standby", 0, true},   {SnapmakerControlGate::Idle, "standby", 3, false},
+                                         {SnapmakerControlGate::Idle, "printing", 0, false}, {SnapmakerControlGate::BedMeshRun, "standby", 3, true},
+                                         {SnapmakerControlGate::BedMeshRun, "standby", 0, false}, {SnapmakerControlGate::BedMeshRun, "printing", 3, false},
+                                         {SnapmakerControlGate::BedMeshRun, "paused", 3, false}, {SnapmakerControlGate::BedMeshRun, "complete", 3, true}}) {
+        CAPTURE(static_cast<int>(r.kind), r.s.dump(), r.ms.dump());
+        auto gate = std::make_shared<Run::InFlightGate>();
+        int runs = 0;
+        Run::run_gated_by_idle(gate, [&](std::function<void(bool, json)> cb) { cb(true, state(r.s, r.ms)); },
+                               [&](std::function<void(bool, json)> cb) { ++runs; cb(true, json::object()); }, [](bool, json) {}, r.kind);
+        CHECK(runs == (r.runs ? 1 : 0));
+        CHECK_FALSE(gate->busy_now());
+    }
 }

@@ -306,7 +306,8 @@ private:
     void                                  flight_end(Flight& f, std::uint64_t token) { if (f.token == token) f.token = 0; }
     Flight                              m_print_control_busy; // a pause/resume (state query or RPC) is in flight
     Flight                              m_cancel_busy;        // a cancel is in flight: it never waits for the above, only a second cancel is refused
-    Flight                              m_gcode_busy;         // one motion/config gcode at a time (state query or RPC)
+    Flight                              m_gcode_busy;         // one motion/config gcode or rename at a time (state query or RPC)
+    Flight                              m_mesh_busy;          // one bed-mesh abort at a time (#123), independent of the above
     std::uint64_t                       m_flight_seq = 0;
     std::vector<std::string>            m_state_objects; // the subscription's / SetSubscribeFilter's object names
     nlohmann::json                      m_last_state_status; // last pushed `status`

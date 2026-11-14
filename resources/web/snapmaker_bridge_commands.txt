@@ -61,12 +61,12 @@ REGISTERED sw_mqtt_unsubscribe
 
 DENIED sw_AddDevice
 DENIED sw_AskUserLogin
-DENIED sw_BedMesh_AbortProbeMesh
+REGISTERED sw_BedMesh_AbortProbeMesh  # #123: only while a bed-mesh run is active and print_stats is idle
 DENIED sw_CancelPullCloudFile
 DENIED sw_Connect
 DENIED sw_ConnectOtherMachine
 DENIED sw_ControlExtruderTemp
-DENIED sw_ControlPurifier
+REGISTERED sw_ControlPurifier  # #123: {fan exhaust|inner, speed 10..100}, no print-state gate (Snapmaker parity)
 DENIED sw_DeleteCameraTimelapse
 DENIED sw_DeleteDevices
 DENIED sw_DeleteRecentFiles
@@ -106,7 +106,7 @@ DENIED sw_RenameDevice
 DENIED sw_SendCommand
 REGISTERED sw_SendGCodes
 DENIED sw_ServerClientManagerSetUserinfo
-DENIED sw_SetDeviceName
+REGISTERED sw_SetDeviceName  # #123: name [A-Za-z0-9 ._-]{1,32}, idle-only
 DENIED sw_SetFilamentMappingComplete
 DENIED sw_SetLogLevel  # RISKY
 DENIED sw_SnapLog  # RISKY
