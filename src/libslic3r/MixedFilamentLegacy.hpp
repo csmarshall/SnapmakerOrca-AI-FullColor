@@ -11,7 +11,9 @@
 // up and object/volume/paint filament ids need no remap. See
 // docs/records/fullspectrum-data-model-slice1.md in the plan repo.
 //
-// One-way: nothing here writes the Snapmaker string back.
+// Import is one-way (convert_legacy_mixed_filaments). The reverse, make_snapmaker_project_shape, is a
+// pure save-time view of a project config that Snapmaker Orca can reopen (ticket #122, record
+// docs/records/mixed-definitions-passthrough.md in the plan repo). It is not wired into any save path yet.
 
 #include <cstddef>
 #include <cstdint>
@@ -85,6 +87,33 @@ struct LegacyMixedConversion
 // a loaded project config. Does nothing when the string is empty, when fewer than two physical slots
 // exist, or when the config already holds 2.5 mixed slots (it wins; that is reported as a warning).
 LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config, const std::string &serialized);
+
+// Key of the private sidecar in project_settings.config. Snapmaker ignores unknown keys. Not a registered
+// option: the writer adds it to the JSON next to mixed_filament_definitions, which is not registered either.
+constexpr const char *kMixedSidecarKey = "orca_ai_mixed_slots";
+constexpr int         kMixedSidecarVersion = 1;
+
+struct SnapmakerProjectShape
+{
+    // False when the input has no mixed slots (or cannot be shaped, see warnings): the shaped config is then
+    // an unchanged copy and the two strings are empty.
+    bool                     transformed = false;
+    std::string              mixed_filament_definitions;  // Snapmaker rows, one per mixed slot, in slot order
+    std::string              sidecar;                     // JSON: version, n, total, digest, stripped tails
+    std::vector<std::string> warnings;                    // lossy slots, for the user
+};
+
+// Save-time view of `full` for Snapmaker Orca, written to `shaped` (a copy; `full` is not touched; kept out of
+// the struct so this header need not include PrintConfig.hpp). With n physical
+// filaments and k mixed tail slots: every per-filament vector shrinks to n entries, the definitions string gets
+// exactly one valid row per mixed slot (a non-empty filament_mixed_engine_row verbatim, a native slot a
+// generated row, a degenerate slot a valid placeholder so later virtual ids do not shift), and the removed
+// data goes into the sidecar. A config without mixed slots, or an already shaped one, comes back unchanged.
+SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped);
+
+// Digest the sidecar carries: 16 hex digits of FNV-1a 64 over "n=<n>\n<definitions>". Detects a stale or edited
+// string, not a malicious one.
+std::string mixed_sidecar_digest(size_t num_physical, const std::string &definitions);
 
 } // namespace Slic3r
 

@@ -48,6 +48,7 @@ add_executable(${_TEST_NAME}_tests
     test_mixed_filament_color_golden.cpp
     test_mixed_filament_engine.cpp
     test_mixed_filament_legacy.cpp
+    test_mixed_snapmaker_shape.cpp
     test_mixed_filament_rows.cpp
     test_mixed_engine_row_config.cpp
     test_mixed_engine_from_config.cpp

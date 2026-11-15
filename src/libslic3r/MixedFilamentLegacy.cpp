@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <unordered_set>
@@ -453,6 +455,25 @@ LegacyMixedParse parse_legacy_mixed_definitions(const std::string &serialized, s
 
 namespace {
 
+// The per-filament vector keys that follow the filament count: the project-level slot keys plus every
+// Preset::filament_options() key. The ONE list shared by the converter (extends them) and the Snapmaker
+// export shape (cuts them back), so the two cannot diverge.
+const std::set<std::string> &per_filament_vector_keys()
+{
+    static const std::set<std::string> keys = [] {
+        std::set<std::string> k = {
+            "filament_colour", "filament_multi_colour", "filament_colour_type", "filament_map", "filament_nozzle_map",
+            "filament_volume_map", "filament_settings_id", "filament_ids", "filament_is_mixed", "filament_mixed_components",
+            "filament_mixed_sublayer_ratios", "filament_mixed_gradient", "filament_mixed_gradient_range",
+            "filament_mixed_gradient_curve", "filament_mixed_gradient_per_part", "filament_mixed_engine_row",
+            "compatible_process_expression_group" };
+        for (const std::string &o : Preset::filament_options())
+            k.insert(o);
+        return k;
+    }();
+    return keys;
+}
+
 // Rebuilds a vector option so entry i is a copy of the old entry src[i]; the old values are cloned first.
 void rebuild_vector(ConfigOptionVectorBase *opt, const std::vector<size_t> &src)
 {
@@ -581,15 +602,7 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
                 break;
             }
 
-    static const std::set<std::string> project_keys = {
-        "filament_colour", "filament_multi_colour", "filament_colour_type", "filament_map", "filament_nozzle_map",
-        "filament_volume_map", "filament_settings_id", "filament_ids", "filament_is_mixed", "filament_mixed_components",
-        "filament_mixed_sublayer_ratios", "filament_mixed_gradient", "filament_mixed_gradient_range",
-        "filament_mixed_gradient_curve", "filament_mixed_gradient_per_part", "filament_mixed_engine_row",
-        "compatible_process_expression_group" };
-    std::set<std::string> keys(project_keys);
-    for (const std::string &k : Preset::filament_options())
-        keys.insert(k);
+    const std::set<std::string> &keys = per_filament_vector_keys();
 
     // Per-slot source filament (0-based) for each new slot: the first component.
     std::vector<size_t> src_slot;
@@ -698,6 +711,210 @@ LegacyMixedConversion convert_legacy_mixed_filaments(DynamicPrintConfig &config,
             colour_typ->values[i] = "1";
     }
     out.slots_added = slots.size();
+    return out;
+}
+
+// ---- Snapmaker export shape (ticket #122) -------------------------------------------------------------
+
+std::string mixed_sidecar_digest(size_t num_physical, const std::string &definitions)
+{
+    const std::string text = "n=" + std::to_string(num_physical) + "\n" + definitions;
+    uint64_t          h    = 1469598103934665603ull;
+    for (unsigned char c : text) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
+
+namespace {
+
+// A valid row (a != b, both in 1..n, enabled) that stands in for a slot Snapmaker cannot express; it
+// shows as the pure filament `want_a` (or filament 1 when that is unusable). Needs n >= 2.
+std::string placeholder_row(size_t n, unsigned want_a, uint64_t stable_id)
+{
+    const unsigned a  = (want_a >= 1 && want_a <= n) ? want_a : 1u;
+    const unsigned o  = (a == 1u) ? 2u : 1u;
+    MixedFilament  mf;
+    mf.component_a  = std::min(a, o);
+    mf.component_b  = std::max(a, o);
+    mf.mix_b_percent = (a == mf.component_a) ? 0 : 100;
+    mf.stable_id    = stable_id;
+    mf.enabled      = true;
+    mf.custom       = true;
+    return serialize_mixed_filaments({ mf });
+}
+
+// True when a marker row loads in Snapmaker as exactly one live virtual filament.
+bool marker_row_is_valid(const std::string &marker, size_t n, LegacyMixedRow &row)
+{
+    if (marker.empty() || marker.find(';') != std::string::npos || !parse_legacy_mixed_row(marker, row))
+        return false;
+    if (row.a < 1 || row.b < 1 || row.a > n || row.b > n || row.a == row.b || !row.enabled || row.deleted)
+        return false;
+    for (unsigned id : decode_gradient_component_ids(row.gradient_component_ids, 0))
+        if (id < 1 || id > n)
+            return false;
+    return true;
+}
+
+} // namespace
+
+SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped)
+{
+    SnapmakerProjectShape out;
+    shaped = full;
+
+    const auto *colours  = full.option<ConfigOptionStrings>("filament_colour");
+    const auto *is_mixed = full.option<ConfigOptionBools>("filament_is_mixed");
+    if (colours == nullptr || is_mixed == nullptr || is_mixed->values.size() != colours->values.size() ||
+        std::none_of(is_mixed->values.begin(), is_mixed->values.end(), [](unsigned char v) { return v != 0; }))
+        return out;
+
+    const size_t total = colours->values.size();
+    size_t       n     = 0;
+    while (n < total && !is_mixed->values[n])
+        ++n;
+    for (size_t i = n; i < total; ++i)
+        if (!is_mixed->values[i]) {
+            out.warnings.push_back("Mixed filaments are not a contiguous tail of the filament list; the project was not converted to the Snapmaker layout.");
+            return out;
+        }
+    if (n < 2) {
+        out.warnings.push_back("Fewer than two physical filaments; Snapmaker cannot represent the mixed filaments, the project was not converted to the Snapmaker layout.");
+        return out;
+    }
+
+    auto strings_at = [&](const char *key, size_t i) -> std::string {
+        const auto *o = full.option<ConfigOptionStrings>(key);
+        return (o != nullptr && i < o->values.size()) ? o->values[i] : std::string();
+    };
+    auto bool_at = [&](const char *key, size_t i) {
+        const auto *o = full.option<ConfigOptionBools>(key);
+        return o != nullptr && i < o->values.size() && o->values[i] != 0;
+    };
+
+    // Rows, one per mixed slot. Generated rows take stable ids above the highest marker id.
+    std::vector<LegacyMixedRow> marker_rows(total - n);
+    std::vector<bool>           marker_ok(total - n, false);
+    uint64_t                    next_id = 1;
+    for (size_t k = 0; k < total - n; ++k) {
+        marker_ok[k] = marker_row_is_valid(strings_at("filament_mixed_engine_row", n + k), n, marker_rows[k]);
+        if (marker_ok[k] && marker_rows[k].stable_id >= next_id)
+            next_id = marker_rows[k].stable_id + 1;
+    }
+    std::string definitions;
+    for (size_t k = 0; k < total - n; ++k) {
+        const size_t slot = n + k;
+        std::string  row;
+        if (marker_ok[k]) {
+            row = strings_at("filament_mixed_engine_row", slot);
+        } else {
+            const std::string label = "Mixed filament " + std::to_string(slot + 1);
+            const std::vector<unsigned> comps = parse_mixed_components(strings_at("filament_mixed_components", slot));
+            const bool had_marker = !strings_at("filament_mixed_engine_row", slot).empty();
+            if (had_marker)
+                out.warnings.push_back(label + " has a Snapmaker row that Snapmaker would skip; it was written from the slot's components instead.");
+            bool       usable     = comps.size() >= 2 && comps[0] >= 1 && comps[1] >= 1 && comps[0] <= n && comps[1] <= n && comps[0] != comps[1];
+            if (usable && comps.size() > 2) {
+                for (size_t c = 2; c < comps.size(); ++c)
+                    if (comps[c] < 1 || comps[c] > n)
+                        usable = false;
+                if (usable)
+                    out.warnings.push_back(label + " blends " + std::to_string(comps.size()) + " filaments; Snapmaker shows it as a blend of the first two.");
+            }
+            if (!usable) {
+                out.warnings.push_back(label + " has no valid pair of filaments" + (had_marker ? " (its Snapmaker row is not valid)" : "") +
+                                       "; Snapmaker shows it as a placeholder.");
+                row = placeholder_row(n, comps.empty() ? 1u : comps[0], next_id++);
+            } else {
+                const std::vector<double> ratios = parse_mixed_ratios(strings_at("filament_mixed_sublayer_ratios", slot), comps.size());
+                MixedFilament mf;
+                mf.component_a   = comps[0];
+                mf.component_b   = comps[1];
+                const double pair = ratios[0] + ratios[1];
+                mf.mix_b_percent = pair > 0. ? int(std::lround(100. * ratios[1] / pair)) : 50;
+                mf.stable_id     = next_id++;
+                mf.enabled       = true;
+                mf.custom        = true;
+                if (bool_at("filament_mixed_gradient", slot)) {
+                    const std::string range = strings_at("filament_mixed_gradient_range", slot);
+                    const size_t      comma = range.find(',');
+                    if (comma != std::string::npos) {
+                        mf.gradient_enabled = true;
+                        mf.gradient_start   = std::strtof(range.substr(0, comma).c_str(), nullptr);
+                        mf.gradient_end     = std::strtof(range.substr(comma + 1).c_str(), nullptr);
+                    }
+                }
+                row = serialize_mixed_filaments({ mf });
+            }
+        }
+        if (!definitions.empty())
+            definitions += ';';
+        definitions += row;
+    }
+
+    // Cut the per-filament vectors back to n and record what was removed. Layouts as in the converter:
+    // one value per filament; one value per filament variant (filament_self_index maps variants to filaments);
+    // [print, filament 1..N, printer] groups.
+    std::vector<int> self_index;
+    if (const auto *si = full.option<ConfigOptionInts>("filament_self_index"))
+        self_index = si->values;
+    const auto *variant_names = full.option<ConfigOptionStrings>("filament_extruder_variant");
+    bool        has_variants  = self_index.size() > total && variant_names != nullptr && variant_names->size() == self_index.size();
+    if (has_variants)
+        for (int v : self_index)
+            if (v < 1 || size_t(v) > total) {
+                has_variants = false;
+                break;
+            }
+
+    nlohmann::json keys = nlohmann::json::object();
+    auto cut = [&](const std::string &key, const std::vector<size_t> &keep, const std::vector<size_t> &removed) {
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(shaped.option(key));
+        std::unique_ptr<ConfigOption> tail(opt->clone());
+        rebuild_vector(static_cast<ConfigOptionVectorBase *>(tail.get()), removed);
+        keys[key] = { { "idx", removed }, { "v", tail->serialize() } };
+        rebuild_vector(opt, keep);
+    };
+    // filament_self_index is not in the shared list: the converter extends it by hand, so it is cut by hand too.
+    std::set<std::string> cut_keys = per_filament_vector_keys();
+    cut_keys.insert("filament_self_index");
+    for (const std::string &key : cut_keys) {
+        if (key == "compatible_printers" || key == "compatible_prints")
+            continue;
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(shaped.option(key));
+        if (opt == nullptr)
+            continue;
+        const bool is_variant_key = filament_options_with_variant.count(key) != 0 || key == "filament_extruder_variant" || key == "filament_self_index";
+        std::vector<size_t> keep, removed;
+        if (has_variants && is_variant_key && opt->size() == self_index.size()) {
+            for (size_t i = 0; i < self_index.size(); ++i)
+                (size_t(self_index[i]) <= n ? keep : removed).push_back(i);
+        } else if (opt->size() == total) {
+            for (size_t i = 0; i < total; ++i)
+                (i < n ? keep : removed).push_back(i);
+        } else
+            continue;
+        cut(key, keep, removed);
+    }
+    for (const char *key : { "inherits_group", "compatible_machine_expression_group", "different_settings_to_system" }) {
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(shaped.option(key));
+        if (opt == nullptr || opt->size() != total + 2)
+            continue;
+        std::vector<size_t> keep, removed;
+        for (size_t i = 0; i < total + 2; ++i)
+            ((i <= n || i == total + 1) ? keep : removed).push_back(i);
+        cut(key, keep, removed);
+    }
+
+    nlohmann::json side = { { "version", kMixedSidecarVersion }, { "n", n }, { "total", total },
+                            { "digest", mixed_sidecar_digest(n, definitions) }, { "keys", keys } };
+    out.sidecar                    = side.dump();
+    out.mixed_filament_definitions = std::move(definitions);
+    out.transformed                = true;
     return out;
 }
 
