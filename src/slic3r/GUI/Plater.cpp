@@ -9631,6 +9631,21 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             partplate_list.load_from_3mf_structure(plate_data, project_filament_count);
                             partplate_list.update_slice_context_to_current_plate(background_process);
                             this->preview->update_gcode_result(partplate_list.get_current_slice_result());
+                            // The converter warnings ride on every plate (marked by error_code); show them once (#114).
+                            {
+                                std::vector<std::string> mixed_import_warnings;
+                                for (const PlateData *pd : plate_data)
+                                    if (pd != nullptr) {
+                                        for (const GCodeProcessorResult::SliceWarning &sw : pd->warnings)
+                                            if (sw.error_code == kMixedImportWarningCode)
+                                                mixed_import_warnings.push_back(sw.msg);
+                                        if (!mixed_import_warnings.empty())
+                                            break;
+                                    }
+                                if (const std::string notice = snapmaker_import_user_notice(mixed_import_warnings); !notice.empty())
+                                    notification_manager->push_notification(NotificationType::CustomNotification,
+                                                                            NotificationManager::NotificationLevel::WarningNotificationLevel, notice);
+                            }
                             release_PlateData_list(plate_data);
                             sidebar->obj_list()->reload_all_plates();
                             q->suppress_background_process(true);

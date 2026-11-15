@@ -792,6 +792,37 @@ std::string snapmaker_shape_user_notice(const std::vector<std::string> &warnings
     return "Mixed filament detail is simplified for Snapmaker Orca (" + list + "). OpenSnorca keeps it in full.";
 }
 
+std::string snapmaker_import_user_notice(const std::vector<std::string> &warnings)
+{
+    if (warnings.empty())
+        return std::string();
+    auto has = [](const std::string &w, const char *s) { return w.find(s) != std::string::npos; };
+    size_t rows = 0, over = 0, ignored = 0, sidecar = 0, other = 0;
+    for (const std::string &w : warnings) {
+        if (has(w, "could not be used"))
+            ++sidecar;
+        else if (has(w, "only converted up to") || has(w, "slots fit"))
+            ++over;
+        else if (has(w, "carries both"))
+            ++ignored;
+        else if (has(w, "were malformed") || has(w, "cannot represent") || has(w, "pure single-filament") || has(w, "could not be converted"))
+            ++rows;
+        else
+            ++other;
+    }
+    std::string list;
+    auto add = [&list](size_t n, const char *what) {
+        if (n)
+            list += (list.empty() ? "" : ", ") + std::to_string(n) + " " + what;
+    };
+    add(rows, "unrepresentable or skipped");
+    add(over, "over the 32-slot limit");
+    add(ignored, "Snapmaker definitions ignored");
+    add(sidecar, "saved detail unusable");
+    add(other, "other");
+    return "Mixed filaments from a Snapmaker project were not carried over exactly (" + list + "). Check them before slicing.";
+}
+
 SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped)
 {
     SnapmakerProjectShape out;

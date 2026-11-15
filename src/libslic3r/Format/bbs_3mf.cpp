@@ -2666,6 +2666,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         GCodeProcessorResult::SliceWarning sw;
                         sw.level = 1;
                         sw.msg   = w;
+                        sw.error_code = kMixedImportWarningCode;
                         plate->warnings.push_back(sw);
                     }
         }

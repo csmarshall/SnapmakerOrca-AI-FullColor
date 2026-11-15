@@ -918,3 +918,38 @@ TEST_CASE("snapmaker_shape_user_notice turns shape warnings into one bounded sen
     CHECK(msg == "Mixed filament detail is simplified for Snapmaker Orca (200 blend(s) of 3+ filaments, 200 placeholder slot(s))." + tail);
     CHECK(msg.size() < 200);
 }
+
+TEST_CASE("snapmaker_import_user_notice turns converter warnings into one bounded message", "[snapmaker_import_notice]")
+{
+    CHECK(snapmaker_import_user_notice({}).empty());
+
+    const std::string head = "Mixed filaments from a Snapmaker project were not carried over exactly (";
+    const std::string tail = "). Check them before slicing.";
+    CHECK(snapmaker_import_user_notice({ "3 Snapmaker mixed filament row(s) were malformed or referenced missing filaments and were skipped." }) ==
+          head + "1 unrepresentable or skipped" + tail);
+    CHECK(snapmaker_import_user_notice({ "Snapmaker mixed filament 5 (filaments 1+2) uses a pattern, which this build cannot represent; it was converted to a 50/50 blend of the two filaments." }) ==
+          head + "1 unrepresentable or skipped" + tail);
+    CHECK(snapmaker_import_user_notice({ "Snapmaker mixed filament 5 (filaments 1+1) is a pure single-filament mix; it was stored as a 1/99 blend." }) ==
+          head + "1 unrepresentable or skipped" + tail);
+    CHECK(snapmaker_import_user_notice({ "This project has 40 filaments; Snapmaker mixed filament definitions are only converted up to 32, so they were ignored." }) ==
+          head + "1 over the 32-slot limit" + tail);
+    CHECK(snapmaker_import_user_notice({ "The Snapmaker project defines 9 mixed filaments but only 2 more slots fit (limit 32); the rest were dropped, so objects using them fall back to filament 1." }) ==
+          head + "1 over the 32-slot limit" + tail);
+    CHECK(snapmaker_import_user_notice({ "This project carries both Snapmaker mixed filament definitions and mixed filament slots; the slots were kept and the Snapmaker definitions ignored." }) ==
+          head + "1 Snapmaker definitions ignored" + tail);
+    CHECK(snapmaker_import_user_notice({ "This project's mixed filament details (saved by this program) could not be used (digest mismatch); the mixed filaments were rebuilt from the Snapmaker definitions and some detail may be lost." }) ==
+          head + "1 saved detail unusable" + tail);
+    CHECK(snapmaker_import_user_notice({ "something new" }) == head + "1 other" + tail);
+
+    CHECK(snapmaker_import_user_notice({ "x row(s) were malformed", "something new", "something newer" }) ==
+          head + "1 unrepresentable or skipped, 2 other" + tail);
+
+    std::vector<std::string> many;
+    for (int i = 0; i < 300; ++i) {
+        many.push_back("Snapmaker mixed filament " + std::to_string(i) + " uses a pattern, which this build cannot represent; it was converted.");
+        many.push_back("unknown " + std::to_string(i));
+    }
+    const std::string msg = snapmaker_import_user_notice(many);
+    CHECK(msg == head + "300 unrepresentable or skipped, 300 other" + tail);
+    CHECK(msg.size() < 200);
+}

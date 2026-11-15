@@ -116,6 +116,15 @@ SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &ful
 // OpenSnorca keeps it in full; makes no claim about how Snapmaker Orca opens the file.
 std::string snapmaker_shape_user_notice(const std::vector<std::string> &warnings);
 
+// Marker put in GCodeProcessorResult::SliceWarning::error_code on the plate warnings the 3MF loader adds for the
+// mixed filament converter, so the GUI can pick them out of the plate data without a new core struct field.
+constexpr const char *kMixedImportWarningCode = "orca_ai_mixed_import";
+
+// One short, bounded message for the user from the converter warnings of a loaded project (LegacyMixedConversion::warnings
+// plus the sidecar fallback and id-reset warnings), counted per kind; empty when `warnings` is empty. Says only that detail
+// was not carried over exactly; makes no claim that anything else converted correctly.
+std::string snapmaker_import_user_notice(const std::vector<std::string> &warnings);
+
 // Inverse of make_snapmaker_project_shape. `shaped` is a config as loaded from a shaped project (per-filament
 // vectors of n entries), `definitions` its mixed_filament_definitions string, `sidecar` its orca_ai_mixed_slots
 // string. On success `restored` is the full n + k slot config and true is returned. On any problem (empty or
