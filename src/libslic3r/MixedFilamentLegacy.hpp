@@ -111,6 +111,11 @@ struct SnapmakerProjectShape
 // data goes into the sidecar. A config without mixed slots, or an already shaped one, comes back unchanged.
 SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped);
 
+// One short, bounded sentence for the user from SnapmakerProjectShape::warnings (counts per kind, never the
+// raw warning list); empty when `warnings` is empty. Says only what was simplified for Snapmaker Orca and that
+// OpenSnorca keeps it in full; makes no claim about how Snapmaker Orca opens the file.
+std::string snapmaker_shape_user_notice(const std::vector<std::string> &warnings);
+
 // Inverse of make_snapmaker_project_shape. `shaped` is a config as loaded from a shaped project (per-filament
 // vectors of n entries), `definitions` its mixed_filament_definitions string, `sidecar` its orca_ai_mixed_slots
 // string. On success `restored` is the full n + k slot config and true is returned. On any problem (empty or

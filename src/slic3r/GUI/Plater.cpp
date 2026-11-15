@@ -20886,6 +20886,9 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
         if (shape.transformed) {
             for (const std::string &w : shape.warnings)
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": Snapmaker project shape: " << w;
+            if (const std::string notice = snapmaker_shape_user_notice(shape.warnings); !notice.empty())
+                p->notification_manager->push_notification(NotificationType::CustomNotification,
+                                                           NotificationManager::NotificationLevel::WarningNotificationLevel, notice);
             store_params.extra_project_settings.emplace_back("mixed_filament_definitions", shape.mixed_filament_definitions);
             store_params.extra_project_settings.emplace_back(kMixedSidecarKey, shape.sidecar);
         }

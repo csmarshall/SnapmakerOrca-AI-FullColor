@@ -894,3 +894,27 @@ TEST_CASE("Snapmaker 3MF: the shaped project_settings.config is the plain dump p
         expected += l + "\n";
     CHECK(w.project_settings == expected);
 }
+
+TEST_CASE("snapmaker_shape_user_notice turns shape warnings into one bounded sentence", "[snapmaker_shape]")
+{
+    CHECK(snapmaker_shape_user_notice({}).empty());
+
+    const std::string tail = " OpenSnorca keeps it in full.";
+    CHECK(snapmaker_shape_user_notice({ "Mixed filament 5 blends 3 filaments; Snapmaker shows it as a blend of the first two." }) ==
+          "Mixed filament detail is simplified for Snapmaker Orca (1 blend(s) of 3+ filaments)." + tail);
+    CHECK(snapmaker_shape_user_notice({ "Mixed filament 6 has no valid pair of filaments; Snapmaker shows it as a placeholder." }) ==
+          "Mixed filament detail is simplified for Snapmaker Orca (1 placeholder slot(s))." + tail);
+    CHECK(snapmaker_shape_user_notice({ "Mixed filament 7 has a Snapmaker row that Snapmaker would skip; it was written from the slot's components instead." }) ==
+          "Mixed filament detail is simplified for Snapmaker Orca (1 rebuilt row(s))." + tail);
+    CHECK(snapmaker_shape_user_notice({ "something new" }) ==
+          "Mixed filament detail is simplified for Snapmaker Orca (1 other)." + tail);
+
+    std::vector<std::string> many;
+    for (int i = 0; i < 200; ++i) {
+        many.push_back("Mixed filament " + std::to_string(i) + " blends 3 filaments; Snapmaker shows it as a blend of the first two.");
+        many.push_back("Mixed filament " + std::to_string(i) + " has no valid pair of filaments; Snapmaker shows it as a placeholder.");
+    }
+    const std::string msg = snapmaker_shape_user_notice(many);
+    CHECK(msg == "Mixed filament detail is simplified for Snapmaker Orca (200 blend(s) of 3+ filaments, 200 placeholder slot(s))." + tail);
+    CHECK(msg.size() < 200);
+}

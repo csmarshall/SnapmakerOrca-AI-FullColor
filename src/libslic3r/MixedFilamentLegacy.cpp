@@ -762,6 +762,36 @@ bool marker_row_is_valid(const std::string &marker, size_t n, LegacyMixedRow &ro
 
 } // namespace
 
+std::string snapmaker_shape_user_notice(const std::vector<std::string> &warnings)
+{
+    if (warnings.empty())
+        return std::string();
+    size_t blends = 0, placeholders = 0, rows = 0, other = 0;
+    for (const std::string &w : warnings) {
+        if (w.find(" blends ") != std::string::npos)
+            ++blends;
+        else if (w.find("placeholder") != std::string::npos)
+            ++placeholders;
+        else if (w.find("would skip") != std::string::npos)
+            ++rows;
+        else
+            ++other;
+    }
+    std::vector<std::string> parts;
+    if (blends)
+        parts.push_back(std::to_string(blends) + " blend(s) of 3+ filaments");
+    if (placeholders)
+        parts.push_back(std::to_string(placeholders) + " placeholder slot(s)");
+    if (rows)
+        parts.push_back(std::to_string(rows) + " rebuilt row(s)");
+    if (other)
+        parts.push_back(std::to_string(other) + " other");
+    std::string list;
+    for (size_t i = 0; i < parts.size(); ++i)
+        list += (i ? ", " : "") + parts[i];
+    return "Mixed filament detail is simplified for Snapmaker Orca (" + list + "). OpenSnorca keeps it in full.";
+}
+
 SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped)
 {
     SnapmakerProjectShape out;
