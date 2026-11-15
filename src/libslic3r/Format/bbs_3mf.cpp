@@ -8424,7 +8424,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             for (const auto &kv : m_extra_project_settings)
                 j[kv.first] = kv.second;
             std::ostringstream out;
-            out << j.dump(1, '\t', false) << std::endl;
+            out << j.dump(1, '\t', false, nlohmann::json::error_handler_t::replace) << std::endl;
             boost::nowide::ofstream f(temp_file, std::ios::out | std::ios::trunc | std::ios::binary);
             f << out.str();
             f.close();

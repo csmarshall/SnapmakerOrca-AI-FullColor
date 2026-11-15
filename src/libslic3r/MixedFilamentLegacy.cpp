@@ -912,7 +912,9 @@ SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &ful
 
     nlohmann::json side = { { "version", kMixedSidecarVersion }, { "n", n }, { "total", total },
                             { "digest", mixed_sidecar_digest(n, definitions) }, { "keys", keys } };
-    out.sidecar                    = side.dump();
+    // Invalid UTF-8 in a stripped tail (a user-entered string) would make a plain dump() throw out of the save; replace
+    // the bad bytes with U+FFFD instead (that value then reads back altered, which beats failing the save).
+    out.sidecar                    = side.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     out.mixed_filament_definitions = std::move(definitions);
     out.transformed                = true;
     return out;
@@ -941,11 +943,11 @@ bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &d
     const size_t total = side["total"].get<size_t>();
     const auto  *colours = shaped.option<ConfigOptionStrings>("filament_colour");
     if (colours == nullptr || colours->values.size() != n || total <= n || total > n + 64) {
-        error = "sidecar does not match the number of filaments in the project";
+        error = "the sidecar does not match the number of filaments in the project; it is stale or was edited";
         return false;
     }
     if (side["digest"].get<std::string>() != mixed_sidecar_digest(n, definitions)) {
-        error = "sidecar does not match mixed_filament_definitions (the project was edited by another program)";
+        error = "the sidecar does not match mixed_filament_definitions; it is stale or was edited";
         return false;
     }
 
@@ -957,6 +959,10 @@ bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &d
         if (opt == nullptr || !entry.is_object() || !entry.contains("idx") || !entry["idx"].is_array() || !entry.contains("v") ||
             !entry["v"].is_string()) {
             error = "sidecar entry '" + item.key() + "' is not usable";
+            return false;
+        }
+        if (entry["idx"].size() > total) {
+            error = "sidecar entry '" + item.key() + "' lists more indices than there are filaments";
             return false;
         }
         std::vector<size_t> removed;
@@ -989,6 +995,68 @@ bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &d
                 opt->set_at(tail.get(), i, it++);
             else
                 opt->set_at(kept.get(), i, ik++);
+    }
+
+    // Consistency of the result. The digest covers only n and the definitions, not the body, so a sidecar can pass it and
+    // still be partial (keys:{} or a missing key), or disagree with itself between keys. Anything inconsistent is refused
+    // (fail closed): the caller then runs the converter on the untouched project.
+    auto inconsistent = [&](const std::string &what) {
+        error = "the sidecar is inconsistent with the project (" + what + ")";
+        return false;
+    };
+    const auto *w_colours  = work.option<ConfigOptionStrings>("filament_colour");
+    const auto *w_is_mixed = work.option<ConfigOptionBools>("filament_is_mixed");
+    if (w_colours == nullptr || w_colours->values.size() != total)
+        return inconsistent("filament_colour has the wrong length");
+    if (w_is_mixed == nullptr || w_is_mixed->values.size() != total)
+        return inconsistent("filament_is_mixed has the wrong length");
+    for (size_t i = 0; i < total; ++i)
+        if ((w_is_mixed->values[i] != 0) != (i >= n))
+            return inconsistent("filament_is_mixed is not " + std::to_string(n) + " physical filaments followed by mixed slots");
+    const size_t rows = definitions.empty() ? 0 : size_t(std::count(definitions.begin(), definitions.end(), ';')) + 1;
+    if (rows != total - n)
+        return inconsistent("the definitions have " + std::to_string(rows) + " rows for " + std::to_string(total - n) + " mixed slots");
+
+    // Variant layout (as in make_snapmaker_project_shape): one value per filament variant, mapped by filament_self_index.
+    std::vector<int> self_index;
+    if (const auto *si = work.option<ConfigOptionInts>("filament_self_index"))
+        self_index = si->values;
+    const auto *variant_names = work.option<ConfigOptionStrings>("filament_extruder_variant");
+    bool        has_variants  = self_index.size() > total && variant_names != nullptr && variant_names->size() == self_index.size();
+    size_t      variant_tail  = 0;
+    if (has_variants)
+        for (int v : self_index) {
+            if (v < 1 || size_t(v) > total)
+                return inconsistent("filament_self_index is out of range");
+            if (size_t(v) > n)
+                ++variant_tail;
+        }
+    std::set<std::string> cut_keys = per_filament_vector_keys();
+    cut_keys.insert("filament_self_index");
+    for (const std::string &key : cut_keys) {
+        if (key == "compatible_printers" || key == "compatible_prints")
+            continue;
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(work.option(key));
+        if (opt == nullptr)
+            continue;
+        const bool is_variant_key = filament_options_with_variant.count(key) != 0 || key == "filament_extruder_variant" || key == "filament_self_index";
+        // Legitimate lengths: one per filament, one per variant, or empty or a single shared value (left alone by the save, as the converter accepts).
+        const bool ok = opt->size() == total || opt->size() <= 1 || (has_variants && is_variant_key && opt->size() == self_index.size());
+        if (!ok)
+            return inconsistent("'" + key + "' has " + std::to_string(opt->size()) + " values");
+    }
+    for (const char *key : { "inherits_group", "compatible_machine_expression_group", "different_settings_to_system" }) {
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(work.option(key));
+        if (opt != nullptr && opt->size() == n + 2)
+            return inconsistent(std::string("'") + key + "' was not restored");
+    }
+    // Per key: the tail must be exactly what the save removed.
+    for (const auto &item : side["keys"].items()) {
+        const auto  *opt     = dynamic_cast<const ConfigOptionVectorBase *>(work.option(item.key()));
+        const size_t removed = item.value()["idx"].size();
+        const bool   variant = has_variants && opt->size() == self_index.size() && opt->size() != total && opt->size() != total + 2;
+        if (removed != (variant ? variant_tail : total - n))
+            return inconsistent("'" + item.key() + "' has " + std::to_string(removed) + " restored values");
     }
     restored = std::move(work);
     return true;

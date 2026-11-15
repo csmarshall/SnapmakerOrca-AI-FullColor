@@ -20875,7 +20875,14 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     // `cfg` (plate filament info below) keep the full slot list. Every other export keeps the full config (#122).
     DynamicPrintConfig snapmaker_cfg;
     if (export_config && is_explicit_project_save(strategy)) {
-        SnapmakerProjectShape shape = make_snapmaker_project_shape(cfg, snapmaker_cfg);
+        SnapmakerProjectShape shape;
+        try {
+            shape = make_snapmaker_project_shape(cfg, snapmaker_cfg);
+        } catch (const std::exception &e) {
+            // Never let the shaping fail the save: write the unshaped project instead.
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": Snapmaker project shape failed, saving the full config: " << e.what();
+            shape = SnapmakerProjectShape();
+        }
         if (shape.transformed) {
             for (const std::string &w : shape.warnings)
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": Snapmaker project shape: " << w;
