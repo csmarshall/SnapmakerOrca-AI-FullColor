@@ -6,6 +6,7 @@
 #include <cctype>
 #include <system_error>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -320,6 +321,40 @@ size_t deploy_allow_lists(const std::filesystem::path    &source_root,
         if (allow_list_deployment(source_root, target_root, bundle) && !deploy_allow_list(source_root, target_root, bundle))
             ++failed;
     return failed;
+}
+
+std::optional<std::string> read_deployed_allow_list(const std::filesystem::path &target_root, const std::string &vendor)
+{
+    const std::optional<AllowListCopy> copy = allow_list_deployment(target_root, target_root, vendor);
+    if (!copy)
+        return std::nullopt;
+    std::ifstream stream(copy->source, std::ios::binary);
+    if (!stream.good())
+        return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+}
+
+bool relay_allow_list_after_install(const std::filesystem::path      &shipped_root,
+                                    const std::filesystem::path      &target_root,
+                                    const std::string                &vendor,
+                                    const std::optional<std::string> &previous)
+{
+    if (vendor != g_snapmaker_vendor)
+        return false;
+    const std::filesystem::path target = target_root / vendor / "filament" / g_allow_list_file_name;
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(target, ec))
+        return true; // the install laid one: it wins
+
+    if (previous) {
+        std::filesystem::create_directories(target.parent_path(), ec);
+        std::ofstream stream(target, std::ios::binary | std::ios::trunc);
+        stream << *previous;
+        stream.close();
+        if (stream.good())
+            return true;
+    }
+    return deploy_allow_list(shipped_root, target_root, vendor);
 }
 
 bool install_then_deploy(const std::vector<std::string>                              &bundles,

@@ -147,6 +147,19 @@ size_t deploy_allow_lists(const std::filesystem::path       &source_root,
                           const std::filesystem::path       &target_root,
                           const std::vector<std::string>    &bundles);
 
+/** @brief Content of the deployed allow-list for @p vendor, or nothing (not Snapmaker, absent or unreadable). Take it
+ *         before an install that may remove the vendor directory (an .opc install does). */
+std::optional<std::string> read_deployed_allow_list(const std::filesystem::path &target_root, const std::string &vendor);
+
+/** @brief After an install, makes sure the vendor has an allow-list: a list the install laid is kept; otherwise
+ *         @p previous (the list deployed before the install) is restored; otherwise the shipped copy under
+ *         @p shipped_root is laid. Returns true when a list exists afterwards; invents nothing when there is
+ *         no source. Filesystem only. */
+bool relay_allow_list_after_install(const std::filesystem::path       &shipped_root,
+                                    const std::filesystem::path       &target_root,
+                                    const std::string                 &vendor,
+                                    const std::optional<std::string>  &previous);
+
 /** @brief Runs @p install, then deploys the allow-lists whether or not it succeeded (a partial install may still
  *         have replaced vendor directories); returns the install result and, when
  *         @p deploy_failures is given, stores how many deployments failed there. */

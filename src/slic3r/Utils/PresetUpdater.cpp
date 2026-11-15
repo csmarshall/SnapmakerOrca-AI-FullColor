@@ -157,7 +157,13 @@ struct Update
             if (is_opc) {
                 fs::remove(target.parent_path() / (vendor + ".json"), ec);
                 ec.clear();
+                // remove_all drops a deployed filament_allow_list.json with the vendor directory, which would bring
+                // back the older shipped list (#115): keep it, or re-lay the shipped one so the vendor is never left without.
+                const std::filesystem::path vendor_root(target.parent_path().string());
+                const auto previous_list = GUI::read_deployed_allow_list(vendor_root, vendor);
                 fs::remove_all(target.parent_path() / vendor, ec);
+                GUI::relay_allow_list_after_install(std::filesystem::path((fs::path(resources_dir()) / "profiles").string()),
+                                                    vendor_root, vendor, previous_list);
             }
             else {
                 fs::remove(target.parent_path() / (vendor + ".opc"), ec);

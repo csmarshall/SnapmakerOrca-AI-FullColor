@@ -603,3 +603,59 @@ TEST_CASE("system comparator sorts with std::sort when rows share a rank and ven
     for (size_t i = 0; i < rows.size(); ++i)
         CHECK(sorted_a[i].item.display_name == sorted_b[i].item.display_name); // input order does not leak in
 }
+
+// ---- #115: the allow-list survives an .opc install that wipes the vendor directory ----
+
+namespace
+{
+std::string slurp(const std::filesystem::path &path)
+{
+    std::ifstream stream(path);
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+}
+} // namespace
+
+TEST_CASE("relay_allow_list_after_install keeps or re-lays the allow-list (#115)", "[GUI][FilamentSort][opc]")
+{
+    ScratchDir scratch("filament_sort_relay_test");
+    const auto shipped_root = scratch.path / "rsrc";
+    const auto target_root  = scratch.path / "data" / "system";
+    const auto shipped      = shipped_root / "Snapmaker" / "filament" / "filament_allow_list.json";
+    const auto deployed     = target_root / "Snapmaker" / "filament" / "filament_allow_list.json";
+
+    SECTION("a deployed list present before the install is still present with the same content after")
+    {
+        write_file(shipped, k_order_json);
+        write_file(deployed, k_other_json);
+        const auto before = read_deployed_allow_list(target_root, "Snapmaker");
+        REQUIRE(before.has_value());
+        std::filesystem::remove_all(target_root / "Snapmaker"); // what Update::install does for an .opc
+        CHECK(relay_allow_list_after_install(shipped_root, target_root, "Snapmaker", before));
+        CHECK(slurp(deployed) == k_other_json); // not the older shipped one
+    }
+    SECTION("no list deployed: the shipped list is laid")
+    {
+        write_file(shipped, k_order_json);
+        CHECK_FALSE(read_deployed_allow_list(target_root, "Snapmaker").has_value());
+        CHECK(relay_allow_list_after_install(shipped_root, target_root, "Snapmaker", std::nullopt));
+        CHECK(slurp(deployed) == k_order_json);
+    }
+    SECTION("shipped list missing and nothing deployed: no crash, nothing invented")
+    {
+        CHECK_FALSE(relay_allow_list_after_install(shipped_root, target_root, "Snapmaker", std::nullopt));
+        CHECK_FALSE(std::filesystem::exists(deployed));
+    }
+    SECTION("a list the install itself laid wins over the saved one and the shipped one")
+    {
+        write_file(shipped, k_order_json);
+        write_file(deployed, "{\"from\": \"opc\"}");
+        CHECK(relay_allow_list_after_install(shipped_root, target_root, "Snapmaker", std::string(k_other_json)));
+        CHECK(slurp(deployed) == "{\"from\": \"opc\"}");
+    }
+    SECTION("other vendors are left alone")
+    {
+        write_file(shipped_root / "BBL" / "filament" / "filament_allow_list.json", k_order_json);
+        CHECK_FALSE(relay_allow_list_after_install(shipped_root, target_root, "BBL", std::nullopt));
+        CHECK_FALSE(read_deployed_allow_list(target_root, "BBL").has_value());
+    }
+}
