@@ -1,4 +1,4 @@
-// Save-time Snapmaker shape of a project config with mixed slots (ticket #122, slice 1: pure transform, not wired).
+// Save-time Snapmaker shape of a project config with mixed slots (ticket #122, slice 1: pure transform; slice 2: save hook, sidecar restore, 3MF round trip).
 //
 // What these tests cannot prove: the expected rows come from this build's serializer (which mirrors Snapmaker's)
 // plus one row string copied from a real Snapmaker Orca 2.4.1 project, so they show agreement with those, not that
@@ -7,8 +7,21 @@
 
 #include <nlohmann/json.hpp>
 
+#include <functional>
+#include <sstream>
+
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem.hpp>
+
+#include "libslic3r/Format/ProjectStrategy.hpp"
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/MixedFilamentLegacy.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/Semver.hpp"
+#include "libslic3r/miniz_extension.hpp"
+#include "test_utils.hpp"
 
 using namespace Slic3r;
 
@@ -282,4 +295,352 @@ TEST_CASE("Snapmaker shape: a non-contiguous mixed tail or fewer than two physic
     one.option<ConfigOptionBools>("filament_is_mixed")->values[0] = 1;
     s = shape_of(one);
     CHECK_FALSE(s.transformed);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Slice 2: restore_from_sidecar, the strategy predicate and the real 3MF writer and loader. Same limit as above: the
+// round trip proves our writer, loader and restore agree with each other, not that Snapmaker Orca reopens the file.
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// 4 physical + 5 mixed slots: two converted (marker) rows, a native pair, a 3-component blend and a degenerate slot.
+DynamicPrintConfig rich_project()
+{
+    DynamicPrintConfig c = converted(4, "1,2,1,1,30,0,g,w,m2,z0,xa0,xb0,d0,o0,u7;2,3,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u9;"
+                                        "3,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u11;1,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u12;"
+                                        "2,4,1,1,50,0,g,w,m2,z0,xa0,xb0,d0,o0,u13");
+    auto set = [&](const char *key, size_t slot, const char *v) { c.option<ConfigOptionStrings>(key)->values[slot] = v; };
+    set("filament_mixed_engine_row", 6, "");
+    set("filament_mixed_components", 6, "3,4");
+    set("filament_mixed_sublayer_ratios", 6, "0.7000,0.3000");
+    set("filament_mixed_engine_row", 7, "");
+    set("filament_mixed_components", 7, "1,2,3");
+    set("filament_mixed_sublayer_ratios", 7, "0.5000,0.2500,0.2500");
+    set("filament_mixed_gradient_curve", 7, "0,0;1,1");
+    set("filament_mixed_engine_row", 8, "");
+    set("filament_mixed_components", 8, "0,4");
+    set("filament_colour", 7, "#123456");
+    return c;
+}
+
+std::vector<std::string> sidecar_keys(const std::string &sidecar)
+{
+    std::vector<std::string> keys;
+    for (const auto &item : nlohmann::json::parse(sidecar)["keys"].items())
+        keys.push_back(item.key());
+    return keys;
+}
+
+struct Written
+{
+    std::string              project_settings; // Metadata/project_settings.config as saved (before any tampering)
+    DynamicPrintConfig       loaded;
+    std::vector<std::string> plate_warnings;
+    int                      object_extruder = 0;
+    bool                     ok = false;
+};
+
+bool read_entry(const std::string &path, const std::string &entry, std::string &out)
+{
+    mz_zip_archive zip;
+    mz_zip_zero_struct(&zip);
+    if (!open_zip_reader(&zip, path))
+        return false;
+    bool   found = false;
+    mz_uint n    = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < n && !found; ++i) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st))
+            continue;
+        std::string name(st.m_filename);
+        std::replace(name.begin(), name.end(), '\\', '/');
+        if (boost::algorithm::iequals(name, entry)) {
+            out.resize(st.m_uncomp_size);
+            found = mz_zip_reader_extract_to_mem(&zip, i, out.data(), out.size(), 0) != 0;
+        }
+    }
+    close_zip_reader(&zip);
+    return found;
+}
+
+// Copies the archive `from` to `to`, replacing Metadata/project_settings.config with `replacement`.
+void rewrite_project_settings(const std::string &from, const std::string &to, const std::string &replacement)
+{
+    mz_zip_archive in;
+    mz_zip_zero_struct(&in);
+    REQUIRE(open_zip_reader(&in, from));
+    mz_zip_archive dst;
+    mz_zip_zero_struct(&dst);
+    REQUIRE(mz_zip_writer_init_file(&dst, to.c_str(), 0));
+    for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&in); ++i) {
+        mz_zip_archive_file_stat st;
+        REQUIRE(mz_zip_reader_file_stat(&in, i, &st));
+        std::vector<char> data(st.m_uncomp_size);
+        if (!data.empty())
+            REQUIRE(mz_zip_reader_extract_to_mem(&in, i, data.data(), data.size(), 0));
+        const bool   is_cfg = std::string(st.m_filename) == "Metadata/project_settings.config";
+        const void  *p      = is_cfg ? static_cast<const void *>(replacement.data()) : static_cast<const void *>(data.data());
+        const size_t len    = is_cfg ? replacement.size() : data.size();
+        REQUIRE(mz_zip_writer_add_mem(&dst, st.m_filename, p, len, MZ_DEFAULT_COMPRESSION));
+    }
+    REQUIRE(mz_zip_writer_finalize_archive(&dst));
+    mz_zip_writer_end(&dst);
+    close_zip_reader(&in);
+}
+
+// Saves `config` (plus `extras`) through the real writer, then reloads it through the real loader. `tamper` may
+// edit the saved project_settings.config JSON before the reload.
+Written save_and_reload(const DynamicPrintConfig &config, const std::vector<std::pair<std::string, std::string>> &extras,
+                        const std::function<void(nlohmann::json &)> &tamper = nullptr)
+{
+    Written                  w;
+    ScopedSlic3rTemporaryDir temporary_dir("orca_mixed_roundtrip");
+    ScopedTemporaryFile      file(".3mf");
+    std::string              path = file.string();
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance();
+    object->config.set_key_value("extruder", new ConfigOptionInt(6)); // a mixed slot id
+    model.set_backup_path((temporary_dir.path() / "src").string());
+
+    DynamicPrintConfig source = config;
+    PlateData          plate;
+    plate.plate_index = 0;
+    StoreParams sp;
+    sp.path                   = path;
+    sp.model                  = &model;
+    sp.config                 = &source;
+    sp.strategy               = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    sp.extra_project_settings = extras;
+    sp.plate_data_list.push_back(&plate);
+    if (!store_bbs_3mf(sp))
+        return w;
+    if (!read_entry(path, "Metadata/project_settings.config", w.project_settings))
+        return w;
+
+    ScopedTemporaryFile edited_file(".3mf");
+    if (tamper) {
+        nlohmann::json j = nlohmann::json::parse(w.project_settings);
+        tamper(j);
+        rewrite_project_settings(path, edited_file.string(), j.dump(1, '\t', false));
+        path = edited_file.string();
+    }
+
+    Model                     reloaded_model;
+    ScopedTemporaryDir        loaded_backup("orca_mixed_roundtrip_loaded");
+    reloaded_model.set_backup_path(loaded_backup.string());
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Enable };
+    PlateDataPtrs             plates;
+    std::vector<Preset *>     project_presets;
+    bool   is_bbl_3mf = false, is_orca_3mf = false;
+    Semver file_version;
+    w.ok = load_bbs_3mf(path.c_str(), &w.loaded, &ctxt, &reloaded_model, &plates, &project_presets, &is_bbl_3mf, &is_orca_3mf,
+                        &file_version, nullptr, LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+    for (PlateData *pl : plates)
+        if (pl != nullptr)
+            for (const auto &sw : pl->warnings)
+                w.plate_warnings.push_back(sw.msg);
+    release_PlateData_list(plates);
+    if (!reloaded_model.objects.empty())
+        if (const auto *e = dynamic_cast<const ConfigOptionInt *>(reloaded_model.objects.front()->config.option("extruder")))
+            w.object_extruder = e->value;
+    return w;
+}
+
+std::vector<std::pair<std::string, std::string>> extras_of(const SnapmakerProjectShape &s)
+{
+    return { { "mixed_filament_definitions", s.mixed_filament_definitions }, { kMixedSidecarKey, s.sidecar } };
+}
+
+} // namespace
+
+TEST_CASE("Snapmaker shape: only an explicit project save gets the Snapmaker shape", "[MixedFilament][snapmaker_shape]")
+{
+    // Plater::save_project
+    CHECK(is_explicit_project_save(SaveStrategy::SplitModel | SaveStrategy::ShareMesh));
+    CHECK(is_explicit_project_save(SaveStrategy::SplitModel | SaveStrategy::ShareMesh | SaveStrategy::FullPathSources));
+    // sliced plate export, backup/autosave, copies, published, plain Silence exports
+    CHECK_FALSE(is_explicit_project_save(SaveStrategy::Silence | SaveStrategy::SplitModel | SaveStrategy::WithGcode | SaveStrategy::SkipModel));
+    CHECK_FALSE(is_explicit_project_save(SaveStrategy::Backup));
+    CHECK_FALSE(is_explicit_project_save(SaveStrategy::SplitModel | SaveStrategy::ShareMesh | SaveStrategy::Silence));
+    CHECK_FALSE(is_explicit_project_save(SaveStrategy::SplitModel | SaveStrategy::ShareMesh | SaveStrategy::Silence | SaveStrategy::MinimalPublished));
+    CHECK_FALSE(is_explicit_project_save(SaveStrategy::Silence));
+}
+
+TEST_CASE("Snapmaker restore: shape then restore gives back the original config exactly", "[MixedFilament][snapmaker_shape]")
+{
+    const DynamicPrintConfig full = rich_project();
+    REQUIRE(strs(full, "filament_colour").size() == 9);
+    const Shaped s = shape_of(full);
+    REQUIRE(s.transformed);
+    DynamicPrintConfig restored;
+    std::string        why;
+    REQUIRE(restore_from_sidecar(s.config, s.mixed_filament_definitions, s.sidecar, restored, why));
+    CHECK(why.empty());
+    CHECK(restored == full);
+}
+
+TEST_CASE("Snapmaker restore: variants and groups come back too", "[MixedFilament][snapmaker_shape]")
+{
+    DynamicPrintConfig base = project_config(3);
+    base.set_key_value("filament_self_index", new ConfigOptionInts({ 1, 1, 2, 2, 3, 3 }));
+    base.set_key_value("filament_extruder_variant", new ConfigOptionStrings({ "L", "R", "L", "R", "L", "R" }));
+    base.set_key_value("nozzle_temperature", new ConfigOptionInts({ 200, 201, 210, 211, 220, 221 }));
+    base.set_key_value("inherits_group", new ConfigOptionStrings({ "P", "F1", "F2", "F3", "M" }));
+    DynamicPrintConfig c = base;
+    REQUIRE(convert_legacy_mixed_filaments(c, "2,3,1,1,40,0,g,w,m2,z0,xa0,xb0,d0,o0,u1;1,3,1,1,60,0,g,w,m2,z0,xa0,xb0,d0,o0,u2").slots_added == 2);
+    const Shaped s = shape_of(c);
+    REQUIRE(s.transformed);
+    DynamicPrintConfig restored;
+    std::string        why;
+    REQUIRE(restore_from_sidecar(s.config, s.mixed_filament_definitions, s.sidecar, restored, why));
+    CHECK(restored == c);
+}
+
+TEST_CASE("Snapmaker restore: a stale, edited or malformed sidecar is refused and nothing is changed", "[MixedFilament][snapmaker_shape]")
+{
+    const Shaped s = shape_of(rich_project());
+    REQUIRE(s.transformed);
+    const DynamicPrintConfig marker   = project_config(2);
+    DynamicPrintConfig       restored = marker;
+    std::string              why;
+    const nlohmann::json     good = nlohmann::json::parse(s.sidecar);
+
+    SECTION("definitions edited after the save (digest)") {
+        CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions + ";1,2,1,0,50,0,g,w,m2,z0,xa0,xb0,d0,o1,u99", s.sidecar, restored, why));
+    }
+    SECTION("physical filament count changed (n)") {
+        DynamicPrintConfig five = s.config;
+        five.option<ConfigOptionStrings>("filament_colour")->values.push_back("#000000");
+        CHECK_FALSE(restore_from_sidecar(five, s.mixed_filament_definitions, s.sidecar, restored, why));
+    }
+    SECTION("no sidecar") { CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, "", restored, why)); }
+    SECTION("garbage") { CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, "{not json", restored, why)); }
+    SECTION("not an object") { CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, "[1,2]", restored, why)); }
+    SECTION("unknown version") {
+        nlohmann::json j = good;
+        j["version"] = 99;
+        CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, j.dump(), restored, why));
+    }
+    SECTION("a tail that does not fit (too few values)") {
+        nlohmann::json j = good;
+        j["keys"]["filament_settings_id"]["v"] = "OnlyOne";
+        CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, j.dump(), restored, why));
+    }
+    SECTION("index out of range") {
+        nlohmann::json j = good;
+        j["keys"]["filament_settings_id"]["idx"] = nlohmann::json::array({ 4, 5, 99 });
+        CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, j.dump(), restored, why));
+    }
+    SECTION("a key that is not a vector option") {
+        nlohmann::json j = good;
+        j["keys"]["layer_height"] = { { "idx", nlohmann::json::array({ 4 }) }, { "v", "0.2" } };
+        CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, j.dump(), restored, why));
+    }
+    CHECK_FALSE(why.empty());
+    CHECK(restored == marker); // never a partial restore
+}
+
+TEST_CASE("Snapmaker 3MF: a project without extras is written exactly as before", "[MixedFilament][snapmaker_shape][3mf]")
+{
+    const DynamicPrintConfig c = project_config(3);
+    const Written            w = save_and_reload(c, {});
+    REQUIRE(w.ok);
+    std::ostringstream expected;
+    c.save_to_json(expected, "project_settings", "project", SLIC3R_VERSION);
+    CHECK(w.project_settings == expected.str());
+    CHECK(w.project_settings.find("mixed_filament_definitions") == std::string::npos);
+    CHECK(w.project_settings.find(kMixedSidecarKey) == std::string::npos);
+    // and a config without mixed slots yields no extras to write
+    CHECK_FALSE(shape_of(c).transformed);
+}
+
+TEST_CASE("Snapmaker 3MF: extras are the only difference in project_settings.config", "[MixedFilament][snapmaker_shape][3mf]")
+{
+    const DynamicPrintConfig c = project_config(3);
+    const Written w = save_and_reload(c, { { "mixed_filament_definitions", "1,2,1,0,50,0,g,w,m2,z0,xa0,xb0,d0,o1,u1" }, { "orca_ai_mixed_slots", "{}" } });
+    REQUIRE(w.ok);
+    std::ostringstream plain;
+    c.save_to_json(plain, "project_settings", "project", SLIC3R_VERSION);
+    nlohmann::json expected = nlohmann::json::parse(plain.str());
+    expected["mixed_filament_definitions"] = "1,2,1,0,50,0,g,w,m2,z0,xa0,xb0,d0,o1,u1";
+    expected["orca_ai_mixed_slots"]        = "{}";
+    CHECK(nlohmann::json::parse(w.project_settings) == expected);
+}
+
+TEST_CASE("Snapmaker 3MF: save, reopen and restore round trip", "[MixedFilament][snapmaker_shape][3mf]")
+{
+    const DynamicPrintConfig full = rich_project();
+    const Shaped             s    = shape_of(full);
+    REQUIRE(s.transformed);
+
+    const Written w = save_and_reload(s.config, extras_of(s));
+    REQUIRE(w.ok);
+
+    // The saved file is in Snapmaker's shape: n-long vectors, definitions in Snapmaker's format, sidecar present.
+    const nlohmann::json saved = nlohmann::json::parse(w.project_settings);
+    CHECK(saved["filament_colour"].size() == 4);
+    CHECK(saved["filament_settings_id"].size() == 4);
+    CHECK(saved["filament_map"].size() == 4);
+    CHECK(saved["filament_is_mixed"].size() == 4);
+    REQUIRE(saved["mixed_filament_definitions"].is_string());
+    CHECK(saved["mixed_filament_definitions"].get<std::string>() == s.mixed_filament_definitions);
+    const std::vector<std::string> rows = split_rows(s.mixed_filament_definitions);
+    REQUIRE(rows.size() == 5);
+    for (const std::string &row : rows)
+        check_row_valid(row, 4);
+    CHECK(parse_legacy_mixed_definitions(saved["mixed_filament_definitions"].get<std::string>(), 4).rows.size() == 5);
+    REQUIRE(saved[kMixedSidecarKey].is_string());
+
+    // Reopened by this program: the full slot data is back, field for field, and nothing was converted.
+    for (const std::string &key : sidecar_keys(s.sidecar)) {
+        INFO(key);
+        REQUIRE(w.loaded.option(key) != nullptr);
+        CHECK(*w.loaded.option(key) == *full.option(key));
+    }
+    CHECK(strs(w.loaded, "filament_colour").size() == 9);
+    CHECK(strs(w.loaded, "filament_mixed_components")[7] == "1,2,3");
+    CHECK(strs(w.loaded, "filament_mixed_gradient_curve")[7] == "0,0;1,1");
+    CHECK(strs(w.loaded, "filament_mixed_engine_row")[4] == strs(full, "filament_mixed_engine_row")[4]);
+    CHECK(w.object_extruder == 6);
+    for (const std::string &m : w.plate_warnings) {
+        INFO(m);
+        CHECK(m.find("both") == std::string::npos);
+        CHECK(m.find("could not be used") == std::string::npos);
+    }
+}
+
+TEST_CASE("Snapmaker 3MF: a stale or stripped sidecar falls back to the converter", "[MixedFilament][snapmaker_shape][3mf]")
+{
+    const Shaped s = shape_of(rich_project());
+    REQUIRE(s.transformed);
+
+    Written w;
+    SECTION("digest tampered") {
+        w = save_and_reload(s.config, extras_of(s), [](nlohmann::json &j) {
+            nlohmann::json side = nlohmann::json::parse(j[kMixedSidecarKey].get<std::string>());
+            side["digest"]      = "0000000000000000";
+            j[kMixedSidecarKey] = side.dump();
+        });
+        REQUIRE(w.ok);
+        bool warned = false;
+        for (const std::string &m : w.plate_warnings)
+            warned = warned || m.find("could not be used") != std::string::npos;
+        CHECK(warned);
+    }
+    SECTION("sidecar garbage") {
+        w = save_and_reload(s.config, extras_of(s), [](nlohmann::json &j) { j[kMixedSidecarKey] = "{nope"; });
+        REQUIRE(w.ok);
+    }
+    SECTION("sidecar removed (a Snapmaker round trip)") {
+        w = save_and_reload(s.config, extras_of(s), [](nlohmann::json &j) { j.erase(kMixedSidecarKey); });
+        REQUIRE(w.ok);
+    }
+    // Converter path: one slot per live row (5) after the 4 physical filaments; sidecar-only data is gone.
+    CHECK(strs(w.loaded, "filament_colour").size() == 9);
+    CHECK(w.loaded.option<ConfigOptionBools>("filament_is_mixed")->values.size() == 9);
+    CHECK(strs(w.loaded, "filament_mixed_components")[7] != "1,2,3");
 }

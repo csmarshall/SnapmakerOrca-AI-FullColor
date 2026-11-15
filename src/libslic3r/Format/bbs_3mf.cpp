@@ -1330,6 +1330,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         std::vector<std::string> m_project_flow_support;
         // mixed_filament_definitions from a Snapmaker Orca project file (not an option of this build)
         std::string m_legacy_mixed_definitions;
+        // orca_ai_mixed_slots from a project this program saved in the Snapmaker shape (ticket #122)
+        std::string m_mixed_sidecar;
+        bool        m_mixed_sidecar_restored = false;
         std::vector<std::string> m_legacy_mixed_warnings;
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
@@ -1607,6 +1610,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_curr_metadata_name.clear();
         m_curr_characters.clear();
         m_legacy_mixed_definitions.clear();
+        m_mixed_sidecar.clear();
+        m_mixed_sidecar_restored = false;
         m_legacy_mixed_warnings.clear();
         //BBS: plater data init
         m_plater_data.clear();
@@ -2483,12 +2488,31 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         // A Snapmaker mixed-filament project: append its mixed rows as slots first, so their ids
         // count toward max_filament_id below and the objects' extruder ids survive.
-        if (m_load_config && !m_legacy_mixed_definitions.empty()) {
+        // Our own file (valid sidecar for this definitions string and filament count): restore the full slot list from
+        // it and skip the converter, so the string is never converted twice and the "both key sets" warning stays off.
+        // Anything else (no sidecar, stale, malformed) takes the converter exactly as for a Snapmaker project.
+        if (m_load_config && !m_legacy_mixed_definitions.empty() && !m_mixed_sidecar.empty()) {
+            DynamicPrintConfig restored;
+            std::string        why;
+            if (restore_from_sidecar(config, m_legacy_mixed_definitions, m_mixed_sidecar, restored, why)) {
+                config = std::move(restored);
+                m_mixed_sidecar_restored = true;
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": mixed filament slots restored from the project sidecar";
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": mixed filament sidecar ignored, converting the Snapmaker definitions instead: " << why;
+                m_legacy_mixed_warnings.push_back("This project's mixed filament details (saved by this program) could not be used (" + why +
+                                                  "); the mixed filaments were rebuilt from the Snapmaker definitions and some detail may be lost.");
+            }
+        }
+        if (m_load_config && !m_legacy_mixed_definitions.empty() && !m_mixed_sidecar_restored) {
+            std::vector<std::string> sidecar_warnings = std::move(m_legacy_mixed_warnings);
+            m_legacy_mixed_warnings.clear();
             LegacyMixedConversion converted = convert_legacy_mixed_filaments(config, m_legacy_mixed_definitions);
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": Snapmaker mixed filament definitions converted, slots added " << converted.slots_added;
             for (const std::string& w : converted.warnings)
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << w;
-            m_legacy_mixed_warnings = std::move(converted.warnings);
+            m_legacy_mixed_warnings = std::move(sidecar_warnings);
+            m_legacy_mixed_warnings.insert(m_legacy_mixed_warnings.end(), converted.warnings.begin(), converted.warnings.end());
         }
 
         const ConfigOptionStrings* filament_ids_opt = config.option<ConfigOptionStrings>("filament_settings_id");
@@ -2496,7 +2520,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // Snapmaker project: objects on an id beyond the converted slots (e.g. auto-generated pair rows the string does
         // not carry) are reset to filament 1 below; count them so the plate can say so.
         size_t legacy_ids_reset = 0;
-        const bool legacy_project = m_load_config && !m_legacy_mixed_definitions.empty();
+        const bool legacy_project = m_load_config && !m_legacy_mixed_definitions.empty() && !m_mixed_sidecar_restored;
         for (ModelObject* mo : m_model->objects) {
             const ConfigOptionInt* extruder_opt = dynamic_cast<const ConfigOptionInt*>(mo->config.option("extruder"));
             int extruder_id = 0;
@@ -2968,6 +2992,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 const auto mixed_it = j.find("mixed_filament_definitions");
                 if (mixed_it != j.end() && mixed_it->is_string())
                     m_legacy_mixed_definitions = mixed_it->get<std::string>();
+                const auto sidecar_it = j.find(kMixedSidecarKey);
+                if (sidecar_it != j.end() && sidecar_it->is_string())
+                    m_mixed_sidecar = sidecar_it->get<std::string>();
             } catch (const std::exception &e) {
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read filament_flow_support: " << e.what();
                 m_project_flow_support.clear();
@@ -6410,6 +6437,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_save_gcode { false };        // whether to save gcode for normal save
         bool m_skip_model { false };        // skip model when exporting .gcode.3mf
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
+        std::vector<std::pair<std::string, std::string>> m_extra_project_settings; // raw string entries for project_settings.config (#122)
         bool m_minimal_published { false }; // published 3MF: omit the project config, the embedded preset files and the slicer tags
         bool m_use_loaded_id { false };        // whether to use loaded id for identify_id
         bool m_share_mesh { false };        // whether to share mesh between objects
@@ -6514,6 +6542,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_share_mesh       = store_params.strategy & SaveStrategy::ShareMesh;
         m_from_backup_save = store_params.strategy & SaveStrategy::Backup;
         m_minimal_published = store_params.strategy & SaveStrategy::MinimalPublished;
+        m_extra_project_settings = store_params.extra_project_settings;
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
 
@@ -8384,7 +8413,26 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     {
         const std::string& temp_path = model.get_backup_path();
         std::string temp_file = temp_path + std::string("/") + "_temp_1.config";
-        config.save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(SLIC3R_VERSION));
+        if (m_extra_project_settings.empty())
+            config.save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(SLIC3R_VERSION));
+        else {
+            // Same JSON as save_to_json, plus raw string entries for keys that are not registered options. The
+            // JSON object is key-sorted, so re-dumping it with the same layout keeps the file otherwise identical.
+            std::ostringstream ss;
+            config.save_to_json(ss, std::string("project_settings"), std::string("project"), std::string(SLIC3R_VERSION));
+            nlohmann::json j = nlohmann::json::parse(ss.str());
+            for (const auto &kv : m_extra_project_settings)
+                j[kv.first] = kv.second;
+            std::ostringstream out;
+            out << j.dump(1, '\t', false) << std::endl;
+            boost::nowide::ofstream f(temp_file, std::ios::out | std::ios::trunc | std::ios::binary);
+            f << out.str();
+            f.close();
+            if (!f) {
+                add_error("Unable to write project config file");
+                return false;
+            }
+        }
         return _add_file_to_archive(archive, BBS_PROJECT_CONFIG_FILE, temp_file);
     }
 

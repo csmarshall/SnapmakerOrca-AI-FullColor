@@ -7,6 +7,7 @@
 #include "CalibUtils.hpp"
 #include "Flashforge.hpp"
 #include "RemoteAPI/RemoteAPIController.hpp"
+#include "libslic3r/MixedFilamentLegacy.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r_version.h"
 
@@ -20869,7 +20870,21 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     store_params.plate_data_list = plate_data_list;
     store_params.export_plate_idx = export_plate_idx;
     store_params.project_presets = project_presets;
-    store_params.config = export_config ? &cfg : nullptr;
+    // Explicit project save only: a project with mixed slots is written in the shape Snapmaker Orca can reopen (per-filament
+    // vectors cut to the physical filaments, mixed_filament_definitions, private sidecar). A copy; the live config and
+    // `cfg` (plate filament info below) keep the full slot list. Every other export keeps the full config (#122).
+    DynamicPrintConfig snapmaker_cfg;
+    if (export_config && is_explicit_project_save(strategy)) {
+        SnapmakerProjectShape shape = make_snapmaker_project_shape(cfg, snapmaker_cfg);
+        if (shape.transformed) {
+            for (const std::string &w : shape.warnings)
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": Snapmaker project shape: " << w;
+            store_params.extra_project_settings.emplace_back("mixed_filament_definitions", shape.mixed_filament_definitions);
+            store_params.extra_project_settings.emplace_back(kMixedSidecarKey, shape.sidecar);
+        }
+    }
+    const bool snapmaker_shaped = !store_params.extra_project_settings.empty();
+    store_params.config = export_config ? (snapmaker_shaped ? &snapmaker_cfg : &cfg) : nullptr;
     store_params.thumbnail_data = thumbnails;
     store_params.no_light_thumbnail_data  = no_light_thumbnails;
     store_params.top_thumbnail_data = top_thumbnails;

@@ -918,4 +918,80 @@ SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &ful
     return out;
 }
 
+bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &definitions, const std::string &sidecar,
+                          DynamicPrintConfig &restored, std::string &error)
+{
+    error.clear();
+    if (sidecar.empty()) {
+        error = "no sidecar";
+        return false;
+    }
+    nlohmann::json side = nlohmann::json::parse(sidecar, nullptr, /*allow_exceptions*/ false);
+    if (!side.is_object() || !side.contains("version") || !side["version"].is_number_integer() || !side.contains("n") ||
+        !side["n"].is_number_unsigned() || !side.contains("total") || !side["total"].is_number_unsigned() ||
+        !side.contains("digest") || !side["digest"].is_string() || !side.contains("keys") || !side["keys"].is_object()) {
+        error = "sidecar is malformed";
+        return false;
+    }
+    if (side["version"].get<int>() != kMixedSidecarVersion) {
+        error = "sidecar version " + std::to_string(side["version"].get<int>()) + " is not supported";
+        return false;
+    }
+    const size_t n     = side["n"].get<size_t>();
+    const size_t total = side["total"].get<size_t>();
+    const auto  *colours = shaped.option<ConfigOptionStrings>("filament_colour");
+    if (colours == nullptr || colours->values.size() != n || total <= n || total > n + 64) {
+        error = "sidecar does not match the number of filaments in the project";
+        return false;
+    }
+    if (side["digest"].get<std::string>() != mixed_sidecar_digest(n, definitions)) {
+        error = "sidecar does not match mixed_filament_definitions (the project was edited by another program)";
+        return false;
+    }
+
+    // Work on a copy; `restored` is only assigned once every key has been rebuilt.
+    DynamicPrintConfig work = shaped;
+    for (const auto &item : side["keys"].items()) {
+        const nlohmann::json &entry = item.value();
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(work.option(item.key()));
+        if (opt == nullptr || !entry.is_object() || !entry.contains("idx") || !entry["idx"].is_array() || !entry.contains("v") ||
+            !entry["v"].is_string()) {
+            error = "sidecar entry '" + item.key() + "' is not usable";
+            return false;
+        }
+        std::vector<size_t> removed;
+        for (const auto &v : entry["idx"]) {
+            if (!v.is_number_unsigned()) {
+                error = "sidecar entry '" + item.key() + "' has a bad index";
+                return false;
+            }
+            removed.push_back(v.get<size_t>());
+        }
+        const size_t full = opt->size() + removed.size();
+        std::vector<char> is_removed(full, 0);
+        for (size_t r : removed) {
+            if (r >= full || is_removed[r]) {
+                error = "sidecar entry '" + item.key() + "' has an index out of range";
+                return false;
+            }
+            is_removed[r] = 1;
+        }
+        std::unique_ptr<ConfigOption> tail(opt->clone());
+        if (!tail->deserialize(entry["v"].get<std::string>()) || static_cast<ConfigOptionVectorBase *>(tail.get())->size() != removed.size()) {
+            error = "sidecar entry '" + item.key() + "' does not parse";
+            return false;
+        }
+        std::unique_ptr<ConfigOption> kept(opt->clone());
+        opt->resize(full, kept->is_scalar() || static_cast<ConfigOptionVectorBase *>(kept.get())->empty() ? tail.get() : kept.get());
+        size_t ik = 0, it = 0;
+        for (size_t i = 0; i < full; ++i)
+            if (is_removed[i])
+                opt->set_at(tail.get(), i, it++);
+            else
+                opt->set_at(kept.get(), i, ik++);
+    }
+    restored = std::move(work);
+    return true;
+}
+
 } // namespace Slic3r

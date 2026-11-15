@@ -241,6 +241,10 @@ struct StoreParams
     std::vector<PlateBBoxData*> id_bboxes;
     BBLProject* project = nullptr;
     BBLProfile* profile = nullptr;
+    // Extra string entries written verbatim into Metadata/project_settings.config (keys that are not registered
+    // options, e.g. mixed_filament_definitions and the orca_ai_mixed_slots sidecar, ticket #122). Empty: the
+    // file is written exactly as before.
+    std::vector<std::pair<std::string, std::string>> extra_project_settings;
 
     StoreParams() {}
 };

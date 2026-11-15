@@ -111,6 +111,14 @@ struct SnapmakerProjectShape
 // data goes into the sidecar. A config without mixed slots, or an already shaped one, comes back unchanged.
 SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped);
 
+// Inverse of make_snapmaker_project_shape. `shaped` is a config as loaded from a shaped project (per-filament
+// vectors of n entries), `definitions` its mixed_filament_definitions string, `sidecar` its orca_ai_mixed_slots
+// string. On success `restored` is the full n + k slot config and true is returned. On any problem (empty or
+// malformed sidecar, unknown version, n or digest not matching `shaped` and `definitions`, a stripped tail that
+// does not fit) `restored` is left untouched, false is returned and `error` says why: never a partial restore.
+bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &definitions, const std::string &sidecar,
+                          DynamicPrintConfig &restored, std::string &error);
+
 // Digest the sidecar carries: 16 hex digits of FNV-1a 64 over "n=<n>\n<definitions>". Detects a stale or edited
 // string, not a malicious one.
 std::string mixed_sidecar_digest(size_t num_physical, const std::string &definitions);

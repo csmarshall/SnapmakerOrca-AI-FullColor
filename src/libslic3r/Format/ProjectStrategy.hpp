@@ -72,6 +72,19 @@ inline bool operator & (SaveStrategy & lhs, SaveStrategy rhs)
     return ((static_cast<T>(lhs) & static_cast<T>(rhs))) == static_cast<T>(rhs);
 }
 
+// True for an explicit project save (Plater::save_project: SplitModel | ShareMesh, optionally FullPathSources) and
+// false for every other export: sliced-plate export (WithGcode), backup/autosave, the send flow, copies and
+// published files (Silence), minimal published, SkipModel. Only an explicit project save is written in the
+// Snapmaker project shape (ticket #122).
+inline bool is_explicit_project_save(SaveStrategy s)
+{
+    using T = std::underlying_type_t<SaveStrategy>;
+    constexpr T not_a_project_save = static_cast<T>(SaveStrategy::Silence) | static_cast<T>(SaveStrategy::WithGcode) |
+                                     static_cast<T>(SaveStrategy::SkipModel) | static_cast<T>(SaveStrategy::MinimalPublished) |
+                                     static_cast<T>(SaveStrategy::SkipStatic) | 0x10000;
+    return (static_cast<T>(s) & not_a_project_save) == 0;
+}
+
 // Progress callback of the 3MF export; cancel may be set to stop it.
 typedef std::function<void(int export_stage, int current, int total, bool& cancel)> Export3mfProgressFn;
 
