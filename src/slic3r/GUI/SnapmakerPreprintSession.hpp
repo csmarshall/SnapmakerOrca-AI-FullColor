@@ -9,6 +9,7 @@
 // inline in tests).
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -98,6 +99,13 @@ public:
         m_started_forwarded = false;
         return epoch;
     }
+    // A non-modal, user-visible notice (the plater's notification manager, wired in PreprintDialog.cpp). Called on the thread that
+    // handles sw_SendGCodes; the owner's callback must hand off to the UI thread itself. Does not change what is sent or started.
+    void set_notifier(std::function<void(const std::string&)> notifier)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_notifier = std::move(notifier);
+    }
     std::uint64_t epoch() const
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -173,7 +181,18 @@ public:
         if (!sent) return SnapmakerPreprintReply::fail("refused: " + why);
         // F2: the printer HAS the script; a context closed meanwhile does not undo that, so this is not "refused".
         nlohmann::json data = nlohmann::json::object();
-        if (dropped) data["dropped_preferences"] = true; // F7: the printer has no preference command: only the map and used lines were sent
+        if (dropped) {
+            data["dropped_preferences"] = true; // F7: the printer has no preference command: only the map and used lines were sent
+            // Snapmaker's page sends the preferences without checking and says nothing; we tell the user they were not applied (#119).
+            std::function<void(const std::string&)> notifier;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                notifier = m_notifier;
+            }
+            if (notifier)
+                notifier("The printer does not know the print-preference command (SET_PRINT_PREFERENCES), so the time-lapse, bed-leveling and "
+                         "flow-calibration choices were not applied. The print itself is not affected.");
+        }
         if (!applied) data["context_closed"] = true;
         return SnapmakerPreprintReply::success(std::move(data));
     }
@@ -318,6 +337,7 @@ private:
         return out;
     }
 
+    std::function<void(const std::string&)>   m_notifier; // guarded by m_mutex
     std::shared_ptr<SnapmakerPreprintContext> m_context;
     std::shared_ptr<SnapmakerPreprintPrinter> m_printer;
     SnapmakerPreprintGate                     m_gate;

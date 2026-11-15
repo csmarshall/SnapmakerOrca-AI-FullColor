@@ -888,6 +888,24 @@ TEST_CASE("pre-print session: F7 a dropped preference command is said in the rep
     CHECK_FALSE(r2["data"].contains("dropped_preferences"));
 }
 
+TEST_CASE("pre-print session: a dropped preference command is also shown to the user, once, as a notice (#119)", "[SSWCP][preprint_profile]")
+{
+    Profile h;
+    std::vector<std::string> notices;
+    h.session->set_notifier([&notices](const std::string& m) { notices.push_back(m); });
+    h.printer->known["SET_PRINT_PREFERENCES"] = Known::No;
+    REQUIRE(is_ok(h.gcodes(plural())));
+    REQUIRE(notices.size() == 1);
+    CHECK(notices[0].find("SET_PRINT_PREFERENCES") != std::string::npos);
+    CHECK(notices[0].find("not applied") != std::string::npos);
+    // the printer has the command: no notice
+    Profile g;
+    std::vector<std::string> none;
+    g.session->set_notifier([&none](const std::string& m) { none.push_back(m); });
+    REQUIRE(is_ok(g.gcodes(plural())));
+    CHECK(none.empty());
+}
+
 TEST_CASE("pre-print bridge: F3 preprint_done is deferred and re-entrancy safe; F8 shutdown and destructor report once", "[SSWCP][preprint_profile]")
 {
     SECTION("deferred out of the handler; the callback destroys the bridge")

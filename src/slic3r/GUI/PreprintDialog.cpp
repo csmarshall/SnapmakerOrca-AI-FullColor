@@ -258,6 +258,7 @@ std::shared_ptr<PreprintDialogController> create_preprint_controller(wxWindow* p
     auto ctx     = std::make_shared<SnapmakerPreprintContext>();
     auto printer = std::make_shared<MoonrakerPreprintPrinter>(std::move(agent));
     auto session = std::make_shared<SnapmakerPreprintSession>(ctx, printer);
+    session->set_notifier([](const std::string& msg) { preprint_notify(msg, false); }); // preprint_notify posts to the UI thread
     auto holder  = std::make_shared<std::weak_ptr<PreprintDialogController>>();
 
     PreprintDialogController::Deps d;
