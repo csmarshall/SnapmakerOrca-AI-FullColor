@@ -3,6 +3,7 @@
 #include "HintNotification.hpp"
 #include "SlicingProgressNotification.hpp"
 #include "GUI.hpp"
+#include "UiDialogLog.hpp"
 #include "ImGuiWrapper.hpp"
 #include "wxExtensions.hpp"
 #include "ObjectDataViewModel.hpp"
@@ -3117,6 +3118,17 @@ bool NotificationManager::push_notification_data(std::unique_ptr<NotificationMan
 			m_used_timestamps.insert(timestamp);
 		} else {
 			return false;
+		}
+	}
+	// #138: log what the user is shown (not progress bars or hints, which update continuously).
+	{
+		const NotificationData& nd = notification->get_data();
+		if (nd.level != NotificationLevel::ProgressBarNotificationLevel && nd.level != NotificationLevel::HintNotificationLevel) {
+			const char* kind = nd.level == NotificationLevel::ErrorNotificationLevel          ? "notification-error"
+			                 : nd.level == NotificationLevel::SeriousWarningNotificationLevel ? "notification-serious-warning"
+			                 : nd.level == NotificationLevel::WarningNotificationLevel        ? "notification-warning"
+			                                                                                  : "notification";
+			log_ui_dialog(kind, "", nd.text1 + (nd.text2.empty() ? "" : "\n" + nd.text2));
 		}
 	}
     if(!notification->is_valid_delete_callback()){

@@ -48,6 +48,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Color.hpp"
 #include "GUI.hpp"
+#include "UiDialogLog.hpp"
 #include "I18N.hpp"
 //#include "ConfigWizard.hpp"
 #include "libslic3r_version.h"
@@ -484,6 +485,7 @@ ErrorDialog::ErrorDialog(wxWindow *parent, const wxString &temp_msg, bool has_co
     , msg(temp_msg)
 {
     add_msg_content(this, content_sizer, msg, has_code_excerpts);
+    log_ui_dialog("error", "", into_u8(msg)); // #138
 
 	// Use a small bitmap for code excerpts, which cannot wrap and so need the width.
 	logo->SetBitmap(create_scaled_bitmap("OrcaSlicer_192px_grayscale.png", this, has_code_excerpts ? 48 : /*1*/64));
@@ -502,6 +504,7 @@ WarningDialog::WarningDialog(wxWindow *parent,
     : MsgDialog(parent, caption.IsEmpty() ? wxString::Format(_L("%s warning"), SLIC3R_APP_FULL_NAME) : caption, 
                         wxString::Format(_L("%s has a warning")+":", SLIC3R_APP_FULL_NAME), style)
 {
+    log_ui_dialog("warning", into_u8(caption), into_u8(message)); // #138
     add_msg_content(this, content_sizer, message);
     finalize();
 }
@@ -518,6 +521,7 @@ MessageDialog::MessageDialog(wxWindow* parent,
     std::function<void(const wxString &)> link_callback /* = nullptr*/)
     : MsgDialog(parent, caption.IsEmpty() ? wxString::Format(_L("%s info"), SLIC3R_APP_FULL_NAME) : caption, wxEmptyString, style, wxBitmap(),forward_str)
 {
+    log_ui_dialog("message", into_u8(caption), into_u8(message)); // #138
     add_msg_content(this, content_sizer, message, false, false, link_text, link_callback);
     SetMaxSize(MSG_DLG_MAX_SIZE);
     finalize();
@@ -532,6 +536,7 @@ RichMessageDialog::RichMessageDialog(wxWindow* parent,
     long style/* = wxOK*/)
     : MsgDialog(parent, caption.IsEmpty() ? wxString::Format(_L("%s info"), SLIC3R_APP_FULL_NAME) : caption, wxEmptyString, style)
 {
+    log_ui_dialog("rich", into_u8(caption), into_u8(message)); // #138
     add_msg_content(this, content_sizer, message);
     finalize();
 }
@@ -561,6 +566,7 @@ InfoDialog::InfoDialog(wxWindow* parent, const wxString &title, const wxString& 
     : MsgDialog(parent, wxString::Format(_L("%s information"), SLIC3R_APP_FULL_NAME), title, style)
 	, msg(msg)
 {
+    log_ui_dialog("info", into_u8(title), into_u8(msg)); // #138
     add_msg_content(this, content_sizer, msg, false, is_marked_msg);
     finalize();
 }

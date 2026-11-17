@@ -434,6 +434,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/Mouse3DController.hpp
     GUI/MsgDialog.cpp
     GUI/MsgDialog.hpp
+    GUI/UiDialogLog.hpp
     GUI/MultiChoiceDialog.hpp
     GUI/MultiChoiceDialog.cpp
     GUI/MultiMachine.cpp
