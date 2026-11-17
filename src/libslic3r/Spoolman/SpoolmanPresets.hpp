@@ -55,6 +55,7 @@
 #include "SpoolmanMapping.hpp"
 #include "SpoolmanParent.hpp"
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -174,9 +175,11 @@ std::vector<ParentCandidate> build_parent_candidates(const PresetCollection &fil
 // Creates or refreshes the Spoolman presets in `filaments`. `catalog` empty => nothing is created or orphaned.
 UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filament> &catalog, const UpsertContext &context);
 
-// Names of the presets a report says must be written to disk: every created and every updated one (unchanged, skipped, orphaned, ambiguous,
-// duplicate and superseded ones are never written). Report order, no repeats.
-std::vector<std::string> names_to_save(const UpsertReport &report);
+// Names of the presets a report says must be written to disk: every created and every updated one, plus every unchanged user preset
+// carrying a parseable Spoolman link whose file `file_exists` says is missing (so a failed or deleted save is retried by the next sync).
+// Unchanged presets whose file exists, and skipped, orphaned, ambiguous, duplicate and superseded ones, are never written. Report order, no
+// repeats. `file_exists` is injected so tests need no data dir; the caller passes a check of the preset's file on disk.
+std::vector<std::string> names_to_save(const UpsertReport &report, const PresetCollection &filaments, const std::function<bool(const Preset &)> &file_exists);
 
 // Names of the orphaned presets (linked, id not in the catalog), in report order. Empty unless `fetch_good`: a failed fetch proves nothing.
 std::vector<std::string> orphan_names(const UpsertReport &report, bool fetch_good);

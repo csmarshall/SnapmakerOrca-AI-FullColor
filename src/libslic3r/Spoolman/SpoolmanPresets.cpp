@@ -514,7 +514,7 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
     return report;
 }
 
-std::vector<std::string> names_to_save(const UpsertReport &report)
+std::vector<std::string> names_to_save(const UpsertReport &report, const PresetCollection &filaments, const std::function<bool(const Preset &)> &file_exists)
 {
     std::vector<std::string> out;
     auto add = [&out](const std::vector<PresetResult> &v) {
@@ -524,6 +524,16 @@ std::vector<std::string> names_to_save(const UpsertReport &report)
     };
     add(report.created);
     add(report.updated);
+    for (const PresetResult &r : report.unchanged) {
+        const Preset *p = filaments.find_preset(r.preset_name, false);
+        if (!p || !p->is_user() || p->is_external || file_exists(*p))
+            continue;
+        const auto *o = dynamic_cast<const ConfigOptionStrings *>(p->config.option(kLinkKey));
+        if (!o || o->values.empty() || !parse(o->values.front()))
+            continue;
+        if (std::find(out.begin(), out.end(), r.preset_name) == out.end())
+            out.push_back(r.preset_name);
+    }
     return out;
 }
 

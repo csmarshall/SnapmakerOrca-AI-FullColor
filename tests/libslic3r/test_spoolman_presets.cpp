@@ -1083,16 +1083,20 @@ TEST_CASE("Spoolman presets: real Inland High Speed PLA+ gets a preset on the U1
 
 // ---- #133: which presets are saved, orphan listing, save outcome -------------------------------------------------------------------------
 
+namespace {
+const auto always_present = [](const Preset &) { return true; };
+}
+
 TEST_CASE("Spoolman presets: only created and updated presets are saved, a second identical sync saves nothing (#133)", "[Spoolman][issue133]")
 {
     Fixture f;
     const std::vector<Filament> cat = {fil(5, "PETG Red", "Acme", "PETG", 250, 70), fil(6, "PLA Blue", "Acme", "PLA", 210, 60), fil(7, "Odd", "Acme", "ZZZ-NO-PARENT", 200, 60)};
     auto r1 = f.run(cat);
-    CHECK(names_to_save(r1) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T", "Acme PLA Blue (Spoolman) @T"});
+    CHECK(names_to_save(r1, f.bundle.filaments, always_present) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T", "Acme PLA Blue (Spoolman) @T"});
     CHECK(!r1.skipped.empty()); // the skipped one is not in the save list
-    CHECK(names_to_save(f.run(cat)).empty());
+    CHECK(names_to_save(f.run(cat), f.bundle.filaments, always_present).empty());
     auto r3 = f.run({fil(5, "PETG Red", "Acme", "PETG", 255, 70), cat[1], cat[2]});
-    CHECK(names_to_save(r3) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T"});
+    CHECK(names_to_save(r3, f.bundle.filaments, always_present) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T"});
 }
 
 TEST_CASE("Spoolman presets: orphans are listed only for a good fetch (#133)", "[Spoolman][issue133]")
@@ -1119,4 +1123,47 @@ TEST_CASE("Spoolman presets: save_presets writes the preset file, reports failur
     CHECK(out.failed == std::vector<std::string>{"No such preset", "Generic PETG @T"}); // missing, and a system preset
     CHECK(boost::filesystem::exists(p->file));
     CHECK(user_count(f.bundle.filaments) == 1);
+}
+
+TEST_CASE("Spoolman presets: an unchanged preset is saved only when its file is missing (#133)", "[Spoolman][issue133]")
+{
+    Fixture f;
+    const std::vector<Filament> cat = {fil(5, "PETG Red", "Acme", "PETG", 250, 70), fil(6, "PLA Blue", "Acme", "PLA", 210, 60), fil(7, "Odd", "Acme", "ZZZ-NO-PARENT", 200, 60)};
+    f.run(cat);
+    auto r = f.run(cat);
+    REQUIRE(r.unchanged.size() == 2);
+    REQUIRE(!r.skipped.empty());
+    auto missing_red = [](const Preset &p) { return p.name != "Acme PETG Red (Spoolman) @T"; };
+    CHECK(names_to_save(r, f.bundle.filaments, missing_red) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T"});
+    CHECK(names_to_save(r, f.bundle.filaments, always_present).empty());
+    auto all_missing = [](const Preset &) { return false; };
+    // skipped filaments and system presets never appear, however missing their files are
+    CHECK(names_to_save(r, f.bundle.filaments, all_missing) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T", "Acme PLA Blue (Spoolman) @T"});
+    // created presets are saved once, not twice, even though their file is missing too
+    Fixture g;
+    auto created = g.run(cat);
+    CHECK(names_to_save(created, g.bundle.filaments, all_missing) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T", "Acme PLA Blue (Spoolman) @T"});
+}
+
+TEST_CASE("Spoolman presets: a failed save is retried on the next sync (#133)", "[Spoolman][issue133]")
+{
+    Fixture f;
+    const std::vector<Filament> cat = {fil(5, "PETG Red", "Acme", "PETG", 250, 70)};
+    const char *const kRed = "Acme PETG Red (Spoolman) @T";
+    auto r1 = f.run(cat);
+    ScopedSlic3rTemporaryDir dir("orca_spoolman_retry");
+    Preset *p = f.bundle.filaments.find_preset(kRed, false, true);
+    REQUIRE(p != nullptr);
+    p->file = (dir.path() / "p.json").string();
+    auto on_disk = [](const Preset &x) { return boost::filesystem::exists(x.file); };
+    // first sync: the save "fails" (here: the file is simply not written)
+    CHECK(names_to_save(r1, f.bundle.filaments, on_disk) == std::vector<std::string>{kRed});
+    // second sync reports it unchanged, the file is still missing: retried
+    auto r2 = f.run(cat);
+    REQUIRE(r2.unchanged.size() == 1);
+    CHECK(names_to_save(r2, f.bundle.filaments, on_disk) == std::vector<std::string>{kRed});
+    auto out = save_presets(f.bundle.filaments, names_to_save(r2, f.bundle.filaments, on_disk));
+    CHECK(out.saved == std::vector<std::string>{kRed});
+    // third sync: written, unchanged and present: not rewritten
+    CHECK(names_to_save(f.run(cat), f.bundle.filaments, on_disk).empty());
 }
