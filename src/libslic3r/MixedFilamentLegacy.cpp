@@ -823,6 +823,20 @@ std::string snapmaker_import_user_notice(const std::vector<std::string> &warning
     return "Mixed filaments from a Snapmaker project were not carried over exactly (" + list + "). Check them before slicing.";
 }
 
+static const std::vector<const char *> &snapmaker_flush_grid_keys()
+{
+    static const std::vector<const char *> keys = { "flush_volumes_matrix", "flush_volumes_vector" };
+    return keys;
+}
+
+static bool is_snapmaker_flush_grid_key(const std::string &key)
+{
+    for (const char *k : snapmaker_flush_grid_keys())
+        if (key == k)
+            return true;
+    return false;
+}
+
 SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &full, DynamicPrintConfig &shaped)
 {
     SnapmakerProjectShape out;
@@ -971,6 +985,28 @@ SnapmakerProjectShape make_snapmaker_project_shape(const DynamicPrintConfig &ful
         cut(key, keep, removed);
     }
 
+    // Flush grids: Snapmaker sizes them by the physical count (n x n matrix, 2 x n vector). Keep the top-left n x n block of the first
+    // matrix block (old stride) and the first 2n vector values; the removed cells travel in the sidecar like any other key.
+    for (const char *key : snapmaker_flush_grid_keys()) {
+        const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(shaped.option(key));
+        if (opt == nullptr || opt->size() == 0)
+            continue;
+        const bool          is_matrix = std::string(key) == "flush_volumes_matrix";
+        const size_t        m         = opt->size();
+        std::vector<size_t> keep, removed;
+        if (is_matrix && m % (total * total) == 0) {
+            for (size_t i = 0; i < m; ++i) {
+                const size_t b = i / (total * total), r = (i % (total * total)) / total, c = i % total;
+                ((b == 0 && r < n && c < n) ? keep : removed).push_back(i);
+            }
+        } else if (!is_matrix && m == 2 * total) {
+            for (size_t i = 0; i < m; ++i)
+                (i < 2 * n ? keep : removed).push_back(i);
+        } else
+            continue; // not the live n+k layout (e.g. a default or hand-edited length): left unchanged, nothing to restore
+        cut(key, keep, removed);
+    }
+
     nlohmann::json side = { { "version", kMixedSidecarVersion }, { "n", n }, { "total", total },
                             { "digest", mixed_sidecar_digest(n, definitions) }, { "keys", keys } };
     // Invalid UTF-8 in a stripped tail (a user-entered string) would make a plain dump() throw out of the save; replace
@@ -1022,7 +1058,7 @@ bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &d
             error = "sidecar entry '" + item.key() + "' is not usable";
             return false;
         }
-        if (entry["idx"].size() > total) {
+        if (entry["idx"].size() > total && !is_snapmaker_flush_grid_key(item.key())) {
             error = "sidecar entry '" + item.key() + "' lists more indices than there are filaments";
             return false;
         }
@@ -1115,6 +1151,15 @@ bool restore_from_sidecar(const DynamicPrintConfig &shaped, const std::string &d
     for (const auto &item : side["keys"].items()) {
         const auto  *opt     = dynamic_cast<const ConfigOptionVectorBase *>(work.option(item.key()));
         const size_t removed = item.value()["idx"].size();
+        if (is_snapmaker_flush_grid_key(item.key())) {
+            const size_t have = opt->size();
+            if (item.key() == "flush_volumes_matrix") {
+                if (have < total * total || have % (total * total) != 0 || removed != have - n * n)
+                    return inconsistent("'" + item.key() + "' has " + std::to_string(have) + " values after restore");
+            } else if (have != 2 * total || removed != 2 * (total - n))
+                return inconsistent("'" + item.key() + "' has " + std::to_string(have) + " values after restore");
+            continue;
+        }
         const bool   variant = has_variants && opt->size() == self_index.size() && opt->size() != total && opt->size() != total + 2;
         if (removed != (variant ? variant_tail : total - n))
             return inconsistent("'" + item.key() + "' has " + std::to_string(removed) + " restored values");

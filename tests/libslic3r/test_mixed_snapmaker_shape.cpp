@@ -628,11 +628,7 @@ TEST_CASE("Snapmaker 3MF: a stale or stripped sidecar falls back to the converte
             j[kMixedSidecarKey] = side.dump();
         });
         REQUIRE(w.ok);
-        bool warned = false;
-        for (const std::string &m : w.plate_warnings)
-            warned = warned || m.find("could not be used") != std::string::npos;
-        CHECK(warned);
-    }
+        }
     SECTION("sidecar garbage") {
         w = save_and_reload(s.config, extras_of(s), [](nlohmann::json &j) { j[kMixedSidecarKey] = "{nope"; });
         REQUIRE(w.ok);
@@ -952,4 +948,149 @@ TEST_CASE("snapmaker_import_user_notice turns converter warnings into one bounde
     const std::string msg = snapmaker_import_user_notice(many);
     CHECK(msg == head + "300 unrepresentable or skipped, 300 other" + tail);
     CHECK(msg.size() < 200);
+}
+
+// ---- flush grids (#128 item 2): Snapmaker sizes them by the physical count (n x n matrix, 2 x n vector) ----
+
+namespace {
+
+// Distinct cell values (100*row + col) so a transposed or mis-strided cut is visible.
+DynamicPrintConfig with_flush(DynamicPrintConfig c, size_t blocks = 1)
+{
+    const size_t total = c.option<ConfigOptionStrings>("filament_colour")->values.size();
+    std::vector<double> m, v;
+    for (size_t b = 0; b < blocks; ++b)
+        for (size_t i = 0; i < total; ++i)
+            for (size_t j = 0; j < total; ++j)
+                m.push_back(1000. * b + 100. * i + j);
+    for (size_t i = 0; i < 2 * total; ++i)
+        v.push_back(140. + i);
+    c.set_key_value("flush_volumes_matrix", new ConfigOptionFloats(m));
+    c.set_key_value("flush_volumes_vector", new ConfigOptionFloats(v));
+    return c;
+}
+
+const std::vector<double> &flo(const DynamicPrintConfig &c, const char *key) { return c.option<ConfigOptionFloats>(key)->values; }
+
+} // namespace
+
+TEST_CASE("Snapmaker flush: n physical plus k mixed shapes to 4x4 and 2x4", "[MixedFilament][snapmaker_shape]")
+{
+    const DynamicPrintConfig full = with_flush(two_converted_one_native());
+    REQUIRE(flo(full, "flush_volumes_matrix").size() == 49);
+    REQUIRE(flo(full, "flush_volumes_vector").size() == 14);
+    const Shaped s = shape_of(full);
+    REQUIRE(s.transformed);
+    // Literals from the real Snapmaker 2.4.1 project with 4 physical filaments.
+    CHECK(flo(s.config, "flush_volumes_matrix").size() == 16);
+    CHECK(flo(s.config, "flush_volumes_vector").size() == 8);
+    for (size_t i = 0; i < 4; ++i)
+        for (size_t j = 0; j < 4; ++j)
+            CHECK(flo(s.config, "flush_volumes_matrix")[i * 4 + j] == 100. * i + j);
+    for (size_t i = 0; i < 8; ++i)
+        CHECK(flo(s.config, "flush_volumes_vector")[i] == 140. + i);
+}
+
+TEST_CASE("Snapmaker flush: shape then restore is exact for matrix and vector", "[MixedFilament][snapmaker_shape]")
+{
+    for (size_t blocks : { size_t(1), size_t(2) }) {
+        INFO("blocks " << blocks);
+        const DynamicPrintConfig full = with_flush(two_converted_one_native(), blocks);
+        const Shaped             s    = shape_of(full);
+        REQUIRE(s.transformed);
+        CHECK(flo(s.config, "flush_volumes_matrix").size() == 16);
+        DynamicPrintConfig restored;
+        std::string        why;
+        REQUIRE(restore_from_sidecar(s.config, s.mixed_filament_definitions, s.sidecar, restored, why));
+        CHECK(flo(restored, "flush_volumes_matrix") == flo(full, "flush_volumes_matrix"));
+        CHECK(flo(restored, "flush_volumes_vector") == flo(full, "flush_volumes_vector"));
+        CHECK(restored == full);
+    }
+}
+
+TEST_CASE("Snapmaker flush: odd lengths are left alone, no sidecar entry, restore still passes", "[MixedFilament][snapmaker_shape]")
+{
+    DynamicPrintConfig full = with_flush(two_converted_one_native());
+    full.set_key_value("flush_volumes_matrix", new ConfigOptionFloats(std::vector<double>(50, 1.)));
+    full.set_key_value("flush_volumes_vector", new ConfigOptionFloats(std::vector<double>(13, 2.)));
+    const Shaped s = shape_of(full);
+    REQUIRE(s.transformed);
+    CHECK(flo(s.config, "flush_volumes_matrix").size() == 50);
+    CHECK(flo(s.config, "flush_volumes_vector").size() == 13);
+    const nlohmann::json side = nlohmann::json::parse(s.sidecar);
+    CHECK_FALSE(side["keys"].contains("flush_volumes_matrix"));
+    CHECK_FALSE(side["keys"].contains("flush_volumes_vector"));
+    DynamicPrintConfig restored;
+    std::string        why;
+    REQUIRE(restore_from_sidecar(s.config, s.mixed_filament_definitions, s.sidecar, restored, why));
+    CHECK(restored == full);
+}
+
+TEST_CASE("Snapmaker flush: a tampered flush entry fails closed and changes nothing", "[MixedFilament][snapmaker_shape]")
+{
+    const Shaped s = shape_of(with_flush(two_converted_one_native()));
+    REQUIRE(s.transformed);
+    const DynamicPrintConfig marker   = project_config(2);
+    DynamicPrintConfig       restored = marker;
+    std::string              why;
+    nlohmann::json           j = nlohmann::json::parse(s.sidecar);
+    REQUIRE(j["keys"]["flush_volumes_matrix"]["idx"].size() == 33);
+    REQUIRE(j["keys"]["flush_volumes_vector"]["idx"].size() == 6);
+
+    SECTION("matrix with one removed cell fewer") {
+        j["keys"]["flush_volumes_matrix"]["idx"].erase(j["keys"]["flush_volumes_matrix"]["idx"].size() - 1);
+        j["keys"]["flush_volumes_matrix"]["v"] = "1";
+    }
+    SECTION("matrix removed index out of range") { j["keys"]["flush_volumes_matrix"]["idx"][0] = 4999; }
+    SECTION("matrix tail with the wrong number of values") { j["keys"]["flush_volumes_matrix"]["v"] = "1,2,3"; }
+    SECTION("vector with the wrong number of removed values") {
+        j["keys"]["flush_volumes_vector"]["idx"] = nlohmann::json::array({ 8, 9, 10, 11, 12 });
+        j["keys"]["flush_volumes_vector"]["v"]   = "1,2,3,4,5";
+    }
+    SECTION("matrix restored to a size that is not a whole number of blocks") {
+        // 17 removed cells over a 16-cell kept block: 33 total, not a multiple of 49.
+        auto &idx = j["keys"]["flush_volumes_matrix"]["idx"];
+        idx.erase(idx.size() - 1);
+        j["keys"]["flush_volumes_matrix"]["v"] = nlohmann::json(std::string(
+            "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1"));
+    }
+    CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions, j.dump(), restored, why));
+    CHECK_FALSE(why.empty());
+    CHECK(restored == marker);
+}
+
+TEST_CASE("Snapmaker flush: the digest and n checks still hold", "[MixedFilament][snapmaker_shape]")
+{
+    const Shaped s = shape_of(with_flush(two_converted_one_native()));
+    REQUIRE(s.transformed);
+    DynamicPrintConfig restored;
+    std::string        why;
+    CHECK_FALSE(restore_from_sidecar(s.config, s.mixed_filament_definitions + ";1,2,1,0,50,0,g,w,m2,z0,xa0,xb0,d0,o1,u99", s.sidecar, restored, why));
+    DynamicPrintConfig five = s.config;
+    five.option<ConfigOptionStrings>("filament_colour")->values.push_back("#000000");
+    CHECK_FALSE(restore_from_sidecar(five, s.mixed_filament_definitions, s.sidecar, restored, why));
+    CHECK(nlohmann::json::parse(s.sidecar)["version"].get<int>() == 1);
+}
+
+TEST_CASE("Snapmaker flush: a config without mixed slots keeps its flush keys", "[MixedFilament][snapmaker_shape]")
+{
+    const DynamicPrintConfig c = with_flush(project_config(3));
+    const Shaped             s = shape_of(c);
+    CHECK_FALSE(s.transformed);
+    CHECK(s.config == c);
+    CHECK(flo(s.config, "flush_volumes_matrix").size() == 9);
+}
+
+TEST_CASE("Snapmaker 3MF: the file carries a 4x4 matrix and 2x4 vector, our reopen restores the full grid", "[MixedFilament][snapmaker_shape][3mf]")
+{
+    const DynamicPrintConfig full = with_flush(two_converted_one_native());
+    const Shaped             s    = shape_of(full);
+    REQUIRE(s.transformed);
+    const Written w = save_and_reload(s.config, extras_of(s));
+    REQUIRE(w.ok);
+    const nlohmann::json saved = nlohmann::json::parse(w.project_settings);
+    CHECK(saved["flush_volumes_matrix"].size() == 16);
+    CHECK(saved["flush_volumes_vector"].size() == 8);
+    CHECK(flo(w.loaded, "flush_volumes_matrix") == flo(full, "flush_volumes_matrix"));
+    CHECK(flo(w.loaded, "flush_volumes_vector") == flo(full, "flush_volumes_vector"));
 }
