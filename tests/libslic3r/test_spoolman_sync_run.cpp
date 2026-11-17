@@ -403,3 +403,34 @@ TEST_CASE("fetch_after_reread: a clean re-read reports no error", "[Spoolman][Sy
     CHECK(errors == 0);
     CHECK(f.good());
 }
+
+TEST_CASE("SyncStage: order with and without the re-read, ending back at idle", "[Spoolman][SyncRun]")
+{
+    using S = Slic3r::Spoolman::SyncStage;
+    using namespace Slic3r::Spoolman;
+    REQUIRE(next_sync_stage(S::idle, true) == S::rereading);
+    REQUIRE(next_sync_stage(S::rereading, true) == S::fetching);
+    REQUIRE(next_sync_stage(S::idle, false) == S::fetching);
+    REQUIRE(next_sync_stage(S::fetching, false) == S::updating);
+    REQUIRE(next_sync_stage(S::updating, false) == S::idle);
+    // a full walk always terminates at idle
+    for (bool reread : {false, true}) {
+        S s = next_sync_stage(S::idle, reread);
+        int n = 0;
+        while (s != S::idle && n++ < 10) s = next_sync_stage(s, reread);
+        REQUIRE(s == S::idle);
+        REQUIRE(n == (reread ? 3 : 2));
+    }
+}
+
+TEST_CASE("SyncStage: texts, idle is empty and not running", "[Spoolman][SyncRun]")
+{
+    using S = Slic3r::Spoolman::SyncStage;
+    using namespace Slic3r::Spoolman;
+    REQUIRE(std::string(sync_stage_text(S::idle)).empty());
+    REQUIRE_FALSE(sync_stage_running(S::idle));
+    REQUIRE(std::string(sync_stage_text(S::rereading)) == "Re-reading spool tags...");
+    REQUIRE(std::string(sync_stage_text(S::fetching)) == "Fetching from Spoolman...");
+    REQUIRE(std::string(sync_stage_text(S::updating)) == "Updating filament presets...");
+    REQUIRE(sync_stage_running(S::updating));
+}

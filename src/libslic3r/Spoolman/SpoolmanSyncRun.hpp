@@ -52,6 +52,16 @@ CatalogFetch fetch_after_reread(const std::function<void()> &reread, const std::
 void apply_fetch_to_outcome(SyncOutcome &outcome, const CatalogFetch &fetch, bool has_last_good,
                             std::optional<long long> last_good_age_seconds = std::nullopt);
 
+// ---- #135: progress stage of the Spoolman button, shown as button state + tooltip ----
+// Pure: no wx. The GUI maps the enum to translated text; sync_stage_text is the English reference (logs, tests).
+enum class SyncStage { idle, rereading, fetching, updating };
+
+// The stage after `s` on the Spoolman button path. `reread` says whether the user asked for the spool tag re-read.
+// idle -> (rereading if reread) -> fetching -> updating -> idle; idle is the start state AND the end state.
+SyncStage   next_sync_stage(SyncStage s, bool reread);
+const char *sync_stage_text(SyncStage s); // "" for idle
+inline bool sync_stage_running(SyncStage s) { return s != SyncStage::idle; }
+
 // ---- #105: RFID tag re-read, offered only by the Spoolman button ----
 // The only printer commands this adds: FILAMENT_DT_CLEAR / FILAMENT_DT_UPDATE for channels 0..3, sent as ONE script, and only when the
 // printer reports an idle print_stats.state. Everything here is pure or injected so tests never touch a printer.

@@ -115,6 +115,7 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
+#include <wx/activityindicator.h>
 #include <wx/colour.h>
 #include <wx/font.h>
 #include <wx/aui/framemanager.h>
@@ -895,6 +896,11 @@ struct Sidebar::priv
     bool                                  spoolman_has_last_good = false;
     std::optional<long long>              spoolman_last_good_age;
     bool                                  spoolman_rerun_changes_only = false; // #131: set only around the "run again as Sync" re-run
+    // #135: progress of the Spoolman button, shown as the button's disabled state + tooltip (GUI thread only).
+    Spoolman::SyncStage                   spoolman_stage = Spoolman::SyncStage::idle;
+    wxActivityIndicator                  *spoolman_spinner = nullptr; // #135: pinwheel next to the Spoolman button, shown only while a sync runs
+    wxStaticText                         *spoolman_stage_text = nullptr; // #135: its stage text
+    std::shared_ptr<int>                  spoolman_alive = std::make_shared<int>(0); // worker-posted stage changes hold a weak_ptr to it
 
     wxPanel *scrolled = nullptr;
     PlaterPresetComboBox *combo_sla_print = nullptr;
@@ -2808,7 +2814,7 @@ void Sidebar::update_sync_ams_btn_enable(wxUpdateUIEvent &e)
          p->m_printer_bbl_sync->Enable(!m_last_slice_state);
          ams_btn->Enable(!m_last_slice_state);
          if (spoolman_btn)
-             spoolman_btn->Enable(!m_last_slice_state);
+             spoolman_btn->Enable(!m_last_slice_state && !Spoolman::sync_stage_running(p->spoolman_stage)); // #135: stays disabled while a sync runs
          Refresh();
      }
  }
@@ -3427,6 +3433,14 @@ Sidebar::Sidebar(Plater *parent)
 
     bSizer39->Add(ams_btn, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::WideSpacing()));
     bSizer39->Add(spoolman_btn, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::IconSpacing()));
+    // #135: activity pinwheel + stage text, hidden until the Spoolman button starts a sync (spoolman_show_stage).
+    p->spoolman_spinner = new wxActivityIndicator(p->m_panel_filament_title, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)));
+    p->spoolman_spinner->Hide();
+    p->spoolman_stage_text = new wxStaticText(p->m_panel_filament_title, wxID_ANY, wxString());
+    p->spoolman_stage_text->SetFont(::Label::Body_12);
+    p->spoolman_stage_text->Hide();
+    bSizer39->Add(p->spoolman_spinner, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::ElementSpacing()));
+    bSizer39->Add(p->spoolman_stage_text, 0, wxALIGN_CENTER | wxLEFT, FromDIP(SidebarProps::ElementSpacing()));
     //bSizer39->Add(FromDIP(10), 0, 0, 0, 0 );
 
     ScalableButton* set_btn = new ScalableButton(p->m_panel_filament_title, wxID_ANY, "settings");
@@ -6368,6 +6382,55 @@ std::shared_ptr<MoonrakerPrinterAgent> Sidebar::spoolman_capable_agent() const
     return std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net ? net->get_printer_agent() : nullptr);
 }
 
+// #135: show `stage` on the Spoolman button: disabled and a tooltip naming the stage while running; idle restores both.
+// A button and a tooltip rather than a notification or dialog: nothing to stack on or collide with the question, confirm, mapping and
+// summary dialogs, and nothing to dismiss on an error path. GUI thread only.
+static wxString spoolman_stage_label(Spoolman::SyncStage stage)
+{
+    using S = Spoolman::SyncStage;
+    switch (stage) {
+    case S::rereading: return _L("Re-reading spool tags...");
+    case S::fetching: return _L("Fetching from Spoolman...");
+    case S::updating: return _L("Updating filament presets...");
+    case S::idle: break;
+    }
+    return wxString();
+}
+
+static void spoolman_show_stage(ScalableButton *btn, wxActivityIndicator *spinner, wxStaticText *text, Spoolman::SyncStage &state,
+                                Spoolman::SyncStage stage, bool slicing)
+{
+    state = stage;
+    if (!btn)
+        return;
+    const bool running = Spoolman::sync_stage_running(stage);
+    const wxString label = spoolman_stage_label(stage);
+    if (running) {
+        btn->Enable(false);
+        btn->SetToolTip(_L("Spoolman sync") + ": " + label);
+    } else {
+        btn->Enable(!slicing);
+        btn->SetToolTip(_L("Synchronize filament presets from Spoolman"));
+    }
+    if (spinner && spinner->IsShown() != running) {
+        spinner->Show(running);
+        if (running)
+            spinner->Start();
+        else
+            spinner->Stop();
+    }
+    if (text) {
+        text->Show(running);
+        text->SetLabel(label);
+    }
+    if (btn->GetContainingSizer())
+        btn->GetContainingSizer()->Layout();
+    btn->Refresh();
+    btn->Update(); // the "updating" stage runs on the GUI thread; repaint before it blocks
+    if (spinner) spinner->Update();
+    if (text) text->Update();
+}
+
 // #104: the separate Spoolman button. Fetches the catalog on a worker thread, upserts it on the GUI thread, then runs the normal
 // sync_ams_list flow with p->spoolman_fetch set so that flow (and only this one) shows the Spoolman summary. sync_ams_list itself
 // never starts a fetch, so the default button and the native command keep the upstream behaviour.
@@ -6397,9 +6460,19 @@ void Sidebar::sync_spoolman_filaments()
         }
     }
     auto reread_result = std::make_shared<MoonrakerPrinterAgent::RfidReread>(MoonrakerPrinterAgent::RfidReread::unsupported);
+    // #135: the worker posts stage changes FIFO ahead of `done`; dropped if the app or the sidebar is gone.
+    auto post_stage = [this, alive = std::weak_ptr<int>(p->spoolman_alive)](Spoolman::SyncStage stage) {
+        if (wxTheApp)
+            wxTheApp->CallAfter([this, alive, stage] {
+                if (alive.lock())
+                    spoolman_show_stage(spoolman_btn, p->spoolman_spinner, p->spoolman_stage_text, p->spoolman_stage, stage, m_last_slice_state);
+            });
+    };
+    // Starts here, after the re-read question was answered, so the indicator never overlaps that modal.
+    spoolman_show_stage(spoolman_btn, p->spoolman_spinner, p->spoolman_stage_text, p->spoolman_stage, Spoolman::next_sync_stage(Spoolman::SyncStage::idle, reread && agent), m_last_slice_state);
     const auto started = p->spoolman_runner.start(
         true,
-        [agent, direct, reread, reread_result] {
+        [agent, direct, reread, reread_result, post_stage] {
             return Spoolman::fetch_after_reread(
                 [&] {
                     if (reread && agent)
@@ -6410,7 +6483,10 @@ void Sidebar::sync_spoolman_filaments()
                     *reread_result = MoonrakerPrinterAgent::RfidReread::unconfirmed;
                     BOOST_LOG_TRIVIAL(warning) << "sync_spoolman_filaments: spool tag re-read threw; result recorded as unconfirmed";
                 },
-                [&] { return direct.direct ? Spoolman::fetch_direct_catalog(direct.url, true, true) : agent->fetch_spoolman_catalog(true, true); });
+                [&] {
+                    post_stage(Spoolman::SyncStage::fetching);
+                    return direct.direct ? Spoolman::fetch_direct_catalog(direct.url, true, true) : agent->fetch_spoolman_catalog(true, true);
+                });
         },
         [](std::function<void()> f) {
             // Worker thread: the app may be torn down if the user quit during the re-read window. Drop the callback then.
@@ -6418,6 +6494,8 @@ void Sidebar::sync_spoolman_filaments()
                 wxTheApp->CallAfter(std::move(f));
         },
         [this, agent, direct, reread, reread_result](Spoolman::CatalogFetch fetch) {
+            // #135: cleared first, so no dialog below sees a stale indicator; the upsert re-shows "updating" and clears it again.
+            spoolman_show_stage(spoolman_btn, p->spoolman_spinner, p->spoolman_stage_text, p->spoolman_stage, Spoolman::SyncStage::idle, m_last_slice_state);
             if (reread) {
                 using R = MoonrakerPrinterAgent::RfidReread;
                 BOOST_LOG_TRIVIAL(info) << "sync_spoolman_filaments: spool tag re-read result " << int(*reread_result);
@@ -6435,6 +6513,11 @@ void Sidebar::sync_spoolman_filaments()
             } reset_on_exit{p.get()};
             p->spoolman_report = {};
             if (fetch.good()) {
+                struct StageGuard { // idle again on every way out of the upsert, including an exception, before any dialog
+                    std::function<void()> clear;
+                    ~StageGuard() { clear(); }
+                } stage_guard{[this] { spoolman_show_stage(spoolman_btn, p->spoolman_spinner, p->spoolman_stage_text, p->spoolman_stage, Spoolman::SyncStage::idle, m_last_slice_state); }};
+                spoolman_show_stage(spoolman_btn, p->spoolman_spinner, p->spoolman_stage_text, p->spoolman_stage, Spoolman::SyncStage::updating, m_last_slice_state);
                 auto *bundle = wxGetApp().preset_bundle;
                 Spoolman::UpsertContext ctx;
                 ctx.printer = &bundle->printers.get_selected_preset();
@@ -6458,7 +6541,9 @@ void Sidebar::sync_spoolman_filaments()
             p->spoolman_fetch         = std::move(fetch);
             sync_ams_list(false);
         });
-    (void) started; // busy: a fetch is already running and will sync when it finishes
+    // busy: a fetch is already running and will sync when it finishes. Not started at all: nothing will ever clear the indicator, so do it now.
+    if (started != Spoolman::SyncRunner::Start::started)
+        spoolman_show_stage(spoolman_btn, p->spoolman_spinner, p->spoolman_stage_text, p->spoolman_stage, Spoolman::SyncStage::idle, m_last_slice_state);
 }
 
 void Sidebar::sync_ams_list(bool is_from_big_sync_btn)

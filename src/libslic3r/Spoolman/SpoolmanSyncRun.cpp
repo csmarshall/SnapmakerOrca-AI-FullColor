@@ -150,4 +150,26 @@ SettleResult poll_until_settled(const std::function<std::optional<std::string>()
     }
 }
 
+SyncStage next_sync_stage(SyncStage s, bool reread)
+{
+    switch (s) {
+    case SyncStage::idle: return reread ? SyncStage::rereading : SyncStage::fetching;
+    case SyncStage::rereading: return SyncStage::fetching;
+    case SyncStage::fetching: return SyncStage::updating;
+    case SyncStage::updating: return SyncStage::idle;
+    }
+    return SyncStage::idle;
+}
+
+const char *sync_stage_text(SyncStage s)
+{
+    switch (s) {
+    case SyncStage::rereading: return "Re-reading spool tags...";
+    case SyncStage::fetching: return "Fetching from Spoolman...";
+    case SyncStage::updating: return "Updating filament presets...";
+    case SyncStage::idle: break;
+    }
+    return "";
+}
+
 }} // namespace Slic3r::Spoolman
