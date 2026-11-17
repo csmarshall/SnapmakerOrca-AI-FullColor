@@ -4,6 +4,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
+#include <boost/log/trivial.hpp>
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -511,6 +512,68 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
             if (!catalog_ids.count(l.link.spoolman_id))
                 report.orphaned.push_back({l.link.spoolman_id, l.name});
     return report;
+}
+
+std::vector<std::string> names_to_save(const UpsertReport &report)
+{
+    std::vector<std::string> out;
+    auto add = [&out](const std::vector<PresetResult> &v) {
+        for (const PresetResult &r : v)
+            if (std::find(out.begin(), out.end(), r.preset_name) == out.end())
+                out.push_back(r.preset_name);
+    };
+    add(report.created);
+    add(report.updated);
+    return out;
+}
+
+std::vector<std::string> orphan_names(const UpsertReport &report, bool fetch_good)
+{
+    std::vector<std::string> out;
+    if (fetch_good)
+        for (const OrphanedPreset &o : report.orphaned)
+            out.push_back(o.preset_name);
+    return out;
+}
+
+SaveOutcome save_presets(PresetCollection &filaments, const std::vector<std::string> &names)
+{
+    SaveOutcome out;
+    for (const std::string &name : names) {
+        bool ok = false;
+        try {
+            Preset *preset = filaments.find_preset(name, false, true);
+            if (preset && preset->is_user() && !preset->file.empty()) {
+                const std::string inherits = Preset::inherits(preset->config);
+                Preset *parent = inherits.empty() ? nullptr : filaments.find_preset2(inherits, true);
+                if (parent) {
+                    Preset::normalize_inherits(preset->config, parent);
+                    if (preset->base_id.empty())
+                        preset->base_id = parent->setting_id;
+                }
+                ok = preset->save(parent ? &parent->config : nullptr);
+            }
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(warning) << "Spoolman: saving preset '" << name << "' threw: " << e.what();
+        }
+        if (!ok)
+            BOOST_LOG_TRIVIAL(warning) << "Spoolman: could not save preset '" << name << "' to disk";
+        (ok ? out.saved : out.failed).push_back(name);
+    }
+    return out;
+}
+
+void log_sync(bool fetch_good, size_t catalog_size, const UpsertReport &report, const SaveOutcome *save)
+{
+    BOOST_LOG_TRIVIAL(info) << "Spoolman sync: fetch " << (fetch_good ? "good" : "bad") << ", filaments " << catalog_size
+                            << ", created " << report.created.size() << ", updated " << report.updated.size()
+                            << ", unchanged " << report.unchanged.size() << ", skipped " << report.skipped.size()
+                            << ", saved " << (save ? save->saved.size() : 0) << ", save-failed " << (save ? save->failed.size() : 0);
+    for (const SkippedFilament &s : report.skipped)
+        BOOST_LOG_TRIVIAL(warning) << "Spoolman sync: skipped filament " << s.spoolman_id << " '" << s.filament_name << "': " << s.reason;
+    const std::vector<std::string> orphans = orphan_names(report, fetch_good);
+    for (const std::string &n : orphans)
+        BOOST_LOG_TRIVIAL(warning) << "Spoolman sync: orphan preset '" << n << "' (its Spoolman filament is not in the catalog); kept, not deleted";
 }
 
 }} // namespace Slic3r::Spoolman

@@ -174,6 +174,26 @@ std::vector<ParentCandidate> build_parent_candidates(const PresetCollection &fil
 // Creates or refreshes the Spoolman presets in `filaments`. `catalog` empty => nothing is created or orphaned.
 UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filament> &catalog, const UpsertContext &context);
 
+// Names of the presets a report says must be written to disk: every created and every updated one (unchanged, skipped, orphaned, ambiguous,
+// duplicate and superseded ones are never written). Report order, no repeats.
+std::vector<std::string> names_to_save(const UpsertReport &report);
+
+// Names of the orphaned presets (linked, id not in the catalog), in report order. Empty unless `fetch_good`: a failed fetch proves nothing.
+std::vector<std::string> orphan_names(const UpsertReport &report, bool fetch_good);
+
+struct SaveOutcome
+{
+    std::vector<std::string> saved;
+    std::vector<std::string> failed; // not found, not a user preset, no file, or Preset::save() returned false/threw
+};
+
+// Writes each named preset of `filaments` with Preset::save() (diff against its parent, like the Save-as path). Never deletes anything; a
+// failure is logged and recorded, and the others are still tried. Caller runs this on the thread that owns the collection.
+SaveOutcome save_presets(PresetCollection &filaments, const std::vector<std::string> &names);
+
+// One info line for the sync (fetch good/bad, counts) and one warning per skipped filament and per orphan list. `save` may be null.
+void log_sync(bool fetch_good, size_t catalog_size, const UpsertReport &report, const SaveOutcome *save);
+
 }} // namespace Slic3r::Spoolman
 
 #endif

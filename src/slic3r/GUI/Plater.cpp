@@ -6440,6 +6440,12 @@ void Sidebar::sync_spoolman_filaments()
                 ctx.printer = &bundle->printers.get_selected_preset();
                 ctx.limits  = Spoolman::printer_limits_from_config(ctx.printer->config);
                 p->spoolman_report = Spoolman::upsert_catalog(bundle->filaments, fetch.filaments.items, ctx);
+                // Spoolman is authoritative: persist every created/updated preset as a user preset (unchanged ones are not rewritten).
+                // A save failure is logged and does not abort the sync. Orphans are only logged, never deleted.
+                const Spoolman::SaveOutcome saved = Spoolman::save_presets(bundle->filaments, Spoolman::names_to_save(p->spoolman_report));
+                Spoolman::log_sync(true, fetch.filaments.items.size(), p->spoolman_report, &saved);
+            } else {
+                Spoolman::log_sync(false, 0, Spoolman::UpsertReport{}, nullptr);
             }
             if (direct.direct) {
                 p->spoolman_has_last_good = Spoolman::last_good_direct_catalog(direct.url).has_value();

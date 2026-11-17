@@ -1080,3 +1080,43 @@ TEST_CASE("Spoolman presets: real Inland High Speed PLA+ gets a preset on the U1
         CHECK(made);
     }
 }
+
+// ---- #133: which presets are saved, orphan listing, save outcome -------------------------------------------------------------------------
+
+TEST_CASE("Spoolman presets: only created and updated presets are saved, a second identical sync saves nothing (#133)", "[Spoolman][issue133]")
+{
+    Fixture f;
+    const std::vector<Filament> cat = {fil(5, "PETG Red", "Acme", "PETG", 250, 70), fil(6, "PLA Blue", "Acme", "PLA", 210, 60), fil(7, "Odd", "Acme", "ZZZ-NO-PARENT", 200, 60)};
+    auto r1 = f.run(cat);
+    CHECK(names_to_save(r1) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T", "Acme PLA Blue (Spoolman) @T"});
+    CHECK(!r1.skipped.empty()); // the skipped one is not in the save list
+    CHECK(names_to_save(f.run(cat)).empty());
+    auto r3 = f.run({fil(5, "PETG Red", "Acme", "PETG", 255, 70), cat[1], cat[2]});
+    CHECK(names_to_save(r3) == std::vector<std::string>{"Acme PETG Red (Spoolman) @T"});
+}
+
+TEST_CASE("Spoolman presets: orphans are listed only for a good fetch (#133)", "[Spoolman][issue133]")
+{
+    Fixture f;
+    f.run({fil(5, "PETG Red", "Acme", "PETG", 250, 70), fil(6, "PLA Blue", "Acme", "PLA", 210, 60)});
+    auto r = f.run({fil(5, "PETG Red", "Acme", "PETG", 250, 70)});
+    CHECK(orphan_names(r, true) == std::vector<std::string>{"Acme PLA Blue (Spoolman) @T"});
+    CHECK(orphan_names(r, false).empty());
+    CHECK(orphan_names(UpsertReport{}, true).empty());
+}
+
+TEST_CASE("Spoolman presets: save_presets writes the preset file, reports failures, deletes nothing (#133)", "[Spoolman][issue133]")
+{
+    Fixture f;
+    auto r = f.run({fil(5, "PETG Red", "Acme", "PETG", 250, 70)});
+    REQUIRE(r.created.size() == 1);
+    ScopedSlic3rTemporaryDir dir("orca_spoolman_save");
+    Preset *p = f.bundle.filaments.find_preset(kName, false, true);
+    REQUIRE(p != nullptr);
+    p->file = (dir.path() / "sub" / "p.json").string();
+    auto out = save_presets(f.bundle.filaments, {kName, "No such preset", "Generic PETG @T"});
+    CHECK(out.saved == std::vector<std::string>{kName});
+    CHECK(out.failed == std::vector<std::string>{"No such preset", "Generic PETG @T"}); // missing, and a system preset
+    CHECK(boost::filesystem::exists(p->file));
+    CHECK(user_count(f.bundle.filaments) == 1);
+}
