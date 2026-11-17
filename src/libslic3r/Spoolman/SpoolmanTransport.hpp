@@ -95,8 +95,10 @@ private:
 
 // The single gate. With the preference off NOTHING is called (not the status function, not `http`). Not connected or unknown status:
 // nothing is fetched. Returns attempted=false with the reason in those cases.
+// `refresh` (an explicit user sync): the cached entry for `key` is marked stale first, so the network is asked again. last_good() is kept,
+// so a failed refresh still leaves the previous catalog available (#130: a filament added in Spoolman after the first sync was never seen).
 CatalogFetch fetch_catalog_if_enabled(bool preference_on, const StatusFn &status, CatalogCache &cache, const std::string &key,
-                                      const HttpGet &http);
+                                      const HttpGet &http, bool refresh = false);
 
 // ---- Moonraker proxy encoding (pure) ----
 // Body for POST /server/spoolman/proxy. request_method is ALWAYS "GET" and there is never a "body" member.

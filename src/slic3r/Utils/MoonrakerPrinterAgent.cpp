@@ -1563,7 +1563,7 @@ std::optional<bool> MoonrakerPrinterAgent::spoolman_status(const SpoolmanEndpoin
 
 std::optional<bool> MoonrakerPrinterAgent::spoolman_status() const { return spoolman_status(spoolman_endpoint()); }
 
-Spoolman::CatalogFetch MoonrakerPrinterAgent::fetch_spoolman_catalog(bool preference_on)
+Spoolman::CatalogFetch MoonrakerPrinterAgent::fetch_spoolman_catalog(bool preference_on, bool refresh)
 {
     const SpoolmanEndpoint ep = spoolman_endpoint(); // once; the lambdas below use only this copy (and `this` for the synchronous call)
     Spoolman::HttpGet get = [this, ep](const std::string& path, const std::string& query, std::string& body) {
@@ -1572,7 +1572,7 @@ Spoolman::CatalogFetch MoonrakerPrinterAgent::fetch_spoolman_catalog(bool prefer
                                                         Spoolman::moonraker_proxy_request_body(path, query), reply);
         return Spoolman::moonraker_proxy_unwrap(status, reply, body);
     };
-    return Spoolman::fetch_catalog_if_enabled(preference_on, [this, ep] { return spoolman_status(ep); }, spoolman_cache, ep.key, get);
+    return Spoolman::fetch_catalog_if_enabled(preference_on, [this, ep] { return spoolman_status(ep); }, spoolman_cache, ep.key, get, refresh);
 }
 
 std::optional<Spoolman::CatalogFetch> MoonrakerPrinterAgent::last_good_spoolman_catalog() const

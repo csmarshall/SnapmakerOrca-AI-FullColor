@@ -68,10 +68,10 @@ int direct_http_fetch(const std::string &url, std::string &location, std::string
     return result;
 }
 
-CatalogFetch fetch_direct_catalog(const std::string &validated_base, bool preference_on)
+CatalogFetch fetch_direct_catalog(const std::string &validated_base, bool preference_on, bool refresh)
 {
     return fetch_catalog_if_enabled(preference_on, [] { return std::optional<bool>(true); }, direct_cache(), direct_cache_key(validated_base),
-                                    make_direct_http_get(validated_base, &direct_http_fetch));
+                                    make_direct_http_get(validated_base, &direct_http_fetch), refresh);
 }
 
 std::optional<CatalogFetch> last_good_direct_catalog(const std::string &validated_base)

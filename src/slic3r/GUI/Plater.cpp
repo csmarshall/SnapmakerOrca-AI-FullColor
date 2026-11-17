@@ -6399,7 +6399,7 @@ void Sidebar::sync_spoolman_filaments()
                     *reread_result = MoonrakerPrinterAgent::RfidReread::unconfirmed;
                     BOOST_LOG_TRIVIAL(warning) << "sync_spoolman_filaments: spool tag re-read threw; result recorded as unconfirmed";
                 },
-                [&] { return direct.direct ? Spoolman::fetch_direct_catalog(direct.url, true) : agent->fetch_spoolman_catalog(true); });
+                [&] { return direct.direct ? Spoolman::fetch_direct_catalog(direct.url, true, true) : agent->fetch_spoolman_catalog(true, true); });
         },
         [](std::function<void()> f) {
             // Worker thread: the app may be torn down if the user quit during the re-read window. Drop the callback then.

@@ -732,3 +732,21 @@ TEST_CASE("Spoolman parent: the preferred token comes from the data, not from a 
     CHECK(preferred_token_for_printer("Some Other Printer", c).empty());
     CHECK(preferred_token_for_printer("", c).empty());
 }
+
+// #130: the user's real Inland "High Speed PLA+" filaments (Spoolman 26-28, ofd external_id, no setting_id) got no user preset on the U1.
+TEST_CASE("Spoolman parent: real Inland High Speed PLA+ maps to Generic PLA High Speed on the U1 (#130)", "[Spoolman][issue130]")
+{
+    const auto &c = real_candidates();
+    for (const char *colour : {"Neon Green", "Silver", "Black"}) {
+        Filament f = fil(std::string("High Speed PLA+ ") + colour, "Inland", "PLA");
+        f.external_id = "ofd_00b19e87-c052-4f57-a3c8-9de83f766654";
+        const ParentChoice r = choose_parent(f, c, kU1);
+        std::string notes;
+        for (const auto &n : r.notes)
+            notes += " [" + n + "]";
+        INFO("filament: " << f.name << " -> chosen=" << chosen_name(r) << " rule='" << r.rule << "' reason='" << r.reason << "' notes:" << notes);
+        std::cout << "#130 " << f.name << " -> " << chosen_name(r) << " | rule=" << r.rule << " | reason=" << r.reason << " |" << notes << "\n";
+        REQUIRE(r.chosen);
+        CHECK(r.chosen->name == "Generic PLA High Speed @U1 0.4 nozzle");
+    }
+}

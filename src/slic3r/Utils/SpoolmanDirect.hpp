@@ -20,7 +20,7 @@ inline constexpr size_t kDirectMaxResponseBytes      = kMaxBodyBytes + 64 * 1024
 int direct_http_fetch(const std::string &url, std::string &location, std::string &body);
 
 // Catalog fetch with a process-wide session cache keyed by direct_cache_key(). `preference_on` false => no request.
-CatalogFetch fetch_direct_catalog(const std::string &validated_base, bool preference_on);
+CatalogFetch fetch_direct_catalog(const std::string &validated_base, bool preference_on, bool refresh = false);
 std::optional<CatalogFetch> last_good_direct_catalog(const std::string &validated_base);
 std::optional<long long>    last_good_direct_age_seconds(const std::string &validated_base);
 

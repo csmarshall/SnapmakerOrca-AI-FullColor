@@ -171,7 +171,7 @@ std::optional<long long> CatalogCache::last_good_age_seconds(const std::string &
 }
 
 CatalogFetch fetch_catalog_if_enabled(bool preference_on, const StatusFn &status, CatalogCache &cache, const std::string &key,
-                                      const HttpGet &http)
+                                      const HttpGet &http, bool refresh)
 {
     if (!preference_on)
         return skipped("preference off");
@@ -185,6 +185,8 @@ CatalogFetch fetch_catalog_if_enabled(bool preference_on, const StatusFn &status
         return skipped("status unknown");
     if (!*connected)
         return skipped("not connected");
+    if (refresh)
+        cache.invalidate(key);
     return cache.get(key, http);
 }
 

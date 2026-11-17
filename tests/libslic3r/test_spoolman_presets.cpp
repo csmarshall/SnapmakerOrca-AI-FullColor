@@ -1045,3 +1045,38 @@ TEST_CASE("Spoolman presets: OFD generic_id resolves through the inherited base 
     REQUIRE(c.chosen != nullptr);
     CHECK(c.chosen->name == "Generic PLA Matte @System");
 }
+
+// #130: end to end like Plater does (no preferred_token given, derived from the printer name; compatible_printers as in the real profiles).
+TEST_CASE("Spoolman presets: real Inland High Speed PLA+ gets a preset on the U1 0.4 (#130)", "[Spoolman][issue130]")
+{
+    PresetBundle bundle;
+    Preset &printer = add_printer(bundle, "Snapmaker U1 (0.4 nozzle)");
+    std::ifstream in(std::string(TEST_DATA_DIR) + "/spoolman/candidates_u1_0.4.tsv");
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        std::vector<std::string> col;
+        std::stringstream ss(line);
+        std::string c;
+        while (std::getline(ss, c, '\t'))
+            col.push_back(c);
+        col.resize(7);
+        add_system(bundle.filaments, col[0], col[2], col[3], col[6] == "1" ? std::vector<std::string>{printer.name} : std::vector<std::string>{},
+                   col[4], col[5]).alias = col[1];
+    }
+    std::ifstream fin(std::string(TEST_DATA_DIR) + "/spoolman/real_filaments_130.json");
+    REQUIRE(fin.is_open());
+    const auto fils = parse_filaments(nlohmann::json::parse(fin)).items;
+    UpsertContext ctx;
+    ctx.printer = &printer;
+    const UpsertReport r = upsert_catalog(bundle.filaments, fils, ctx);
+    for (const auto &s : r.skipped)
+        std::cout << "#130 SKIPPED " << s.spoolman_id << ": " << s.reason << "\n";
+    for (const auto &c : r.created)
+        std::cout << "#130 CREATED " << c.spoolman_id << " -> " << c.preset_name << " (parent " << c.parent_name << ", " << c.parent_rule << ")\n";
+    for (int id : {26, 27, 28}) {
+        const bool made = std::any_of(r.created.begin(), r.created.end(), [&](const PresetResult &c) { return c.spoolman_id == id; });
+        INFO("filament " << id);
+        CHECK(made);
+    }
+}

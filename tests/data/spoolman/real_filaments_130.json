@@ -1,0 +1,88 @@
+[
+ {
+  "id": 2,
+  "registered": "2026-10-15T22:21:38Z",
+  "name": "PolyDissolve\u2122\u00a0S1 (PVA) Natural",
+  "vendor": {
+   "id": 2,
+   "registered": "2026-10-15T22:21:38Z",
+   "name": "Polymaker",
+   "extra": {}
+  },
+  "material": "PVA",
+  "density": 1.13,
+  "diameter": 1.75,
+  "weight": 750.0,
+  "spool_weight": 125.0,
+  "color_hex": "E8E6D0",
+  "external_id": "polymaker_pva_polydissolves1(pva)natural_750_175_c",
+  "extra": {},
+  "tags": []
+ },
+ {
+  "id": 26,
+  "registered": "2026-11-17T21:37:40Z",
+  "name": "High Speed PLA+ Neon Green",
+  "vendor": {
+   "id": 1,
+   "registered": "2026-10-14T16:59:31Z",
+   "name": "Inland",
+   "comment": "Micro Center house brand",
+   "extra": {}
+  },
+  "material": "PLA",
+  "density": 1.24,
+  "diameter": 1.75,
+  "weight": 1000.0,
+  "settings_extruder_temp": 195,
+  "settings_bed_temp": 42,
+  "color_hex": "39FF14",
+  "external_id": "ofd_00b19e87-c052-4f57-a3c8-9de83f766654",
+  "extra": {},
+  "tags": []
+ },
+ {
+  "id": 27,
+  "registered": "2026-11-17T21:38:08Z",
+  "name": "High Speed PLA+ Silver",
+  "vendor": {
+   "id": 1,
+   "registered": "2026-10-14T16:59:31Z",
+   "name": "Inland",
+   "comment": "Micro Center house brand",
+   "extra": {}
+  },
+  "material": "PLA",
+  "density": 1.24,
+  "diameter": 1.75,
+  "weight": 1000.0,
+  "settings_extruder_temp": 195,
+  "settings_bed_temp": 42,
+  "color_hex": "BFC1C2",
+  "external_id": "ofd_baf2a607-1166-4eb3-9e7c-a8baaf08ab96",
+  "extra": {},
+  "tags": []
+ },
+ {
+  "id": 28,
+  "registered": "2026-11-17T21:38:36Z",
+  "name": "High Speed PLA+ Black",
+  "vendor": {
+   "id": 1,
+   "registered": "2026-10-14T16:59:31Z",
+   "name": "Inland",
+   "comment": "Micro Center house brand",
+   "extra": {}
+  },
+  "material": "PLA",
+  "density": 1.24,
+  "diameter": 1.75,
+  "weight": 1000.0,
+  "settings_extruder_temp": 195,
+  "settings_bed_temp": 42,
+  "color_hex": "101010",
+  "external_id": "ofd_e409b31f-bc86-4a3c-b40e-e81858e79bb7",
+  "extra": {},
+  "tags": []
+ }
+]

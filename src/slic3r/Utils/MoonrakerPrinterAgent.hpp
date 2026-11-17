@@ -215,7 +215,7 @@ public:
     // of any kind is made. The caller reads the preference. It is synchronous and blocks for up to ~4 requests x 6 s, so call it off the
     // GUI thread, and do not destroy the agent while it runs. The printer address and key are read ONCE under connect_mutex and used for
     // the cache key and every request, so a connect/disconnect during the fetch cannot mix two printers.
-    Spoolman::CatalogFetch fetch_spoolman_catalog(bool preference_on);
+    Spoolman::CatalogFetch fetch_spoolman_catalog(bool preference_on, bool refresh = false);
     // The last good catalog of the current printer, even after invalidate or a failed refresh (show it as stale); nullopt if none.
     std::optional<Spoolman::CatalogFetch> last_good_spoolman_catalog() const;
     // Age in seconds of that last good fetch; nullopt if none.

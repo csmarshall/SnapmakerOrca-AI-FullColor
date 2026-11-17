@@ -572,3 +572,37 @@ TEST_CASE("Spoolman transport selection falls back to the Moonraker proxy", "[Sp
     CHECK(j["request_method"] == "GET");
     CHECK_FALSE(j.contains("body"));
 }
+
+// #130: a filament added in Spoolman after the first sync was never seen, because the session cache never expired.
+TEST_CASE("Spoolman transport: an explicit refresh bypasses the session cache, a failed one keeps last_good", "[Spoolman][SpoolmanTransport][issue130]")
+{
+    CatalogCache cache;
+    const StatusFn connected = [] { return std::optional<bool>(true); };
+    MockHttp       first     = MockHttp::fixtures();
+    CatalogFetch   a         = fetch_catalog_if_enabled(true, connected, cache, "k", first.fn());
+    REQUIRE(a.good());
+    CHECK(a.filaments.items.size() == 22);
+
+    // Spoolman gains a filament; a plain call still serves the cached catalog without any request.
+    MockHttp second = MockHttp::fixtures();
+    second.routes["/v1/filament"] = {200, R"({"result": [{"id": 99, "name": "New One", "material": "PLA"}]})"};
+    CatalogFetch b = fetch_catalog_if_enabled(true, connected, cache, "k", second.fn());
+    CHECK(b.filaments.items.size() == 22);
+    CHECK(second.calls.empty());
+
+    // The explicit sync asks again and sees the new filament.
+    CatalogFetch c = fetch_catalog_if_enabled(true, connected, cache, "k", second.fn(), true);
+    REQUIRE(c.good());
+    REQUIRE(c.filaments.items.size() == 1);
+    CHECK(c.filaments.items[0].id == 99);
+    CHECK_FALSE(second.calls.empty());
+
+    // A failed explicit refresh returns the failure but keeps the last good catalog.
+    MockHttp bad = MockHttp::fixtures();
+    bad.routes["/v1/filament"] = {500, ""};
+    CHECK_FALSE(fetch_catalog_if_enabled(true, connected, cache, "k", bad.fn(), true).good());
+    auto kept = cache.last_good("k");
+    REQUIRE(kept.has_value());
+    REQUIRE(kept->filaments.items.size() == 1);
+    CHECK(kept->filaments.items[0].id == 99);
+}
