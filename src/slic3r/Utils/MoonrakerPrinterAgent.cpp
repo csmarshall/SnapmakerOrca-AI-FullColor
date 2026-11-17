@@ -1013,11 +1013,15 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
         return fail("the file name is not one this start accepts (letters, digits, . _ - space and / only, ending in .gcode); nothing was sent");
     // Fresh read of the printer's own state right before the first RPC, for every Snapmaker start: the map and preference lines change the
     // printer's settings, so a busy or unreadable printer gets nothing at all.
-    if (supports_print_preferences()) {
+    // Without the Snapmaker guard and map support the legacy start would be an unguarded SDCARD_PRINT_FILE: refuse it.
+    if (legacy && !supports_print_preferences())
+        return fail("this printer agent cannot guard the start (no idle check, no extruder map); nothing was sent");
+    const auto printer_is_idle = [&] {
         nlohmann::json state;
-        if (!read_machine_state_sync(target.base_url, target.api_key, state) || !snapmaker_machine_idle(state))
-            return fail("the printer is busy or its state could not be read; nothing was sent");
-    }
+        return read_machine_state_sync(target.base_url, target.api_key, state) && snapmaker_machine_idle(state);
+    };
+    if (supports_print_preferences() && !printer_is_idle())
+        return fail("the printer is busy or its state could not be read; nothing was sent");
 
     // Per-print preferences go to the printer first and the plate's G-code is not touched (Snapmaker Orca's send page,
     // resources/web/flutter_web/main.b347974c91352c2f.js setPrePrintConfiguration ~39855). A refused script means no print.
@@ -1035,8 +1039,7 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
         // PrintParams carries no used-filament count, so a multi-filament plate without a mapping can only be warned about here.
         std::vector<int> extruder_mapping;
         if (!parse_snapmaker_ams_mapping(params.ams_mapping, extruder_mapping)) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: the filament-to-extruder mapping is not valid, the print is not started";
-            return false;
+            return fail("the filament-to-extruder mapping is not valid, the print is not started");
         }
         std::vector<bool> used(extruder_mapping.size());
         bool              any_used = false;
@@ -1052,18 +1055,18 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
         }
         const SnapmakerExtruderMapResult extruder_map = build_snapmaker_extruder_map_script(extruder_mapping, used);
         if (!extruder_map.ok() || (!extruder_map.script.empty() && !is_snapmaker_extruder_map_script(extruder_map.script))) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: " << (extruder_map.ok() ? "extruder map script invalid" : extruder_map.error)
-                                     << ", the print is not started";
-            return false;
+            return fail(std::string(extruder_map.ok() ? "extruder map script invalid" : extruder_map.error) + ", the print is not started");
         }
         if (!extruder_map.script.empty()) {
             for (const char* command : {"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}) {
                 bool missing = false;
-                if (gcode_command_known(target.base_url, target.api_key, command, missing) && missing) {
-                    BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: the printer has no " << command
-                                             << " command, the filament-to-extruder mapping cannot be applied and the print is not started";
-                    return false;
-                }
+                const bool answered = gcode_command_known(target.base_url, target.api_key, command, missing);
+                // The legacy start fails closed: a probe that cannot confirm the command exists refuses the start (Klipper answers an unknown
+                // command with HTTP 200). The page start keeps its behaviour: an unanswered probe goes ahead.
+                if (answered && missing)
+                    return fail(std::string("the printer has no ") + command + " command, the filament-to-extruder mapping cannot be applied and the print is not started");
+                if (legacy && !answered)
+                    return fail(std::string("could not confirm the printer has the ") + command + " command; nothing was sent");
             }
         }
         std::string script = extruder_map.script;
@@ -1071,11 +1074,13 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
             const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
                                                                                     params.task_bed_leveling);
             if (!is_snapmaker_print_preference_script(preferences)) {
-                BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: print preferences not valid, the print is not started";
-                return false;
+                return fail("print preferences not valid, the print is not started");
             }
             script += (script.empty() ? "" : "\n") + preferences;
         }
+        // The probes took time: read the printer again right before the first script, nothing is sent unless it is still idle.
+        if (legacy && !printer_is_idle())
+            return fail("the printer became busy or its state could not be read; nothing was sent");
         if (!script.empty() && !post_gcode_script(target.base_url, target.api_key, script)) {
             return fail("print preferences / extruder map not applied, the print is not started");
         }

@@ -2,7 +2,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <map>
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
@@ -295,6 +297,24 @@ public:
     {
         set_state_reply(nlohmann::json{{"result", {{"status", {{"print_stats", {{"state", print_state}}}, {"machine_state_manager", {{"main_state", main_state}}}}}}}}.dump());
     }
+    // Every HTTP request by exact target ("/printer/gcode/script", "/printer/gcode/help", the state query, ...) and in total.
+    int requests_to(const std::string& target)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it = m_target_counts.find(target);
+        return it == m_target_counts.end() ? 0 : it->second;
+    }
+    int total_requests()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_http_requests;
+    }
+    // The state reads answer these in order (the last one repeats): read 1 idle, read 2 printing, ...
+    void set_state_sequence(std::vector<std::string> bodies)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_state_sequence = std::move(bodies);
+    }
     int state_reads()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -424,6 +444,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             ++m_http_requests;
+            ++m_target_counts[std::string(request.target())];
             m_changed.notify_all();
         }
         if (m_behavior == Behavior::StallsObjectList) {
@@ -459,10 +480,10 @@ private:
             response.body() = "{}";
         } else if (request.target() == "/printer/objects/query?print_stats&machine_state_manager") {
             std::lock_guard<std::mutex> lock(m_mutex);
-            ++m_state_reads;
+            const size_t read_index = m_state_reads++;
             if (m_state_reply_status == 200) {
                 response.result(http::status::ok);
-                response.body() = m_state_reply;
+                response.body() = m_state_sequence.empty() ? m_state_reply : m_state_sequence[std::min(read_index, m_state_sequence.size() - 1)];
             } else {
                 response.result(static_cast<http::status>(m_state_reply_status));
             }
@@ -599,6 +620,8 @@ private:
     std::vector<Upload> m_uploads;
     std::vector<std::string> m_scripts;
     int         m_state_reads        = 0;
+    std::map<std::string, int> m_target_counts;
+    std::vector<std::string>   m_state_sequence;
     int         m_state_reply_status = 200;
     std::string m_state_reply = R"({"result":{"status":{"print_stats":{"state":"standby"},"machine_state_manager":{"main_state":0}}}})";
     std::string m_rejected_script_prefix;
@@ -1869,6 +1892,16 @@ PrintParams legacy_params(const std::string& ams_mapping)
     params.ams_mapping = ams_mapping;
     return params;
 }
+// The printer lists the two map commands, as a real U1 does; the legacy start fails closed without them.
+void list_map_commands(FakePrinter& printer) { printer.set_gcode_commands({"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}); }
+// Nothing but (at most) the state reads may have reached the printer.
+void check_only_state_reads(FakePrinter& printer, int reads)
+{
+    CHECK(printer.requests_to("/printer/gcode/script") == 0);
+    CHECK(printer.requests_to("/printer/gcode/help") == 0);
+    CHECK(printer.total_requests() == printer.state_reads());
+    CHECK(printer.state_reads() == reads);
+}
 size_t count_prefix(const std::vector<std::string>& scripts, const std::string& prefix)
 {
     size_t n = 0;
@@ -1886,8 +1919,7 @@ TEST_CASE("legacy start: a printer that is not idle gets nothing", "[MoonrakerPr
         PreferenceAgent agent(printer);
         printer.set_machine_state(c.state, c.main_state);
         CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode"));
-        CHECK(printer.state_reads() == 1);
-        CHECK(printer.scripts().empty());
+        check_only_state_reads(printer, 1);
     }
 }
 
@@ -1904,7 +1936,7 @@ TEST_CASE("legacy start: a state that cannot be read sends nothing", "[Moonraker
         PreferenceAgent agent(printer);
         printer.set_state_reply(body, status);
         CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode"));
-        CHECK(printer.scripts().empty());
+        check_only_state_reads(printer, 1);
     }
     SECTION("an unreachable printer") {
         FakePrinter printer(Behavior::Silent);
@@ -1912,7 +1944,7 @@ TEST_CASE("legacy start: a state that cannot be read sends nothing", "[Moonraker
         auto target = agent.start_target();
         target.base_url = "http://127.0.0.1:1"; // nothing listens
         CHECK_FALSE(agent.start_uploaded_print(target, legacy_params("[0,1]"), "part.gcode"));
-        CHECK(printer.scripts().empty());
+        CHECK(printer.total_requests() == 0);
     }
 }
 
@@ -1920,9 +1952,10 @@ TEST_CASE("legacy start: an idle printer gets the map and USED lines, then the s
 {
     FakePrinter     printer(Behavior::Silent);
     PreferenceAgent agent(printer);
+    list_map_commands(printer);
     std::string     error;
     REQUIRE(agent.start_uploaded_print(agent.start_target(), legacy_params("[2,0]"), "Part 1.gcode", &error));
-    CHECK(printer.state_reads() == 1);
+    CHECK(printer.state_reads() == 2); // before the probes and again right before the first script
     const auto scripts = printer.scripts();
     REQUIRE(scripts.size() == 2);
     CHECK(scripts[0] == "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=2\nSET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=1 MAP_EXTRUDER=0\nSET_PRINT_USED_EXTRUDERS EXTRUDERS=2,0");
@@ -1940,10 +1973,10 @@ TEST_CASE("legacy start: the name must pass the allowlist, else zero RPCs", "[Mo
         CAPTURE(c.name);
         FakePrinter     printer(Behavior::Silent);
         PreferenceAgent agent(printer);
+        list_map_commands(printer);
         CHECK(agent.start_uploaded_print(agent.start_target(), legacy_params("[0]"), c.name) == c.ok);
         if (!c.ok) {
-            CHECK(printer.scripts().empty());
-            CHECK(printer.state_reads() == 0);
+            CHECK(printer.total_requests() == 0);
         } else {
             CHECK(printer.scripts().back() == "SDCARD_PRINT_FILE FILENAME=\"" + c.name + "\"");
         }
@@ -1955,19 +1988,20 @@ TEST_CASE("legacy start: the target is the snapshot, not the live device_info", 
     FakePrinter     first(Behavior::Silent);
     FakePrinter     second(Behavior::Silent);
     PreferenceAgent agent(first);
+    list_map_commands(first);
     const auto      target = agent.start_target(); // taken when the job is created
     CHECK(target.base_url == first.base_url());
     PreferenceAgent moved(second); // the agent object keeps no link; a start with the first target must go to the first printer only
     REQUIRE(moved.start_uploaded_print(target, legacy_params("[0]"), "part.gcode"));
     CHECK_FALSE(first.scripts().empty());
-    CHECK(second.scripts().empty());
-    CHECK(second.state_reads() == 0);
+    CHECK(second.total_requests() == 0);
 }
 
 TEST_CASE("legacy start: a failing SDCARD_PRINT_FILE after the map says the printer kept the map", "[MoonrakerPrinterAgent][LegacyStart]")
 {
     FakePrinter     printer(Behavior::Silent);
     PreferenceAgent agent(printer);
+    list_map_commands(printer);
     printer.reject_scripts_starting_with("SDCARD_PRINT_FILE");
     std::string error;
     CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
@@ -1988,4 +2022,57 @@ TEST_CASE("start_local_print on a Snapmaker agent is guarded by the same idle re
     { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
     CHECK(agent.start_local_print(preference_params(file, true, true, true), nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);
     CHECK(printer.scripts().empty());
+}
+
+TEST_CASE("legacy start: a printer that turns busy between the first read and the first script gets no script", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    const std::string idle = R"({"result":{"status":{"print_stats":{"state":"standby"},"machine_state_manager":{"main_state":0}}}})";
+    const std::string busy = R"({"result":{"status":{"print_stats":{"state":"printing"},"machine_state_manager":{"main_state":1}}}})";
+    FakePrinter     printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    list_map_commands(printer);
+    printer.set_state_sequence({idle, busy});
+    std::string error;
+    CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+    CHECK(printer.state_reads() == 2);
+    CHECK(printer.requests_to("/printer/gcode/script") == 0);
+    CHECK(error.find("became busy") != std::string::npos);
+}
+
+TEST_CASE("legacy start: an agent without print-preference support sends nothing at all", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    FakePrinter printer(Behavior::Silent);
+    PrintAgent  agent(printer); // supports_print_preferences() == false
+    std::string error;
+    CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+    CHECK(printer.total_requests() == 0);
+    CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("legacy start: a help probe that fails or lacks the map command refuses the start", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    struct Case { const char* what; std::vector<std::string> commands; bool has_help; };
+    for (const Case& c : {Case{"no help route (404)", {}, false}, Case{"help lacks the map command", {"SET_PRINT_USED_EXTRUDERS"}, true},
+                          Case{"help lacks the used command", {"SET_PRINT_EXTRUDER_MAP"}, true}}) {
+        CAPTURE(c.what);
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        if (c.has_help)
+            printer.set_gcode_commands(c.commands);
+        std::string error;
+        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+        CHECK(printer.requests_to("/printer/gcode/script") == 0);
+        CHECK_FALSE(error.empty());
+    }
+}
+
+TEST_CASE("legacy start: every refusal says why", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    FakePrinter     printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    list_map_commands(printer);
+    std::string error;
+    CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("not json"), "part.gcode", &error));
+    CHECK(error.find("mapping is not valid") != std::string::npos);
+    CHECK(printer.requests_to("/printer/gcode/script") == 0);
 }
