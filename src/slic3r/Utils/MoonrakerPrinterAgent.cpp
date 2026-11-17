@@ -1663,7 +1663,7 @@ MoonrakerPrinterAgent::RfidReread MoonrakerPrinterAgent::reread_spool_tags(std::
     auto       now   = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0); };
     auto       sleep = [](std::chrono::milliseconds d) { std::this_thread::sleep_for(d); };
     const auto settled = Spoolman::poll_until_settled(snapshot, baseline, now, sleep, timeout, interval, 3); // 3 identical polls = settled
-    BOOST_LOG_TRIVIAL(info) << "MoonrakerPrinterAgent::reread_spool_tags: tag re-read " << (settled.settled ? "settled" : "unconfirmed")
+    BOOST_LOG_TRIVIAL(info) << "MoonrakerPrinterAgent::reread_spool_tags: tag re-read " << (settled.settled ? "settled" : settled.last == baseline ? "unchanged" : "unconfirmed")
                             << ", final snapshot:\n" << (settled.last.empty() ? std::string("(none read)\n") : settled.last);
     return settled.settled ? RfidReread::done : RfidReread::unconfirmed;
 }

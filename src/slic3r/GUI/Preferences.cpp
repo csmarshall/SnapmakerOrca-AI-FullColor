@@ -2482,6 +2482,11 @@ void PreferencesDialog::create_items()
         _L("Spoolman server URL"),
         _L("Optional. The address of your Spoolman server, for example http://192.168.1.20:7912 (http or https, no user name or password, no query).\nWhen set, the catalog is read directly from this server with plain GET requests. When empty, it is read through the Moonraker server of the selected printer."));
     g_sizer->Add(item_spoolman_url);
+    auto item_spoolman_reread = create_item_button(_L("Re-read spool tags question"), _L("Ask again"), "",
+        _L("The Spoolman button can ask whether to re-read the spool tags on the printer first. Clear a remembered answer so it asks again."), []() {
+            wxGetApp().app_config->erase("app", "spoolman_reread_answer");
+        });
+    g_sizer->Add(item_spoolman_reread);
 
     //// DEVELOPER > Storage
 

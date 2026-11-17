@@ -111,3 +111,30 @@ TEST_CASE("sync AMS confirm: result mapping matches Snapmaker (Yes/Resync force 
     REQUIRE(sync_ams_confirm_force_all(yes, yes));
     REQUIRE_FALSE(sync_ams_confirm_force_all(ok, yes));
 }
+
+TEST_CASE("sync AMS confirm plan: the Spoolman button resyncs without asking; the re-run is changes only (#131)", "[ams][sync]")
+{
+    using namespace Slic3r::GUI;
+    const auto def = sync_ams_confirm_plan(false, false);
+    REQUIRE(def.show_confirm); // default sync button keeps the confirm
+    const auto resync = sync_ams_confirm_plan(true, false);
+    REQUIRE_FALSE(resync.show_confirm);
+    REQUIRE(resync.force_all);
+    const auto changes = sync_ams_confirm_plan(true, true);
+    REQUIRE_FALSE(changes.show_confirm);
+    REQUIRE_FALSE(changes.force_all);
+    REQUIRE(sync_ams_confirm_plan(false, true).show_confirm); // a changes-only re-run outside Spoolman cannot happen; still asks
+}
+
+TEST_CASE("spoolman re-read answer: ask unless a yes/no was remembered (#131)", "[ams][sync]")
+{
+    using namespace Slic3r::GUI;
+    REQUIRE(spoolman_reread_stored_answer("") == RereadAnswer::Ask);
+    REQUIRE(spoolman_reread_stored_answer("garbage") == RereadAnswer::Ask);
+    REQUIRE(spoolman_reread_stored_answer("yes") == RereadAnswer::Yes);
+    REQUIRE(spoolman_reread_stored_answer("no") == RereadAnswer::No);
+    REQUIRE(spoolman_reread_value_to_store(true, true) == "yes");
+    REQUIRE(spoolman_reread_value_to_store(false, true) == "no");
+    REQUIRE(spoolman_reread_value_to_store(true, false).empty());
+    REQUIRE(spoolman_reread_value_to_store(false, false).empty());
+}

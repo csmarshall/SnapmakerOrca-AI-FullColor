@@ -894,6 +894,7 @@ struct Sidebar::priv
     Spoolman::UpsertReport                spoolman_report;
     bool                                  spoolman_has_last_good = false;
     std::optional<long long>              spoolman_last_good_age;
+    bool                                  spoolman_rerun_changes_only = false; // #131: set only around the "run again as Sync" re-run
 
     wxPanel *scrolled = nullptr;
     PlaterPresetComboBox *combo_sla_print = nullptr;
@@ -6382,8 +6383,18 @@ void Sidebar::sync_spoolman_filaments()
     // agent that supports it; the worker thread re-checks that the printer is idle right before sending (Spoolman::send_rfid_reread).
     bool reread = false;
     if (agent && agent->supports_rfid_reread()) {
-        MessageDialog dlg(this, _L("Re-read spool tags on the printer first?"), _L("Spoolman"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
-        reread = dlg.ShowModal() == wxID_YES;
+        // #131: a remembered yes/no (app_config spoolman_reread_answer, reset in Preferences) skips the question.
+        switch (spoolman_reread_stored_answer(wxGetApp().app_config->get("spoolman_reread_answer"))) {
+        case RereadAnswer::Yes: reread = true; break;
+        case RereadAnswer::No: reread = false; break;
+        case RereadAnswer::Ask: {
+            RichMessageDialog dlg(this, _L("Re-read spool tags on the printer first?"), _L("Spoolman"), wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
+            dlg.ShowCheckBox(_L("Don't ask again"));
+            reread = dlg.ShowModal() == wxID_YES;
+            wxGetApp().app_config->set("spoolman_reread_answer", spoolman_reread_value_to_store(reread, dlg.IsCheckBoxChecked()));
+            break;
+        }
+        }
     }
     auto reread_result = std::make_shared<MoonrakerPrinterAgent::RfidReread>(MoonrakerPrinterAgent::RfidReread::unsupported);
     const auto started = p->spoolman_runner.start(
@@ -6420,7 +6431,7 @@ void Sidebar::sync_spoolman_filaments()
             // Reset on every exit path, including an exception out of sync_ams_list, so a later plain sync shows no Spoolman summary.
             struct ResetOnExit {
                 Sidebar::priv *p;
-                ~ResetOnExit() { p->spoolman_fetch.reset(); p->spoolman_report = {}; }
+                ~ResetOnExit() { p->spoolman_fetch.reset(); p->spoolman_report = {}; p->spoolman_rerun_changes_only = false; }
             } reset_on_exit{p.get()};
             p->spoolman_report = {};
             if (fetch.good()) {
@@ -6513,6 +6524,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
         dlg_res = m_sync_dlg->ShowModal();
     } else {
         // 2.5's mapping dialog is skipped (empty project): keep Snapmaker Orca's confirm instead of syncing silently (#106).
+        // #131: not for the Spoolman button, which always resyncs (and re-runs as changes-only from its summary).
         struct SyncAmsConfirmDialog : MessageDialog {
             SyncAmsConfirmDialog(wxWindow *parent, bool first)
                 : MessageDialog(parent,
@@ -6528,8 +6540,14 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
                 }
                 add_button(wxID_CANCEL, false, _L("Cancel"));
             }
-        } confirm_dlg(this, sync_ams_confirm_kind(ams_filament_ids) == SyncAmsConfirmKind::FirstTime);
-        dlg_res = confirm_dlg.ShowModal();
+        };
+        const SyncAmsConfirmPlan plan = sync_ams_confirm_plan(p->spoolman_fetch.has_value(), p->spoolman_rerun_changes_only);
+        if (plan.show_confirm) {
+            SyncAmsConfirmDialog confirm_dlg(this, sync_ams_confirm_kind(ams_filament_ids) == SyncAmsConfirmKind::FirstTime);
+            dlg_res = confirm_dlg.ShowModal();
+        } else {
+            dlg_res = plan.force_all ? (int) wxID_YES : (int) wxID_OK; // same codes the confirm returns for Resync / Sync
+        }
     }
     if (sync_ams_confirm_cancelled(dlg_res, wxID_CANCEL))
         return;
@@ -6643,7 +6661,27 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
             }
             outcome.trays.push_back(std::move(st));
         }
-        SpoolmanSummaryDialog::show_if_needed(this, Spoolman::build_summary(outcome), spoolman_summary_on);
+        // #131: "Run again as Sync" re-runs the slot sync from a copy of this fetch and report: no second catalog fetch, no re-read.
+        // Skipped on the changes-only re-run itself (it would offer the same thing again).
+        std::function<void()> rerun;
+        if (p->spoolman_fetch && !p->spoolman_rerun_changes_only) {
+            rerun = [this, fetch = *p->spoolman_fetch, report = p->spoolman_report, has_last_good = p->spoolman_has_last_good,
+                     last_good_age = p->spoolman_last_good_age]() {
+                if (p->spoolman_fetch.has_value() || p->spoolman_runner.in_flight())
+                    return; // a sync is already running
+                struct ResetOnExit {
+                    Sidebar::priv *p;
+                    ~ResetOnExit() { p->spoolman_fetch.reset(); p->spoolman_report = {}; p->spoolman_rerun_changes_only = false; }
+                } reset_on_exit{p.get()};
+                p->spoolman_fetch                = fetch;
+                p->spoolman_report               = report;
+                p->spoolman_has_last_good        = has_last_good;
+                p->spoolman_last_good_age        = last_good_age;
+                p->spoolman_rerun_changes_only   = true;
+                sync_ams_list(false);
+            };
+        }
+        SpoolmanSummaryDialog::show_if_needed(this, Spoolman::build_summary(outcome), spoolman_summary_on, std::move(rerun));
     }
 
     // BBS:Synchronized consumables information

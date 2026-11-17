@@ -5,6 +5,7 @@
 #include "Widgets/Button.hpp"
 #include "Widgets/Label.hpp"
 
+#include <wx/app.h>
 #include <wx/colour.h>
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
@@ -27,7 +28,7 @@ wxStaticText *plain_text(wxWindow *parent, const std::string &s, int wrap_width 
 }
 } // namespace
 
-SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::SummaryModel &model)
+SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::SummaryModel &model, std::function<void()> rerun_as_sync)
     : DPIDialog(parent, wxID_ANY, _L("Spoolman Sync Summary"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 {
     SetFont(wxGetApp().normal_font());
@@ -120,6 +121,16 @@ SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::S
     auto *close = new Button(this, _L("Close"));
     close->SetStyle(ButtonStyle::Confirm, ButtonType::Window);
     buttons->AddStretchSpacer();
+    if (rerun_as_sync) {
+        auto *rerun = new Button(this, _L("Run again as Sync (changes only)"));
+        rerun->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+        buttons->Add(rerun, 0, wxRIGHT, FromDIP(8));
+        // Close first (the dialog destroys itself), then re-run from the GUI loop: the re-run opens its own summary.
+        rerun->Bind(wxEVT_BUTTON, [this, rerun_as_sync](wxCommandEvent &) {
+            Close();
+            wxTheApp->CallAfter(rerun_as_sync);
+        });
+    }
     buttons->Add(details, 0, wxRIGHT, FromDIP(8));
     buttons->Add(close, 0);
     main_sizer->Add(buttons, 0, wxEXPAND | wxALL, FromDIP(10));
@@ -146,11 +157,11 @@ void SpoolmanSummaryDialog::set_details_visible(bool visible)
 
 void SpoolmanSummaryDialog::on_dpi_changed(const wxRect &) { Fit(); Refresh(); }
 
-bool SpoolmanSummaryDialog::show_if_needed(wxWindow *parent, const Spoolman::SummaryModel &model, bool preference_on)
+bool SpoolmanSummaryDialog::show_if_needed(wxWindow *parent, const Spoolman::SummaryModel &model, bool preference_on, std::function<void()> rerun_as_sync)
 {
     if (!preference_on || !model.show_dialog)
         return false;
-    (new SpoolmanSummaryDialog(parent, model))->Show();
+    (new SpoolmanSummaryDialog(parent, model, std::move(rerun_as_sync)))->Show();
     return true;
 }
 

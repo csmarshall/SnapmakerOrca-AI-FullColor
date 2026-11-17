@@ -9,6 +9,7 @@
 #include "GUI_Utils.hpp"
 #include "libslic3r/Spoolman/SpoolmanSummary.hpp"
 
+#include <functional>
 #include <vector>
 
 class wxScrolledWindow;
@@ -19,11 +20,12 @@ namespace Slic3r { namespace GUI {
 class SpoolmanSummaryDialog : public DPIDialog
 {
 public:
-    SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::SummaryModel &model);
+    // `rerun_as_sync` (#131), when set, adds a "Run again as Sync (changes only)" button: it closes this dialog and calls the function (no new fetch).
+    SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::SummaryModel &model, std::function<void()> rerun_as_sync = {});
 
     // Shows the dialog (non-modal, self-destroying) when `preference_on` and the model has content. Returns whether it was shown.
     // GUI thread only.
-    static bool show_if_needed(wxWindow *parent, const Spoolman::SummaryModel &model, bool preference_on);
+    static bool show_if_needed(wxWindow *parent, const Spoolman::SummaryModel &model, bool preference_on, std::function<void()> rerun_as_sync = {});
 
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override;
