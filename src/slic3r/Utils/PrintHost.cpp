@@ -496,11 +496,25 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
 {
     emit_progress(0);   // Indicate the upload is starting
 
+    const std::string uploaded_name = the_job.upload_data.upload_path.generic_string(); // upload_job() moves upload_data away
     bool success = PrintHostJobQueue::upload_job(the_job,
         [this](Http::Progress progress, bool &cancel)   { this->progress_fn(std::move(progress), cancel); },
         [this](wxString error)                          { this->error_fn(std::move(error)); },
         [this](wxString tag, wxString host)             { this->info_fn(std::move(tag), std::move(host)); }
     );
+
+    if (success && the_job.after_upload) {
+        bool started = false;
+        try {
+            started = the_job.after_upload(uploaded_name);
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "after-upload step failed: " << e.what();
+        }
+        if (!started) {
+            this->error_fn(wxString::FromUTF8("The file was uploaded, but the print was not started."));
+            success = false;
+        }
+    }
 
     if (success) {
         emit_progress(100);

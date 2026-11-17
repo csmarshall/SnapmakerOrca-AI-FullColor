@@ -113,6 +113,9 @@ struct PrintHostJob
     std::unique_ptr<PrintHost> printhost;
     bool switch_to_device_tab{false};
     bool cancelled = false;
+    // Optional step run on the upload worker after a SUCCESSFUL upload, with the uploaded file's name; false = failed (#120: the Snapmaker
+    // legacy send starts the print through the agent here instead of the host's print=true).
+    std::function<bool(const std::string&)> after_upload;
 
     PrintHostJob() {}
     PrintHostJob(const PrintHostJob&) = delete;
@@ -121,6 +124,7 @@ struct PrintHostJob
         , printhost(std::move(other.printhost))
         , switch_to_device_tab(other.switch_to_device_tab)
         , cancelled(other.cancelled)
+        , after_upload(std::move(other.after_upload))
     {}
 
     PrintHostJob(DynamicPrintConfig *config)
@@ -134,6 +138,7 @@ struct PrintHostJob
         printhost   = std::move(other.printhost);
         switch_to_device_tab = other.switch_to_device_tab;
         cancelled = other.cancelled;
+        after_upload = std::move(other.after_upload);
         return *this;
     }
 

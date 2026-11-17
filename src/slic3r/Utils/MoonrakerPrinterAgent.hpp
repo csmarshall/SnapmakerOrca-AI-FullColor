@@ -30,6 +30,8 @@ class MoonrakerPrinterAgent : public IPrinterAgent
 {
     friend class MoonrakerPreprintPrinter; // S4c: the pre-print adapter reads the connection and sends through the private helpers; nothing else is widened
 public:
+    // #120: start an already uploaded file (extruder map + preferences + SDCARD_PRINT_FILE); the legacy send calls this after its own upload.
+    bool start_uploaded_print(const PrintParams& params, const std::string& filename) { return print_uploaded_file(params, filename); }
     explicit MoonrakerPrinterAgent(std::string log_dir);
     ~MoonrakerPrinterAgent() override;
 

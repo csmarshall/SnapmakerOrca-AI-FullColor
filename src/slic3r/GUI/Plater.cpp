@@ -190,6 +190,7 @@
 #include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
 #include "slic3r/Utils/SpoolmanDirect.hpp"
 #include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
+#include "slic3r/Utils/SnapmakerExtruderChoice.hpp"
 #include "libslic3r/IMEXHelpers.hpp"
 #include "libslic3r/PublishSettings.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -21289,6 +21290,75 @@ void Plater::reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &
     // and let the background processing start.
     this->p->restart_background_process(state | priv::UPDATE_BACKGROUND_PROCESS_FORCE_RESTART);
 }
+// BEGIN legacy U1 mapping step (#120 slice 2): modal confirm for the filament-to-extruder assignment of a legacy send that starts through the agent.
+// Pre-filled from suggest_snapmaker_extruder_map; the OK button is enabled only while validate_snapmaker_extruder_map is OK. Compile-checked only.
+namespace {
+struct SnapmakerLegacyMapChoice { bool confirmed = false; std::vector<int> map; bool flow_cali = false; bool timelapse = false; bool bed_leveling = true; };
+SnapmakerLegacyMapChoice ask_snapmaker_legacy_map(wxWindow* parent, const std::vector<SnapmakerUsedFilament>& used, const std::vector<SnapmakerSlotInfo>& slots)
+{
+    SnapmakerLegacyMapChoice out;
+    const SnapmakerExtruderSuggestion suggestion = suggest_snapmaker_extruder_map(used, slots);
+    std::vector<int> map = suggestion.map;
+    wxDialog dlg(parent, wxID_ANY, _L("Filament to extruder"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE);
+    auto* top = new wxBoxSizer(wxVERTICAL);
+    top->Add(new wxStaticText(&dlg, wxID_ANY, _L("Choose the extruder each filament is loaded in, then confirm. Nothing is printed until you confirm.")), 0, wxALL, 8);
+    auto* status = new wxStaticText(&dlg, wxID_ANY, "");
+    auto* ok     = new wxButton(&dlg, wxID_OK, _L("Confirm and print"));
+    auto refresh = [&]() {
+        const SnapmakerMapValidation v = validate_snapmaker_extruder_map(map, used, slots);
+        wxString text = v.ok() ? wxString() : from_u8(v.message);
+        if (v.ok() && v.oversubscribed)
+            text = _L("More filaments than extruders: some extruders are shared, so you must swap filament by hand during the print.");
+        status->SetLabel(text);
+        ok->Enable(v.ok());
+        dlg.Layout();
+    };
+    auto* grid = new wxFlexGridSizer(2, 6, 8);
+    for (size_t i = 0; i < used.size(); ++i) {
+        const SnapmakerUsedFilament& f = used[i];
+        grid->Add(new wxStaticText(&dlg, wxID_ANY, wxString::Format("%s %d  %s %s", _L("Filament"), f.index + 1, from_u8(f.type), from_u8(f.colour))), 0, wxALIGN_CENTER_VERTICAL);
+        auto* choice = new wxChoice(&dlg, wxID_ANY);
+        for (size_t e = 0; e < slots.size(); ++e)
+            choice->Append(wxString::Format("%s %d", _L("Extruder"), int(e) + 1));
+        const int pre = size_t(f.index) < map.size() ? map[size_t(f.index)] : -1;
+        if (pre >= 0)
+            choice->SetSelection(pre);
+        const int filament_index = f.index;
+        choice->Bind(wxEVT_CHOICE, [&, choice, filament_index](wxCommandEvent&) {
+            if (map.size() <= size_t(filament_index))
+                map.resize(size_t(filament_index) + 1, -1);
+            map[size_t(filament_index)] = choice->GetSelection();
+            refresh();
+        });
+        grid->Add(choice, 0, wxEXPAND);
+    }
+    top->Add(grid, 0, wxALL, 8);
+    auto* bed   = new wxCheckBox(&dlg, wxID_ANY, _L("Bed leveling"));
+    auto* flow  = new wxCheckBox(&dlg, wxID_ANY, _L("Flow calibration"));
+    auto* lapse = new wxCheckBox(&dlg, wxID_ANY, _L("Time-lapse"));
+    bed->SetValue(true);
+    top->Add(bed, 0, wxLEFT | wxRIGHT, 8);
+    top->Add(flow, 0, wxLEFT | wxRIGHT, 8);
+    top->Add(lapse, 0, wxLEFT | wxRIGHT, 8);
+    top->Add(status, 0, wxALL, 8);
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    buttons->Add(ok, 0, wxRIGHT, 8);
+    buttons->Add(new wxButton(&dlg, wxID_CANCEL, _L("Cancel")));
+    top->Add(buttons, 0, wxALL | wxALIGN_RIGHT, 8);
+    dlg.SetSizerAndFit(top);
+    refresh();
+    if (dlg.ShowModal() != wxID_OK)
+        return out;
+    out.confirmed    = validate_snapmaker_extruder_map(map, used, slots).ok(); // re-checked: the confirm is never trusted on its own
+    out.map          = map;
+    out.bed_leveling = bed->GetValue();
+    out.flow_cali    = flow->GetValue();
+    out.timelapse    = lapse->GetValue();
+    return out;
+}
+} // namespace
+// END legacy U1 mapping step
+
 void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
 {
     // if physical_printer is selected, send gcode for this printer
@@ -21474,6 +21544,74 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
         if (use_3mf) {
             const int plateindex = (plate_idx == PLATE_ALL_IDX ? get_partplate_list().get_curr_plate_index() : resolved_plate_idx) + 1;
             upload_job.upload_data.extended_info["plateindex"] = std::to_string(plateindex);
+        }
+    }
+
+    // #120: legacy send to a Snapmaker printer. A start goes ONLY through the agent with a confirmed, validated map; anything else uploads without
+    // starting (the host's print=true is never used, it would start with whatever map the printer holds).
+    {
+        const std::string agent_id = wxGetApp().resolve_printer_agent_id(wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_agent"));
+        if (NetworkAgentFactory::printer_agent_supports_preprint_page(agent_id)) {
+            SnapmakerLegacySendInput in;
+            in.snapmaker_printer = true;
+            in.start_requested   = upload_job.upload_data.post_action == PrintHostPostUploadAction::StartPrint;
+            auto* net            = wxGetApp().getAgent();
+            auto  agent          = net ? std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net->get_printer_agent()) : nullptr;
+            DeviceManager* dev   = wxGetApp().getDeviceManager();
+            MachineObject* sel   = dev ? dev->get_selected_machine() : nullptr;
+            in.agent_present     = agent && agent->supports_print_preferences();
+            in.agent_connected   = sel != nullptr && sel->is_connected();
+            in.slots.assign(snapmaker_max_extruders, SnapmakerSlotInfo{}); // the machine's loaded-filament data is not wired in: identity suggestion, the user confirms
+            SnapmakerLegacyMapChoice choice;
+            if (in.start_requested && in.agent_present && in.agent_connected) {
+                const DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config();
+                const auto types   = cfg.option<ConfigOptionStrings>("filament_type");
+                const auto colours = cfg.option<ConfigOptionStrings>("filament_colour");
+                if (PartPlate* plate = get_partplate_list().get_plate(resolved_plate_idx)) {
+                    for (const FilamentInfo& f : plate->get_slice_filaments_info()) {
+                        if (f.id < 0)
+                            continue;
+                        SnapmakerUsedFilament u;
+                        u.index  = f.id;
+                        u.type   = types && size_t(f.id) < types->values.size() ? types->values[size_t(f.id)] : std::string();
+                        u.colour = colours && size_t(f.id) < colours->values.size() ? colours->values[size_t(f.id)] : std::string();
+                        in.used.push_back(u);
+                    }
+                }
+                if (in.used.empty()) {
+                    notify_preprint("Nothing was sent: the plate's used filaments are not known yet. Slice the plate first.", true);
+                    return;
+                }
+                choice = ask_snapmaker_legacy_map(this, in.used, in.slots);
+                if (!choice.confirmed)
+                    return; // cancelled: nothing is sent
+                in.map           = choice.map;
+                in.map_confirmed = true;
+            }
+            const SnapmakerLegacySendDecision decision = decide_snapmaker_legacy_send(in);
+            switch (decision.kind) {
+            case SnapmakerLegacySendKind::Refuse:
+                notify_preprint("Nothing was sent: " + decision.message, true);
+                return;
+            case SnapmakerLegacySendKind::UploadOnly:
+            case SnapmakerLegacySendKind::Unchanged: // cannot happen here (snapmaker_printer is true); fail closed to upload only
+                upload_job.upload_data.post_action = PrintHostPostUploadAction::None;
+                if (decision.upload_only_notice)
+                    notify_preprint("The printer is not connected, so the file is uploaded but the print is not started. Connect the printer and start it from the Device page.", false);
+                break;
+            case SnapmakerLegacySendKind::StartViaAgent: {
+                upload_job.upload_data.post_action = PrintHostPostUploadAction::None;
+                PrintParams params{};
+                params.ams_mapping           = decision.ams_mapping;
+                params.task_flow_cali        = choice.flow_cali;
+                params.task_record_timelapse = choice.timelapse;
+                params.task_bed_leveling     = choice.bed_leveling;
+                upload_job.after_upload      = [agent, params](const std::string& name) { return agent->start_uploaded_print(params, name); };
+                if (decision.oversubscribed)
+                    notify_preprint("More filaments than extruders: some extruders are shared, so swap filament by hand during the print.", false);
+                break;
+            }
+            }
         }
     }
 
