@@ -21700,13 +21700,23 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
                 const auto types   = cfg.option<ConfigOptionStrings>("filament_type");
                 const auto colours = cfg.option<ConfigOptionStrings>("filament_colour");
                 if (PartPlate* plate = get_partplate_list().get_plate(resolved_plate_idx)) {
-                    for (const FilamentInfo& f : plate->get_slice_filaments_info()) {
-                        if (f.id < 0)
-                            continue;
+                    // A fresh slice leaves the plate's slice_filaments_info empty; the helper reads the slice statistics first and falls back to
+                    // the .gcode.3mf list (#136), the same source the pre-print request uses.
+                    SnapmakerUsedFilamentsInput used_in;
+                    if (const auto* d = cfg.option<ConfigOptionFloats>("filament_diameter"))
+                        used_in.filament_diameter = d->values;
+                    if (GCodeProcessorResult* result = plate->get_slice_result())
+                        used_in.total_volumes_mm3 = result->print_statistics.total_volumes_per_extruder;
+                    for (const FilamentInfo& f : plate->get_slice_filaments_info())
+                        used_in.loaded.push_back({f.id, f.used_m});
+                    SnapmakerUsedFilaments used_ids;
+                    std::string            used_err;
+                    snapmaker_collect_used_filaments(used_in, used_ids, used_err);
+                    for (const int id : used_ids.ids) {
                         SnapmakerUsedFilament u;
-                        u.index  = f.id;
-                        u.type   = types && size_t(f.id) < types->values.size() ? types->values[size_t(f.id)] : std::string();
-                        u.colour = colours && size_t(f.id) < colours->values.size() ? colours->values[size_t(f.id)] : std::string();
+                        u.index  = id;
+                        u.type   = types && size_t(id) < types->values.size() ? types->values[size_t(id)] : std::string();
+                        u.colour = colours && size_t(id) < colours->values.size() ? colours->values[size_t(id)] : std::string();
                         in.used.push_back(u);
                     }
                 }
