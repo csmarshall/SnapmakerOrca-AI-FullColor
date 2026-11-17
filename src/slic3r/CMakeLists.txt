@@ -836,6 +836,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SpoolmanDirect.hpp
     Utils/MoonrakerPrinterAgent.hpp
     Utils/SnapmakerPrintPreference.hpp
+    Utils/SnapmakerExtruderChoice.hpp
     Utils/SnapmakerPreprintMapping.hpp
     Utils/SnapmakerPreprintPrinter.hpp
     Utils/MoonrakerPreprintPrinter.hpp

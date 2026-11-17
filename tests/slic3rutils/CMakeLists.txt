@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
     test_device_access.cpp
     test_send_dialog_options.cpp
     test_print_preference.cpp
+    test_snapmaker_extruder_choice.cpp
     test_snapmaker_preprint_mapping.cpp
     test_snapmaker_preprint_gate.cpp
     test_preprint_dialog_controller.cpp
