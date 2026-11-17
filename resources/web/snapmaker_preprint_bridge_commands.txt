@@ -38,7 +38,7 @@ REGISTERED sw_FinishFilamentMapping
 REGISTERED sw_GetActiveFile
 DENIED sw_GetCache
 DENIED sw_GetCameraTimelapseInstance
-DENIED sw_GetConnectedMachine
+REGISTERED sw_GetConnectedMachine
 DENIED sw_GetDeviceDataStorageSpace
 REGISTERED sw_GetFileFilamentMapping
 DENIED sw_GetFileListPage

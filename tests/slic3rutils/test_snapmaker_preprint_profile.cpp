@@ -669,10 +669,10 @@ TEST_CASE("the pre-print profile registers exactly the REGISTERED lines of snapm
         "sw_SubscribeLocalDevices", "sw_SubscribeCacheKey", "sw_SubscribeUserLoginState", "sw_GetUserLoginState", "sw_UserLogin",
         "sw_GetSoftwareInfo", "sw_UploadEvent", "sw_GetLocalDevices",
         // the pre-print profile
-        "sw_GetActiveFile", "sw_GetFileFilamentMapping", "sw_SendGCodes", "sw_MachinePrintStart", "sw_StartLocalPrint",
+        "sw_GetConnectedMachine", "sw_GetActiveFile", "sw_GetFileFilamentMapping", "sw_SendGCodes", "sw_MachinePrintStart", "sw_StartLocalPrint",
         "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping"};
     CHECK(listed == expected);
-    CHECK(listed.size() == 20);
+    CHECK(listed.size() == 21);
     for (const auto& n : listed) { CAPTURE(n); CHECK(h.bridge->sswcp().is_registered(n)); }
     for (const auto& n : denied) { CAPTURE(n); CHECK_FALSE(h.bridge->sswcp().is_registered(n)); }
     for (const char* n : {"sw_UploadFile", "sw_UploadFileResult", "sw_UploadFiletoMachine", "sw_DownLoadFile", "sw_DownloadMachineFile", "sw_GetFileStream",
@@ -739,6 +739,44 @@ TEST_CASE("pre-print sw_GetLocalDevices is empty when no printer is pinned, the 
         const json r = h.call("sw_GetLocalDevices");
         CHECK(r["data"].is_array());
         CHECK(r["data"].empty());
+    }
+}
+
+// ---- #137: sw_GetConnectedMachine answers the same pinned record, read-only ----
+
+TEST_CASE("pre-print sw_GetConnectedMachine returns the pinned printer's record, the same as sw_GetLocalDevices, without contacting it", "[SSWCP][preprint_profile][connected_machine]")
+{
+    Profile h(true, false);
+    h.printer->pin = SnapmakerPreprintPin{"192.0.2.10", "7125", "SNPLACEHOLDER"};
+    REQUIRE(h.open(true) != 0);
+    h.bridge = h.make();
+    h.printer->forget();
+
+    const json r = h.call("sw_GetConnectedMachine");
+    REQUIRE(is_ok(r));
+    REQUIRE(r["data"].is_object());
+    CHECK(r["data"]["sn"] == "SNPLACEHOLDER");
+    CHECK(r["data"]["connected"] == true);
+    const json list = h.call("sw_GetLocalDevices");
+    REQUIRE(list["data"].size() == 1);
+    CHECK(r["data"] == list["data"][0]);
+    CHECK(h.printer->calls.empty());
+}
+
+TEST_CASE("pre-print sw_GetConnectedMachine is an empty record when no printer is pinned, the bridge is stale or the context is closed", "[SSWCP][preprint_profile][connected_machine]")
+{
+    SECTION("stale epoch") {
+        Profile h;
+        auto stale = h.make(h.epoch + 1);
+        const json r = h.call("sw_GetConnectedMachine", json::object(), stale.get());
+        CHECK(is_ok(r));
+        CHECK(r["data"] == json::object());
+    }
+    SECTION("closed context") {
+        Profile h;
+        h.session->finish(h.epoch);
+        const json r = h.call("sw_GetConnectedMachine");
+        CHECK(r["data"] == json::object());
     }
 }
 

@@ -817,6 +817,18 @@ void SnapmakerDeviceBridge::register_preprint_commands()
         if (r.ok) i.reply_ok(r.data);
         else i.handle_general_fail(r.code, r.message);
     };
+    // #137: the page asks for the connected machine to validate the filaments against its slots. READ-ONLY: the same record as the pre-print
+    // sw_GetLocalDevices entry (current_devices() = the pinned printer while the epoch is live), no printer contact, no serial fetch, no write.
+    // Nothing pinned (stale, closed, never opened) -> {} like the Device tab's "nothing connected".
+    m_sswcp.register_command(
+        "sw_GetConnectedMachine",
+        [this](SSWCP_Instance& i) {
+            nlohmann::json record = nlohmann::json::object();
+            for (const auto& d : current_devices())
+                if (d.connected) { record = snapmaker_device_to_json(d); break; }
+            i.reply_ok(std::move(record));
+        },
+        false);
     // Local, quick: answered inline.
     m_sswcp.register_command(
         "sw_GetActiveFile", [session, epoch, reply, this](SSWCP_Instance& i) { reply(i, session->active_file(epoch, m_options.http_host)); }, false);
