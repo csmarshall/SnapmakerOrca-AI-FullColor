@@ -187,6 +187,8 @@ SnapmakerLegacySendInput legacy_in()
     in.used              = {uf(0, "PLA", "#FF0000"), uf(1, "PETG", "#00FF00")};
     in.slots             = four_empty;
     in.map               = {1, 0};
+    in.agent_base_url    = "http://printer.example:80";
+    in.upload_host       = "printer.example";
     return in;
 }
 } // namespace
@@ -285,4 +287,34 @@ TEST_CASE("Legacy send: more than four filaments starts with the oversubscribed 
     CHECK(d.kind == SnapmakerLegacySendKind::StartViaAgent);
     CHECK(d.oversubscribed);
     CHECK(d.ams_mapping == "[0,1,2,3,3]");
+}
+
+TEST_CASE("Legacy send: the agent and the upload host must be the same server, else upload only", "[ExtruderChoice][LegacySend][HostMatch]")
+{
+    CHECK(snapmaker_same_host("http://Printer.Example:80/", "printer.example"));
+    CHECK(snapmaker_same_host("https://printer.example", "https://printer.example:443/"));
+    CHECK(snapmaker_same_host("http://[::1]:7125", "[::1]:7125"));
+    CHECK_FALSE(snapmaker_same_host("http://printer.example:7125", "printer.example")); // port differs
+    CHECK_FALSE(snapmaker_same_host("https://printer.example", "http://printer.example"));
+    CHECK_FALSE(snapmaker_same_host("http://a.example", "http://b.example"));
+    CHECK_FALSE(snapmaker_same_host("", ""));
+    CHECK_FALSE(snapmaker_same_host("printer.example", ""));
+    CHECK_FALSE(snapmaker_same_host("ftp://printer.example", "ftp://printer.example"));
+    CHECK_FALSE(snapmaker_same_host("http://printer.example:99999x", "http://printer.example:99999x"));
+
+    auto in           = legacy_in();
+    in.upload_host    = "http://other.example";
+    auto d            = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::UploadOnly);
+    CHECK(d.ams_mapping.empty());
+    CHECK(d.upload_only_notice);
+    CHECK_FALSE(d.message.empty());
+
+    in                = legacy_in();
+    in.agent_base_url = "";
+    CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::UploadOnly);
+    in                = legacy_in();
+    in.upload_host    = "";
+    CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::UploadOnly);
+    CHECK(decide_snapmaker_legacy_send(legacy_in()).kind == SnapmakerLegacySendKind::StartViaAgent);
 }

@@ -40,6 +40,10 @@ struct PrintHostUpload
 
     PrintHostPostUploadAction post_action { PrintHostPostUploadAction::None };
 
+    // #120: filled by a host that reports where the server stored the file (Moonraker: item.path of the upload reply), and ONLY then (no
+    // guessed fallback). Set by the caller that wants to start exactly that file; null = nobody asked.
+    std::shared_ptr<std::string> stored_path;
+
     // Some extended parameters for different upload methods.
     std::map<std::string, std::string> extended_info;
 
@@ -113,9 +117,10 @@ struct PrintHostJob
     std::unique_ptr<PrintHost> printhost;
     bool switch_to_device_tab{false};
     bool cancelled = false;
-    // Optional step run on the upload worker after a SUCCESSFUL upload, with the uploaded file's name; false = failed (#120: the Snapmaker
-    // legacy send starts the print through the agent here instead of the host's print=true).
-    std::function<bool(const std::string&)> after_upload;
+    // Optional step run on the upload worker after a SUCCESSFUL upload, with the name the SERVER confirmed for the file (never a name the client
+    // chose: it is not called when the host reported none); false = failed, with `error` the user-facing reason (#120: the Snapmaker legacy send
+    // starts the print through the agent here instead of the host's print=true).
+    std::function<bool(const std::string& stored_name, std::string& error)> after_upload;
 
     PrintHostJob() {}
     PrintHostJob(const PrintHostJob&) = delete;

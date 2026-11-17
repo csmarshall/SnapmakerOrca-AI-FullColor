@@ -199,6 +199,50 @@ inline SnapmakerAmsMappingResult snapmaker_map_to_ams_mapping(const std::vector<
     return r;
 }
 
+// ---- #120 fix round: are two printer addresses the same server? Compared as scheme + host + port (+ path) after normalising case, a missing
+// scheme (http), the default port of the scheme and trailing slashes. Anything unparsable or empty is NOT the same (fail closed). ----
+inline bool snapmaker_normalize_host(const std::string& in, std::string& out)
+{
+    std::string s;
+    for (char c : in) { if (static_cast<unsigned char>(c) <= 0x20) return false; s += c; }
+    if (s.empty()) return false;
+    std::string scheme = "http";
+    if (const auto at = s.find("://"); at != std::string::npos) {
+        scheme = s.substr(0, at);
+        s.erase(0, at + 3);
+    }
+    for (char& c : scheme) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (scheme != "http" && scheme != "https") return false;
+    std::string path;
+    if (const auto slash = s.find('/'); slash != std::string::npos) { path = s.substr(slash); s.erase(slash); }
+    while (!path.empty() && path.back() == '/') path.pop_back();
+    if (s.find('@') != std::string::npos || s.empty()) return false; // userinfo is not a form either side uses
+    std::string host = s, port;
+    if (s.front() == '[') {
+        const auto close = s.find(']');
+        if (close == std::string::npos) return false;
+        host = s.substr(0, close + 1);
+        if (close + 1 < s.size()) { if (s[close + 1] != ':') return false; port = s.substr(close + 2); }
+    } else if (const auto colon = s.rfind(':'); colon != std::string::npos) {
+        host = s.substr(0, colon);
+        port = s.substr(colon + 1);
+    }
+    if (host.empty() || host == "[]") return false;
+    for (char c : port) if (c < '0' || c > '9') return false;
+    if (port.size() > 5) return false;
+    if (port.empty() || std::stoi(port) == (scheme == "https" ? 443 : 80)) port = scheme == "https" ? "443" : "80";
+    else port = std::to_string(std::stoi(port));
+    for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    out = scheme + "://" + host + ":" + port + path;
+    return true;
+}
+
+inline bool snapmaker_same_host(const std::string& a, const std::string& b)
+{
+    std::string na, nb;
+    return snapmaker_normalize_host(a, na) && snapmaker_normalize_host(b, nb) && na == nb;
+}
+
 // ---- Legacy send decision (#120 slice 2): what the legacy send may do with a Snapmaker printer. Pure, fail closed. ----
 enum class SnapmakerLegacySendKind {
     Unchanged,     // not a Snapmaker printer: the legacy upload (and its post action) behaves exactly as before
@@ -214,6 +258,8 @@ struct SnapmakerLegacySendInput
     bool agent_connected   = false; // and it is connected
     bool start_requested   = false; // the user chose upload-and-print
     bool map_confirmed     = false; // the user confirmed the mapping control
+    std::string agent_base_url;     // where the agent's start would go
+    std::string upload_host;        // where the upload goes (the print host of the job)
     std::vector<int>                   map;
     std::vector<SnapmakerUsedFilament> used;
     std::vector<SnapmakerSlotInfo>     slots;
@@ -242,6 +288,14 @@ inline SnapmakerLegacySendDecision decide_snapmaker_legacy_send(const SnapmakerL
     if (!in.agent_present || !in.agent_connected) {
         d.kind               = SnapmakerLegacySendKind::UploadOnly;
         d.upload_only_notice = true;
+        d.message            = "The printer is not connected, so the file is uploaded but the print is not started. Connect the printer and start it from the Device page.";
+        return d;
+    }
+    if (!snapmaker_same_host(in.agent_base_url, in.upload_host)) {
+        // The upload and the start would reach different printers: never start one printer's file on another.
+        d.kind               = SnapmakerLegacySendKind::UploadOnly;
+        d.upload_only_notice = true;
+        d.message            = "The connected printer is not the host this file is uploaded to, so the file is uploaded but the print is not started. Start it from the Device page.";
         return d;
     }
     if (!in.map_confirmed) {

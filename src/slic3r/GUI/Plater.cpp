@@ -21293,7 +21293,7 @@ void Plater::reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &
 // BEGIN legacy U1 mapping step (#120 slice 2): modal confirm for the filament-to-extruder assignment of a legacy send that starts through the agent.
 // Pre-filled from suggest_snapmaker_extruder_map; the OK button is enabled only while validate_snapmaker_extruder_map is OK. Compile-checked only.
 namespace {
-struct SnapmakerLegacyMapChoice { bool confirmed = false; std::vector<int> map; bool flow_cali = false; bool timelapse = false; bool bed_leveling = true; };
+struct SnapmakerLegacyMapChoice { bool confirmed = false; std::vector<int> map; };
 SnapmakerLegacyMapChoice ask_snapmaker_legacy_map(wxWindow* parent, const std::vector<SnapmakerUsedFilament>& used, const std::vector<SnapmakerSlotInfo>& slots)
 {
     SnapmakerLegacyMapChoice out;
@@ -21304,13 +21304,14 @@ SnapmakerLegacyMapChoice ask_snapmaker_legacy_map(wxWindow* parent, const std::v
     top->Add(new wxStaticText(&dlg, wxID_ANY, _L("Choose the extruder each filament is loaded in, then confirm. Nothing is printed until you confirm.")), 0, wxALL, 8);
     auto* status = new wxStaticText(&dlg, wxID_ANY, "");
     auto* ok     = new wxButton(&dlg, wxID_OK, _L("Confirm and print"));
+    wxCheckBox* checked = nullptr;
     auto refresh = [&]() {
         const SnapmakerMapValidation v = validate_snapmaker_extruder_map(map, used, slots);
         wxString text = v.ok() ? wxString() : from_u8(v.message);
         if (v.ok() && v.oversubscribed)
             text = _L("More filaments than extruders: some extruders are shared, so you must swap filament by hand during the print.");
         status->SetLabel(text);
-        ok->Enable(v.ok());
+        ok->Enable(v.ok() && checked && checked->GetValue()); // slot data is blank today, so the suggestion is a guess: an explicit tick is required
         dlg.Layout();
     };
     auto* grid = new wxFlexGridSizer(2, 6, 8);
@@ -21333,13 +21334,10 @@ SnapmakerLegacyMapChoice ask_snapmaker_legacy_map(wxWindow* parent, const std::v
         grid->Add(choice, 0, wxEXPAND);
     }
     top->Add(grid, 0, wxALL, 8);
-    auto* bed   = new wxCheckBox(&dlg, wxID_ANY, _L("Bed leveling"));
-    auto* flow  = new wxCheckBox(&dlg, wxID_ANY, _L("Flow calibration"));
-    auto* lapse = new wxCheckBox(&dlg, wxID_ANY, _L("Time-lapse"));
-    bed->SetValue(true);
-    top->Add(bed, 0, wxLEFT | wxRIGHT, 8);
-    top->Add(flow, 0, wxLEFT | wxRIGHT, 8);
-    top->Add(lapse, 0, wxLEFT | wxRIGHT, 8);
+    // No print preferences here: the printer keeps its own saved bed-leveling / flow-calibration / time-lapse choices.
+    checked = new wxCheckBox(&dlg, wxID_ANY, _L("I checked that each filament is loaded in the extruder chosen above"));
+    checked->Bind(wxEVT_CHECKBOX, [&](wxCommandEvent&) { refresh(); });
+    top->Add(checked, 0, wxLEFT | wxRIGHT, 8);
     top->Add(status, 0, wxALL, 8);
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     buttons->Add(ok, 0, wxRIGHT, 8);
@@ -21349,11 +21347,8 @@ SnapmakerLegacyMapChoice ask_snapmaker_legacy_map(wxWindow* parent, const std::v
     refresh();
     if (dlg.ShowModal() != wxID_OK)
         return out;
-    out.confirmed    = validate_snapmaker_extruder_map(map, used, slots).ok(); // re-checked: the confirm is never trusted on its own
-    out.map          = map;
-    out.bed_leveling = bed->GetValue();
-    out.flow_cali    = flow->GetValue();
-    out.timelapse    = lapse->GetValue();
+    out.confirmed = checked->GetValue() && validate_snapmaker_extruder_map(map, used, slots).ok(); // re-checked: the confirm is never trusted on its own
+    out.map       = map;
     return out;
 }
 } // namespace
@@ -21561,9 +21556,12 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
             MachineObject* sel   = dev ? dev->get_selected_machine() : nullptr;
             in.agent_present     = agent && agent->supports_print_preferences();
             in.agent_connected   = sel != nullptr && sel->is_connected();
+            in.agent_base_url    = agent ? agent->start_target().base_url : std::string();
+            in.upload_host       = upload_job.printhost ? upload_job.printhost->get_host() : std::string();
             in.slots.assign(snapmaker_max_extruders, SnapmakerSlotInfo{}); // the machine's loaded-filament data is not wired in: identity suggestion, the user confirms
             SnapmakerLegacyMapChoice choice;
-            if (in.start_requested && in.agent_present && in.agent_connected) {
+            // Same server for the upload and the start, checked BEFORE the dialog so a mismatch never asks for a map.
+            if (in.start_requested && in.agent_present && in.agent_connected && snapmaker_same_host(in.agent_base_url, in.upload_host)) {
                 const DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config();
                 const auto types   = cfg.option<ConfigOptionStrings>("filament_type");
                 const auto colours = cfg.option<ConfigOptionStrings>("filament_colour");
@@ -21597,20 +21595,18 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
             case SnapmakerLegacySendKind::Unchanged: // cannot happen here (snapmaker_printer is true); fail closed to upload only
                 upload_job.upload_data.post_action = PrintHostPostUploadAction::None;
                 if (decision.upload_only_notice)
-                    notify_preprint("The printer is not connected, so the file is uploaded but the print is not started. Connect the printer and start it from the Device page.", false);
+                    notify_preprint(decision.message, false);
                 break;
             case SnapmakerLegacySendKind::StartViaAgent: {
                 upload_job.upload_data.post_action = PrintHostPostUploadAction::None;
                 PrintParams params{};
-                params.ams_mapping           = decision.ams_mapping;
+                params.ams_mapping = decision.ams_mapping;
                 // The printer is snapshotted now (job creation), not read live from the upload worker; the legacy start sends no preference lines.
                 const MoonrakerPrinterAgent::StartTarget target = agent->start_target();
-                upload_job.after_upload = [agent, target, params](const std::string& name) {
-                    std::string error;
-                    const bool  ok = agent->start_uploaded_print(target, params, name, &error);
-                    if (!ok)
-                        BOOST_LOG_TRIVIAL(error) << "legacy send: print not started: " << error;
-                    return ok;
+                // `name` is the server-confirmed stored name (PrintHostJobQueue never calls this without one); the agent re-checks it
+                // against the filename allowlist and the printer's idle state, and says in `error` whether the map was already applied.
+                upload_job.after_upload = [agent, target, params](const std::string& name, std::string& error) {
+                    return agent->start_uploaded_print(target, params, name, &error);
                 };
                 if (decision.oversubscribed)
                     notify_preprint("More filaments than extruders: some extruders are shared, so swap filament by hand during the print.", false);

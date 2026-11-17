@@ -496,7 +496,11 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
 {
     emit_progress(0);   // Indicate the upload is starting
 
-    const std::string uploaded_name = the_job.upload_data.upload_path.generic_string(); // upload_job() moves upload_data away
+    // The name the SERVER stored the file under (item.path), filled by the host during the upload; empty if it reported none.
+    // The client-chosen upload_path is NOT used: the form sends only its filename(), so a typed subfolder is not where the file lands.
+    auto stored_path = std::make_shared<std::string>();
+    if (the_job.after_upload)
+        the_job.upload_data.stored_path = stored_path;
     bool success = PrintHostJobQueue::upload_job(the_job,
         [this](Http::Progress progress, bool &cancel)   { this->progress_fn(std::move(progress), cancel); },
         [this](wxString error)                          { this->error_fn(std::move(error)); },
@@ -505,13 +509,21 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
 
     if (success && the_job.after_upload) {
         bool started = false;
-        try {
-            started = the_job.after_upload(uploaded_name);
-        } catch (const std::exception& e) {
-            BOOST_LOG_TRIVIAL(error) << "after-upload step failed: " << e.what();
+        std::string reason;
+        if (stored_path->empty()) {
+            reason = "the printer did not report the name it stored the file under, so nothing was started";
+        } else {
+            try {
+                started = the_job.after_upload(*stored_path, reason);
+            } catch (const std::exception& e) {
+                BOOST_LOG_TRIVIAL(error) << "after-upload step failed: " << e.what();
+                reason = e.what();
+            }
         }
         if (!started) {
-            this->error_fn(wxString::FromUTF8("The file was uploaded, but the print was not started."));
+            // The upload itself succeeded (UploadFinished already fired Ok before this step; reordering the lifecycle events is a wider change,
+            // so the queue reports the state through this message instead).
+            this->error_fn(wxString::FromUTF8("Uploaded, print NOT started: " + (reason.empty() ? std::string("the print did not start") : reason)));
             success = false;
         }
     }
