@@ -199,4 +199,65 @@ inline SnapmakerAmsMappingResult snapmaker_map_to_ams_mapping(const std::vector<
     return r;
 }
 
+// ---- Legacy send decision (#120 slice 2): what the legacy send may do with a Snapmaker printer. Pure, fail closed. ----
+enum class SnapmakerLegacySendKind {
+    Unchanged,     // not a Snapmaker printer: the legacy upload (and its post action) behaves exactly as before
+    UploadOnly,    // upload the file, never start (also the choice when no start was asked for)
+    StartViaAgent, // start through the agent with ams_mapping (map + preferences + SDCARD_PRINT_FILE)
+    Refuse         // a start was asked for but the confirmed map is missing or invalid: nothing is sent
+};
+
+struct SnapmakerLegacySendInput
+{
+    bool snapmaker_printer = false; // U1 / Snapmaker printer
+    bool agent_present     = false; // a usable printer agent exists for the selected printer
+    bool agent_connected   = false; // and it is connected
+    bool start_requested   = false; // the user chose upload-and-print
+    bool map_confirmed     = false; // the user confirmed the mapping control
+    std::vector<int>                   map;
+    std::vector<SnapmakerUsedFilament> used;
+    std::vector<SnapmakerSlotInfo>     slots;
+};
+
+struct SnapmakerLegacySendDecision
+{
+    SnapmakerLegacySendKind kind = SnapmakerLegacySendKind::Refuse;
+    std::string             ams_mapping;              // set only for StartViaAgent
+    std::string             message;                  // user-facing, set for Refuse
+    bool                    oversubscribed    = false; // StartViaAgent with some extruder shared: show the notice
+    bool                    upload_only_notice = false; // a start was asked for but is not possible: tell the user it was upload only
+};
+
+inline SnapmakerLegacySendDecision decide_snapmaker_legacy_send(const SnapmakerLegacySendInput& in)
+{
+    SnapmakerLegacySendDecision d;
+    if (!in.snapmaker_printer) {
+        d.kind = SnapmakerLegacySendKind::Unchanged;
+        return d;
+    }
+    if (!in.start_requested) {
+        d.kind = SnapmakerLegacySendKind::UploadOnly;
+        return d;
+    }
+    if (!in.agent_present || !in.agent_connected) {
+        d.kind               = SnapmakerLegacySendKind::UploadOnly;
+        d.upload_only_notice = true;
+        return d;
+    }
+    if (!in.map_confirmed) {
+        d.message = "Confirm the filament-to-extruder assignment before printing.";
+        return d;
+    }
+    const SnapmakerMapValidation v = validate_snapmaker_extruder_map(in.map, in.used, in.slots);
+    const SnapmakerAmsMappingResult r = snapmaker_map_to_ams_mapping(in.map, in.used, in.slots);
+    if (!v.ok() || !r.ok()) {
+        d.message = v.ok() ? r.error : v.message;
+        return d;
+    }
+    d.kind           = SnapmakerLegacySendKind::StartViaAgent;
+    d.ams_mapping    = r.json;
+    d.oversubscribed = v.oversubscribed;
+    return d;
+}
+
 } // namespace Slic3r

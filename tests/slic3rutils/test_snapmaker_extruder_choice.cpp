@@ -173,3 +173,116 @@ TEST_CASE("Resolver output round-trips to the golden extruder map lines", "[Extr
           "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=3 MAP_EXTRUDER=3\n"
           "SET_PRINT_USED_EXTRUDERS EXTRUDERS=0,2,3");
 }
+
+// ---- Legacy send decision (#120 slice 2) ----
+namespace {
+SnapmakerLegacySendInput legacy_in()
+{
+    SnapmakerLegacySendInput in;
+    in.snapmaker_printer = true;
+    in.agent_present     = true;
+    in.agent_connected   = true;
+    in.start_requested   = true;
+    in.map_confirmed     = true;
+    in.used              = {uf(0, "PLA", "#FF0000"), uf(1, "PETG", "#00FF00")};
+    in.slots             = four_empty;
+    in.map               = {1, 0};
+    return in;
+}
+} // namespace
+
+TEST_CASE("Legacy send: connected, confirmed and valid starts through the agent", "[ExtruderChoice][LegacySend]")
+{
+    const auto d = decide_snapmaker_legacy_send(legacy_in());
+    CHECK(d.kind == SnapmakerLegacySendKind::StartViaAgent);
+    CHECK(d.ams_mapping == "[1,0]");
+    CHECK_FALSE(d.oversubscribed);
+    CHECK_FALSE(d.upload_only_notice);
+}
+
+TEST_CASE("Legacy send: unconfirmed or invalid map refuses the start, never identity", "[ExtruderChoice][LegacySend]")
+{
+    auto in          = legacy_in();
+    in.map_confirmed = false;
+    auto d           = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::Refuse);
+    CHECK(d.ams_mapping.empty());
+    CHECK_FALSE(d.message.empty());
+
+    in               = legacy_in();
+    in.map           = {};
+    d                = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::Refuse);
+    CHECK(d.ams_mapping.empty());
+
+    in     = legacy_in();
+    in.map = {1, 1}; // duplicate while extruders are free
+    d      = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::Refuse);
+    CHECK(d.ams_mapping.empty());
+
+    in      = legacy_in();
+    in.used.clear(); // nothing to map: no start
+    CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::Refuse);
+}
+
+TEST_CASE("Legacy send: disconnected or no agent is upload only, with a notice", "[ExtruderChoice][LegacySend]")
+{
+    auto in            = legacy_in();
+    in.agent_connected = false;
+    auto d             = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::UploadOnly);
+    CHECK(d.ams_mapping.empty());
+    CHECK(d.upload_only_notice);
+
+    in               = legacy_in();
+    in.agent_present = false;
+    d                = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::UploadOnly);
+    CHECK(d.upload_only_notice);
+
+    in                 = legacy_in();
+    in.agent_present   = false;
+    in.agent_connected = true; // connected flag without an agent is not usable
+    CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::UploadOnly);
+
+    in                 = legacy_in();
+    in.agent_connected = false;
+    in.map_confirmed   = false; // upload-only needs no map
+    CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::UploadOnly);
+}
+
+TEST_CASE("Legacy send: no start requested is a plain upload", "[ExtruderChoice][LegacySend]")
+{
+    auto in            = legacy_in();
+    in.start_requested = false;
+    in.map_confirmed   = false;
+    const auto d       = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::UploadOnly);
+    CHECK_FALSE(d.upload_only_notice);
+}
+
+TEST_CASE("Legacy send: non-Snapmaker printers keep the legacy behaviour", "[ExtruderChoice][LegacySend]")
+{
+    auto in              = legacy_in();
+    in.snapmaker_printer = false;
+    in.map_confirmed     = false;
+    in.agent_connected   = false;
+    const auto d         = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::Unchanged);
+    CHECK(d.ams_mapping.empty());
+    CHECK_FALSE(d.upload_only_notice);
+}
+
+TEST_CASE("Legacy send: more than four filaments starts with the oversubscribed notice", "[ExtruderChoice][LegacySend]")
+{
+    auto in = legacy_in();
+    in.used.clear();
+    for (int i = 0; i < 5; ++i)
+        in.used.push_back(uf(i, "PLA", "#FF0000"));
+    in.map       = {0, 1, 2, 3, 3};
+    const auto d = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::StartViaAgent);
+    CHECK(d.oversubscribed);
+    CHECK(d.ams_mapping == "[0,1,2,3,3]");
+}
