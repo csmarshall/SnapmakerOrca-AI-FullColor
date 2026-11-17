@@ -243,6 +243,26 @@ inline bool snapmaker_same_host(const std::string& a, const std::string& b)
     return snapmaker_normalize_host(a, na) && snapmaker_normalize_host(b, nb) && na == nb;
 }
 
+// ---- Storage root rule (#120 fix round 2): SDCARD_PRINT_FILE starts a file under the printer's "gcodes" root only. ----
+// Before the upload: the chosen upload storage must be empty (Moonraker's default, gcodes) or exactly "gcodes".
+inline bool snapmaker_upload_storage_ok(const std::string& storage) { return storage.empty() || storage == "gcodes"; }
+
+// After the upload: the root the SERVER reported in item.root must be exactly "gcodes" (and the chosen storage must have been ok). Anything else
+// (config, timelapse, empty, missing) means the file is not where the start looks, so nothing is started; `reason` says why.
+inline bool snapmaker_stored_root_allows_start(const std::string& chosen_storage, const std::string& reply_root, std::string& reason)
+{
+    if (!snapmaker_upload_storage_ok(chosen_storage)) {
+        reason = "the file was uploaded to a storage other than gcodes, so nothing was started";
+        return false;
+    }
+    if (reply_root != "gcodes") {
+        reason = reply_root.empty() ? "the printer did not report which storage root it stored the file in, so nothing was started"
+                                    : "the printer stored the file in the '" + reply_root + "' root, not gcodes, so nothing was started";
+        return false;
+    }
+    return true;
+}
+
 // ---- Legacy send decision (#120 slice 2): what the legacy send may do with a Snapmaker printer. Pure, fail closed. ----
 enum class SnapmakerLegacySendKind {
     Unchanged,     // not a Snapmaker printer: the legacy upload (and its post action) behaves exactly as before
@@ -260,6 +280,7 @@ struct SnapmakerLegacySendInput
     bool map_confirmed     = false; // the user confirmed the mapping control
     std::string agent_base_url;     // where the agent's start would go
     std::string upload_host;        // where the upload goes (the print host of the job)
+    std::string upload_storage;     // the storage root chosen for the upload ("" = the default, gcodes)
     std::vector<int>                   map;
     std::vector<SnapmakerUsedFilament> used;
     std::vector<SnapmakerSlotInfo>     slots;
@@ -296,6 +317,10 @@ inline SnapmakerLegacySendDecision decide_snapmaker_legacy_send(const SnapmakerL
         d.kind               = SnapmakerLegacySendKind::UploadOnly;
         d.upload_only_notice = true;
         d.message            = "The connected printer is not the host this file is uploaded to, so the file is uploaded but the print is not started. Start it from the Device page.";
+        return d;
+    }
+    if (!snapmaker_upload_storage_ok(in.upload_storage)) {
+        d.message = "The print can only be started from the gcodes storage; choose gcodes or upload without printing.";
         return d;
     }
     if (!in.map_confirmed) {

@@ -284,6 +284,8 @@ bool Moonraker::upload(PrintHostUpload upload_data, ProgressFn progress_fn, Erro
                 if (stored_path) {
                     uploaded_path = *stored_path;
                     if (upload_data.stored_path) *upload_data.stored_path = *stored_path; // only the server-confirmed name is handed back
+                    const auto stored_root = ptree.get_optional<std::string>("item.root");
+                    if (stored_root && upload_data.stored_root) *upload_data.stored_root = *stored_root;
                 } else {
                     //ORCA: fallback if the server response omits item.path (older Moonraker, or
                     //      a buddy-fork that returns a slimmer envelope). Use the original filename.

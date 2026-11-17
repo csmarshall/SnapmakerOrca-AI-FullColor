@@ -318,3 +318,31 @@ TEST_CASE("Legacy send: the agent and the upload host must be the same server, e
     CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::UploadOnly);
     CHECK(decide_snapmaker_legacy_send(legacy_in()).kind == SnapmakerLegacySendKind::StartViaAgent);
 }
+
+TEST_CASE("Legacy send: a start needs the gcodes root before and after the upload", "[ExtruderChoice][LegacySend][StoredRoot]")
+{
+    std::string reason;
+    CHECK(snapmaker_upload_storage_ok(""));
+    CHECK(snapmaker_upload_storage_ok("gcodes"));
+    for (const char* s : {"config", "timelapse", "gcodes/", "GCODES", " gcodes"})
+        CHECK_FALSE(snapmaker_upload_storage_ok(s));
+    CHECK(snapmaker_stored_root_allows_start("", "gcodes", reason));
+    CHECK(snapmaker_stored_root_allows_start("gcodes", "gcodes", reason));
+    for (const char* root : {"config", "timelapse", "", "gcodes/", "Gcodes"}) {
+        reason.clear();
+        CAPTURE(root);
+        CHECK_FALSE(snapmaker_stored_root_allows_start("", root, reason));
+        CHECK_FALSE(reason.empty());
+    }
+    reason.clear();
+    CHECK_FALSE(snapmaker_stored_root_allows_start("config", "gcodes", reason)); // the chosen storage is refused even if the reply says gcodes
+    CHECK_FALSE(reason.empty());
+
+    auto in           = legacy_in();
+    in.upload_storage = "config";
+    const auto d      = decide_snapmaker_legacy_send(in);
+    CHECK(d.kind == SnapmakerLegacySendKind::Refuse);
+    CHECK_FALSE(d.message.empty());
+    in.upload_storage = "gcodes";
+    CHECK(decide_snapmaker_legacy_send(in).kind == SnapmakerLegacySendKind::StartViaAgent);
+}

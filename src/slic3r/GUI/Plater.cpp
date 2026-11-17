@@ -21554,14 +21554,18 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
             auto  agent          = net ? std::dynamic_pointer_cast<MoonrakerPrinterAgent>(net->get_printer_agent()) : nullptr;
             DeviceManager* dev   = wxGetApp().getDeviceManager();
             MachineObject* sel   = dev ? dev->get_selected_machine() : nullptr;
+            // ONE snapshot of the start target, taken before the dialog: the host match and the job use this same object.
+            const MoonrakerPrinterAgent::StartTarget start_target_snapshot = agent ? agent->start_target() : MoonrakerPrinterAgent::StartTarget{};
             in.agent_present     = agent && agent->supports_print_preferences();
             in.agent_connected   = sel != nullptr && sel->is_connected();
-            in.agent_base_url    = agent ? agent->start_target().base_url : std::string();
+            in.agent_base_url    = start_target_snapshot.base_url;
             in.upload_host       = upload_job.printhost ? upload_job.printhost->get_host() : std::string();
+            in.upload_storage    = upload_job.upload_data.storage;
             in.slots.assign(snapmaker_max_extruders, SnapmakerSlotInfo{}); // the machine's loaded-filament data is not wired in: identity suggestion, the user confirms
             SnapmakerLegacyMapChoice choice;
             // Same server for the upload and the start, checked BEFORE the dialog so a mismatch never asks for a map.
-            if (in.start_requested && in.agent_present && in.agent_connected && snapmaker_same_host(in.agent_base_url, in.upload_host)) {
+            if (in.start_requested && in.agent_present && in.agent_connected && snapmaker_same_host(in.agent_base_url, in.upload_host) &&
+                snapmaker_upload_storage_ok(in.upload_storage)) {
                 const DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config();
                 const auto types   = cfg.option<ConfigOptionStrings>("filament_type");
                 const auto colours = cfg.option<ConfigOptionStrings>("filament_colour");
@@ -21602,7 +21606,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
                 PrintParams params{};
                 params.ams_mapping = decision.ams_mapping;
                 // The printer is snapshotted now (job creation), not read live from the upload worker; the legacy start sends no preference lines.
-                const MoonrakerPrinterAgent::StartTarget target = agent->start_target();
+                const MoonrakerPrinterAgent::StartTarget target = start_target_snapshot;
                 // `name` is the server-confirmed stored name (PrintHostJobQueue never calls this without one); the agent re-checks it
                 // against the filename allowlist and the printer's idle state, and says in `error` whether the map was already applied.
                 upload_job.after_upload = [agent, target, params](const std::string& name, std::string& error) {

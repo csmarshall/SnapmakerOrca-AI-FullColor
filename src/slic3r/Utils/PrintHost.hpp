@@ -43,6 +43,8 @@ struct PrintHostUpload
     // #120: filled by a host that reports where the server stored the file (Moonraker: item.path of the upload reply), and ONLY then (no
     // guessed fallback). Set by the caller that wants to start exactly that file; null = nobody asked.
     std::shared_ptr<std::string> stored_path;
+    // Likewise the storage root the server reported (Moonraker: item.root); left empty when the reply has none.
+    std::shared_ptr<std::string> stored_root;
 
     // Some extended parameters for different upload methods.
     std::map<std::string, std::string> extended_info;

@@ -46,6 +46,7 @@
 #include "ElegooLink.hpp"
 #include "3DPrinterOS.hpp"
 #include "Moonraker.hpp"
+#include "SnapmakerExtruderChoice.hpp"
 
 namespace fs = boost::filesystem;
 using Slic3r::GUI::PrintHostQueueDialog;
@@ -499,8 +500,11 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     // The name the SERVER stored the file under (item.path), filled by the host during the upload; empty if it reported none.
     // The client-chosen upload_path is NOT used: the form sends only its filename(), so a typed subfolder is not where the file lands.
     auto stored_path = std::make_shared<std::string>();
-    if (the_job.after_upload)
+    auto stored_root = std::make_shared<std::string>();
+    if (the_job.after_upload) {
         the_job.upload_data.stored_path = stored_path;
+        the_job.upload_data.stored_root = stored_root;
+    }
     bool success = PrintHostJobQueue::upload_job(the_job,
         [this](Http::Progress progress, bool &cancel)   { this->progress_fn(std::move(progress), cancel); },
         [this](wxString error)                          { this->error_fn(std::move(error)); },
@@ -512,6 +516,8 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         std::string reason;
         if (stored_path->empty()) {
             reason = "the printer did not report the name it stored the file under, so nothing was started";
+        } else if (!snapmaker_stored_root_allows_start(the_job.upload_data.storage, *stored_root, reason)) {
+            // reason says which root; the start looks in gcodes only
         } else {
             try {
                 started = the_job.after_upload(*stored_path, reason);
