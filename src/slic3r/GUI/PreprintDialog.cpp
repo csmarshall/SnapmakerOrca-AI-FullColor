@@ -338,22 +338,21 @@ bool collect_preprint_request(PartPlate& plate, const PresetBundle& bundle, cons
     p.nozzle_diameter   = floats("nozzle_diameter");
     p.machine_model     = cfg.opt_string("printer_model");
     out.extruder_count  = int(p.nozzle_diameter.size());
-    if (GCodeProcessorResult* result = plate.get_slice_result())
+    SnapmakerUsedFilamentsInput used_in;
+    used_in.filament_diameter = p.filament_diameter;
+    if (GCodeProcessorResult* result = plate.get_slice_result()) {
         p.estimated_time_s = result->print_statistics.modes[size_t(PrintEstimatedStatistics::ETimeMode::Normal)].time;
+        used_in.total_volumes_mm3 = result->print_statistics.total_volumes_per_extruder; // fresh slice (#136)
+    }
+    for (const FilamentInfo& f : plate.get_slice_filaments_info()) // a plate loaded from a sliced .gcode.3mf
+        used_in.loaded.push_back({f.id, f.used_m});
 
-    // The filaments the plate really uses (0-based ids) and their used length, from the slice (never from the live project).
-    for (const FilamentInfo& f : plate.get_slice_filaments_info()) {
-        if (f.id < 0) continue;
-        out.plate_filaments.push_back(f.id);
-        if (size_t(f.id) < p.filament_diameter.size()) {
-            const double d = p.filament_diameter[f.id];
-            p.volume_mm3[f.id] = double(f.used_m) * 1000.0 * 3.14159265358979323846 * (d * 0.5) * (d * 0.5);
-        }
-    }
-    if (out.plate_filaments.empty()) {
-        error = "The plate reports no used filaments.";
+    // The filaments the plate really uses (0-based physical ids) and their used volume, from the slice (never from the live project).
+    SnapmakerUsedFilaments used;
+    if (!snapmaker_collect_used_filaments(used_in, used, error))
         return false;
-    }
+    out.plate_filaments = used.ids;
+    p.volume_mm3        = used.volume_mm3;
     // Snapmaker's own pre-print flow sends the plain sliced G-code without running post_process scripts (Plater.cpp send_gcode_legacy U1 branch
     // takes plate->get_tmp_gcode_path() directly); we do the same, and say so when scripts are configured (see out.notice).
     if (const auto* pp = cfg.option<ConfigOptionStrings>("post_process"); pp && std::any_of(pp->values.begin(), pp->values.end(), [](const std::string& v) { return !v.empty(); }))

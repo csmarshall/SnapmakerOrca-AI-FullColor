@@ -295,4 +295,60 @@ inline bool build_snapmaker_preprint_mapping_json(const SnapmakerPreprintPlate& 
     return true;
 }
 
+// ---- Which filaments a sliced plate used, and how much (#136) ----------------------------------------------------------------------------
+// Two sources, because PartPlate fills them differently:
+//  * a FRESH slice: GCodeProcessorResult::print_statistics.total_volumes_per_extruder, a map from the 0-based filament id the G-code
+//    selected (T<n>, so already a PHYSICAL filament: a mixed slot is virtual and never appears) to the extruded volume in mm3 (flush and
+//    wipe tower included). PartPlate::slice_filaments_info is NOT filled for it.
+//  * a plate loaded from a sliced .gcode.3mf: only PartPlate::slice_filaments_info (FilamentInfo::used_m, metres of filament; the
+//    G-code is not re-processed). The fresh map is empty there.
+// The fresh map wins when it has anything; the 3MF list is the fallback. Pure data in, pure data out, so a test can feed either shape.
+struct SnapmakerLoadedFilament
+{
+    int   id     = -1;  // 0-based; negative entries are ignored
+    float used_m = 0.f; // metres of filament (FilamentInfo::used_m)
+};
+
+struct SnapmakerUsedFilamentsInput
+{
+    std::map<std::size_t, double>        total_volumes_mm3; // fresh slice: filament id -> mm3
+    std::vector<SnapmakerLoadedFilament> loaded;            // 3MF-loaded plate
+    std::vector<double>                  filament_diameter; // mm, one per project filament
+};
+
+struct SnapmakerUsedFilaments
+{
+    std::vector<int>      ids;         // 0-based, in ascending order for a fresh slice, file order for a loaded one
+    std::map<int, double> volume_mm3;  // only for ids with a known diameter (loaded: length * pi * (d/2)^2)
+};
+
+inline bool snapmaker_collect_used_filaments(const SnapmakerUsedFilamentsInput& in, SnapmakerUsedFilaments& out, std::string& error)
+{
+    constexpr double pi = 3.14159265358979323846;
+    out = SnapmakerUsedFilaments{};
+    for (const auto& [id, volume] : in.total_volumes_mm3) {
+        if (!std::isfinite(volume) || volume <= 0.0)
+            continue;
+        out.ids.push_back(int(id));
+        out.volume_mm3[int(id)] = volume;
+    }
+    if (out.ids.empty()) {
+        for (const SnapmakerLoadedFilament& f : in.loaded) {
+            if (f.id < 0)
+                continue;
+            out.ids.push_back(f.id);
+            if (size_t(f.id) < in.filament_diameter.size()) {
+                const double d = in.filament_diameter[size_t(f.id)];
+                out.volume_mm3[f.id] = double(f.used_m) * 1000.0 * pi * (d * 0.5) * (d * 0.5);
+            }
+        }
+    }
+    if (out.ids.empty()) {
+        error = "The plate reports no used filaments.";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 } // namespace Slic3r

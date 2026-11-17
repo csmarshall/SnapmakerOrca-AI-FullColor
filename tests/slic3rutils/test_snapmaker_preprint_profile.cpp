@@ -1,4 +1,5 @@
 #include <atomic>
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <fstream>
 #include <mutex>
@@ -9,6 +10,7 @@
 
 #include "slic3r/GUI/SnapmakerDeviceBridge.hpp"
 #include "slic3r/GUI/SnapmakerPreprintSession.hpp"
+#include "slic3r/Utils/SnapmakerPreprintMapping.hpp"
 
 // S4b: the pre-print bridge profile wired to the gate. Everything printer-facing is a FAKE (FakePrinter): no socket is opened. These
 // tests show the profile calls the printer interface in the intended order, with the intended strings, and refuses what the gate refuses.
@@ -987,4 +989,73 @@ TEST_CASE("pre-print bridge: the alive flag drops a reply when the bridge was sh
     h.bridge->shutdown(); // the bridge object (and so m_sswcp and the instance) still exist; only the alive flag is false
     jobs[0].second();
     CHECK(h.sent.empty());
+}
+
+// #136: which filaments the pre-print request describes. These fixtures are SHAPED the way PartPlate fills a fresh slice
+// (print_statistics.total_volumes_per_extruder, mm3, 0-based physical ids) and a .gcode.3mf-loaded plate (FilamentInfo::used_m, metres); they
+// show the function agrees with that reading, not that a real slice produces those shapes.
+TEST_CASE("pre-print used filaments: a fresh slice reads the per-filament volumes (mm3) and ignores the empty 3MF list", "[SSWCP][preprint_profile][used_filaments]")
+{
+    SnapmakerUsedFilamentsInput in;
+    in.total_volumes_mm3 = {{3, 1500.0}, {0, 2000.0}, {1, 250.5}};
+    in.filament_diameter = {1.75, 1.75, 1.75, 1.75};
+    SnapmakerUsedFilaments out;
+    std::string            err = "stale";
+    REQUIRE(snapmaker_collect_used_filaments(in, out, err));
+    CHECK(err.empty());
+    CHECK(out.ids == std::vector<int>{0, 1, 3});
+    CHECK(out.volume_mm3.at(0) == 2000.0); // taken as is, mm3: no length round trip
+    CHECK(out.volume_mm3.at(1) == 250.5);
+    CHECK(out.volume_mm3.at(3) == 1500.0);
+    CHECK(out.volume_mm3.size() == 3);
+}
+
+TEST_CASE("pre-print used filaments: a volume whose filament has no diameter entry is still kept (no diameter is needed for a volume)", "[SSWCP][preprint_profile][used_filaments]")
+{
+    SnapmakerUsedFilamentsInput in;
+    in.total_volumes_mm3 = {{5, 10.0}};
+    SnapmakerUsedFilaments out;
+    std::string            err;
+    REQUIRE(snapmaker_collect_used_filaments(in, out, err));
+    CHECK(out.ids == std::vector<int>{5});
+    CHECK(out.volume_mm3.at(5) == 10.0);
+}
+
+TEST_CASE("pre-print used filaments: a .gcode.3mf-loaded plate falls back to used_m (metres) with the volume from the diameter", "[SSWCP][preprint_profile][used_filaments]")
+{
+    SnapmakerUsedFilamentsInput in;
+    in.loaded            = {{2, 1.0f}, {0, 0.5f}, {-1, 9.f}, {7, 1.0f}}; // 7 has no diameter, -1 is dropped
+    in.filament_diameter = {2.0, 1.75, 2.0};
+    SnapmakerUsedFilaments out;
+    std::string            err;
+    REQUIRE(snapmaker_collect_used_filaments(in, out, err));
+    CHECK(out.ids == std::vector<int>{2, 0, 7}); // file order
+    // 1 m of 2.0 mm filament = 1000 mm * pi * 1^2 mm2
+    CHECK(out.volume_mm3.at(2) == Catch::Approx(1000.0 * 3.14159265358979323846).epsilon(1e-9));
+    CHECK(out.volume_mm3.at(0) == Catch::Approx(500.0 * 3.14159265358979323846).epsilon(1e-9));
+    CHECK(out.volume_mm3.count(7) == 0);
+}
+
+TEST_CASE("pre-print used filaments: the fresh volumes win over a stale 3MF list; zero or non-finite volumes are not use", "[SSWCP][preprint_profile][used_filaments]")
+{
+    SnapmakerUsedFilamentsInput in;
+    in.total_volumes_mm3 = {{1, 100.0}, {2, 0.0}, {3, std::nan("")}};
+    in.loaded            = {{0, 1.f}};
+    in.filament_diameter = {1.75, 1.75};
+    SnapmakerUsedFilaments out;
+    std::string            err;
+    REQUIRE(snapmaker_collect_used_filaments(in, out, err));
+    CHECK(out.ids == std::vector<int>{1});
+}
+
+TEST_CASE("pre-print used filaments: nothing used is the 'no used filaments' error", "[SSWCP][preprint_profile][used_filaments]")
+{
+    SnapmakerUsedFilamentsInput in;
+    in.total_volumes_mm3 = {{0, 0.0}};
+    in.loaded            = {{-1, 1.f}};
+    SnapmakerUsedFilaments out;
+    std::string            err;
+    CHECK_FALSE(snapmaker_collect_used_filaments(in, out, err));
+    CHECK(err == "The plate reports no used filaments.");
+    CHECK(out.ids.empty());
 }
