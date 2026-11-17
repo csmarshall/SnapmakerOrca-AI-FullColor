@@ -30,8 +30,16 @@ class MoonrakerPrinterAgent : public IPrinterAgent
 {
     friend class MoonrakerPreprintPrinter; // S4c: the pre-print adapter reads the connection and sends through the private helpers; nothing else is widened
 public:
-    // #120: start an already uploaded file (extruder map + preferences + SDCARD_PRINT_FILE); the legacy send calls this after its own upload.
-    bool start_uploaded_print(const PrintParams& params, const std::string& filename) { return print_uploaded_file(params, filename); }
+    // #120: the printer a legacy start goes to, snapshotted ONCE (when the job is created) so the upload worker never reads device_info live.
+    struct StartTarget
+    {
+        std::string base_url, api_key, dev_id;
+    };
+    StartTarget start_target() const;
+    // #120: start an already uploaded file after the legacy send's own upload: the extruder map and USED lines (NO preference lines, the printer
+    // keeps its own), then SDCARD_PRINT_FILE. Refuses, sending nothing, unless `filename` passes snapmaker_preprint_filename_ok and a FRESH
+    // read of the printer says it is idle (fail closed on any read failure). `error` (optional) gets the user-facing reason on false.
+    bool start_uploaded_print(const StartTarget& target, const PrintParams& params, const std::string& filename, std::string* error = nullptr);
     explicit MoonrakerPrinterAgent(std::string log_dir);
     ~MoonrakerPrinterAgent() override;
 
@@ -299,8 +307,14 @@ protected:
     bool        is_numeric(const std::string& value);
     std::string normalize_base_url(bool use_ssl, const std::string& host, const std::string& port);
     std::string sanitize_filename(const std::string& filename);
-    std::string join_url(const std::string& base_url, const std::string& path) const;
+    static std::string join_url(const std::string& base_url, const std::string& path);
     bool send_gcode_sync(const std::string& dev_id, const std::string& gcode) const;
+    // Same request against a snapshot (base_url/api_key), never device_info.
+    static bool post_gcode_script(const std::string& base_url, const std::string& api_key, const std::string& gcode);
+    // A blocking read of print_stats + machine_state_manager (same GET and timeouts as query_machine_objects_async); false on any failure.
+    static bool read_machine_state_sync(const std::string& base_url, const std::string& api_key, nlohmann::json& result);
+    enum class StartMode { Page, LegacyNoPreferences };
+    bool run_uploaded_start(const StartTarget& target, const PrintParams& params, const std::string& filename, StartMode mode, std::string* error);
     // One Moonraker HTTP request for the Spoolman code. `post_body` empty means GET. Returns the HTTP status, 0 on connection failure or
     // timeout. Virtual so tests can record requests without a socket.
     // The printer address and key are passed in (a snapshot), never read from device_info here. Returns Spoolman::kStatusTooLarge when

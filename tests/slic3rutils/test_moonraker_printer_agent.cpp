@@ -283,6 +283,24 @@ public:
         m_rejected_script_prefix = std::move(prefix);
     }
 
+    // The machine-state read the Snapmaker start makes first (default: idle). A non-200 status answers with that HTTP error and no body.
+    void set_state_reply(std::string body, int status = 200)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_state_reply        = std::move(body);
+        m_state_reply_status = status;
+    }
+    // Idle for the start guard, or busy: print_stats.state and machine_state_manager.main_state as the printer reports them.
+    void set_machine_state(const std::string& print_state, int main_state)
+    {
+        set_state_reply(nlohmann::json{{"result", {{"status", {{"print_stats", {{"state", print_state}}}, {"machine_state_manager", {{"main_state", main_state}}}}}}}}.dump());
+    }
+    int state_reads()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_state_reads;
+    }
+
     // Makes /printer/gcode/help list exactly these commands (without it the route answers 404, i.e. "unknown").
     void set_gcode_commands(std::vector<std::string> commands)
     {
@@ -439,6 +457,15 @@ private:
             const bool rejected = !m_rejected_script_prefix.empty() && script.rfind(m_rejected_script_prefix, 0) == 0;
             response.result(rejected ? http::status::internal_server_error : http::status::ok);
             response.body() = "{}";
+        } else if (request.target() == "/printer/objects/query?print_stats&machine_state_manager") {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            ++m_state_reads;
+            if (m_state_reply_status == 200) {
+                response.result(http::status::ok);
+                response.body() = m_state_reply;
+            } else {
+                response.result(static_cast<http::status>(m_state_reply_status));
+            }
         } else if (request.target() == "/printer/gcode/help") {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_has_gcode_help) {
@@ -571,6 +598,9 @@ private:
     bool m_released     = false;
     std::vector<Upload> m_uploads;
     std::vector<std::string> m_scripts;
+    int         m_state_reads        = 0;
+    int         m_state_reply_status = 200;
+    std::string m_state_reply = R"({"result":{"status":{"print_stats":{"state":"standby"},"machine_state_manager":{"main_state":0}}}})";
     std::string m_rejected_script_prefix;
     std::vector<std::string> m_gcode_commands;
     bool                     m_has_gcode_help = false;
@@ -1828,4 +1858,134 @@ TEST_CASE("RFID re-read: UIDs change at once but print_task_config is refilled l
     CHECK(agent.reread_spool_tags(std::chrono::milliseconds(2000), std::chrono::milliseconds(5)) == MoonrakerPrinterAgent::RfidReread::done);
     // 2 polls at the default + 3 identical settled polls; the UID change alone would have been "done" after the first poll
     CHECK(agent.polls_after_post == 5);
+}
+
+// ---- #120 fix round: the legacy (page-independent) start through the agent. Review findings 1, 3b, 4, 6. What these cannot show: that the
+// printer behaves the same way (the fake answers what we wrote), only that nothing is sent when the guard or the allowlist says no. ----
+namespace {
+PrintParams legacy_params(const std::string& ams_mapping)
+{
+    PrintParams params;
+    params.ams_mapping = ams_mapping;
+    return params;
+}
+size_t count_prefix(const std::vector<std::string>& scripts, const std::string& prefix)
+{
+    size_t n = 0;
+    for (const auto& s : scripts) n += s.find(prefix) != std::string::npos;
+    return n;
+}
+} // namespace
+
+TEST_CASE("legacy start: a printer that is not idle gets nothing", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    struct Case { const char* state; int main_state; };
+    for (const Case& c : {Case{"printing", 1}, Case{"paused", 1}, Case{"standby", 3}, Case{"printing", 0}, Case{"error", 0}}) {
+        CAPTURE(c.state, c.main_state);
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        printer.set_machine_state(c.state, c.main_state);
+        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode"));
+        CHECK(printer.state_reads() == 1);
+        CHECK(printer.scripts().empty());
+    }
+}
+
+TEST_CASE("legacy start: a state that cannot be read sends nothing", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    const std::vector<std::pair<std::string, int>> replies = {
+        {"", 500}, {"", 404}, {"not json", 200}, {"{}", 200}, {R"({"result":{}})", 200},
+        {R"({"result":{"status":{"print_stats":{"state":"standby"}}}})", 200},
+        {R"({"result":{"status":{"print_stats":{"state":"standby"},"machine_state_manager":{"main_state":"0"}}}})", 200},
+        {R"({"result":{"status":{"print_stats":{"state":"standby"},"machine_state_manager":{"main_state":0.5}}}})", 200}};
+    for (const auto& [body, status] : replies) {
+        CAPTURE(body, status);
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        printer.set_state_reply(body, status);
+        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode"));
+        CHECK(printer.scripts().empty());
+    }
+    SECTION("an unreachable printer") {
+        FakePrinter printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        auto target = agent.start_target();
+        target.base_url = "http://127.0.0.1:1"; // nothing listens
+        CHECK_FALSE(agent.start_uploaded_print(target, legacy_params("[0,1]"), "part.gcode"));
+        CHECK(printer.scripts().empty());
+    }
+}
+
+TEST_CASE("legacy start: an idle printer gets the map and USED lines, then the start, and no preference line", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    FakePrinter     printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    std::string     error;
+    REQUIRE(agent.start_uploaded_print(agent.start_target(), legacy_params("[2,0]"), "Part 1.gcode", &error));
+    CHECK(printer.state_reads() == 1);
+    const auto scripts = printer.scripts();
+    REQUIRE(scripts.size() == 2);
+    CHECK(scripts[0] == "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=2\nSET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=1 MAP_EXTRUDER=0\nSET_PRINT_USED_EXTRUDERS EXTRUDERS=2,0");
+    CHECK(scripts[1] == "SDCARD_PRINT_FILE FILENAME=\"Part 1.gcode\"");
+    CHECK(count_prefix(scripts, "SET_PRINT_PREFERENCE") == 0);
+}
+
+TEST_CASE("legacy start: the name must pass the allowlist, else zero RPCs", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    struct Case { std::string name; bool ok; };
+    const std::vector<Case> cases = {
+        {"a\"b.gcode", false}, {"a\nSET_X.gcode", false}, {"a b.gcode", true}, {"caf\xc3\xa9.gcode", false}, {"part", false},
+        {"part.gcode.3mf", false}, {"sub/part.gcode", true}, {"../part.gcode", false}, {"", false}, {"a;b.gcode", false}, {"a\\b.gcode", false}};
+    for (const Case& c : cases) {
+        CAPTURE(c.name);
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        CHECK(agent.start_uploaded_print(agent.start_target(), legacy_params("[0]"), c.name) == c.ok);
+        if (!c.ok) {
+            CHECK(printer.scripts().empty());
+            CHECK(printer.state_reads() == 0);
+        } else {
+            CHECK(printer.scripts().back() == "SDCARD_PRINT_FILE FILENAME=\"" + c.name + "\"");
+        }
+    }
+}
+
+TEST_CASE("legacy start: the target is the snapshot, not the live device_info", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    FakePrinter     first(Behavior::Silent);
+    FakePrinter     second(Behavior::Silent);
+    PreferenceAgent agent(first);
+    const auto      target = agent.start_target(); // taken when the job is created
+    CHECK(target.base_url == first.base_url());
+    PreferenceAgent moved(second); // the agent object keeps no link; a start with the first target must go to the first printer only
+    REQUIRE(moved.start_uploaded_print(target, legacy_params("[0]"), "part.gcode"));
+    CHECK_FALSE(first.scripts().empty());
+    CHECK(second.scripts().empty());
+    CHECK(second.state_reads() == 0);
+}
+
+TEST_CASE("legacy start: a failing SDCARD_PRINT_FILE after the map says the printer kept the map", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    FakePrinter     printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    printer.reject_scripts_starting_with("SDCARD_PRINT_FILE");
+    std::string error;
+    CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+    CHECK(error.find("kept the new") != std::string::npos);
+    std::string busy_error;
+    printer.set_machine_state("printing", 1);
+    CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &busy_error));
+    CHECK(busy_error.find("nothing was sent") != std::string::npos);
+}
+
+TEST_CASE("start_local_print on a Snapmaker agent is guarded by the same idle read", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    TempDir     dir;
+    FakePrinter printer(Behavior::Silent);
+    PreferenceAgent agent(printer);
+    printer.set_machine_state("printing", 1);
+    const auto file = dir.path / "part.gcode";
+    { std::ofstream(file.string(), std::ios::binary) << PLATE_1_GCODE; }
+    CHECK(agent.start_local_print(preference_params(file, true, true, true), nullptr, nullptr) != BAMBU_NETWORK_SUCCESS);
+    CHECK(printer.scripts().empty());
 }

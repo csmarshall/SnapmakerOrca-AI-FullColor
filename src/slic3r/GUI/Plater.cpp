@@ -21603,10 +21603,15 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
                 upload_job.upload_data.post_action = PrintHostPostUploadAction::None;
                 PrintParams params{};
                 params.ams_mapping           = decision.ams_mapping;
-                params.task_flow_cali        = choice.flow_cali;
-                params.task_record_timelapse = choice.timelapse;
-                params.task_bed_leveling     = choice.bed_leveling;
-                upload_job.after_upload      = [agent, params](const std::string& name) { return agent->start_uploaded_print(params, name); };
+                // The printer is snapshotted now (job creation), not read live from the upload worker; the legacy start sends no preference lines.
+                const MoonrakerPrinterAgent::StartTarget target = agent->start_target();
+                upload_job.after_upload = [agent, target, params](const std::string& name) {
+                    std::string error;
+                    const bool  ok = agent->start_uploaded_print(target, params, name, &error);
+                    if (!ok)
+                        BOOST_LOG_TRIVIAL(error) << "legacy send: print not started: " << error;
+                    return ok;
+                };
                 if (decision.oversubscribed)
                     notify_preprint("More filaments than extruders: some extruders are shared, so swap filament by hand during the print.", false);
                 break;

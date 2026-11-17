@@ -1,5 +1,6 @@
 #include "MoonrakerPrinterAgent.hpp"
 #include "SnapmakerPrintPreference.hpp"
+#include "SnapmakerPreprintGate.hpp"
 #include "SpoolmanJoin.hpp"
 #include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
 #include <thread>
@@ -698,15 +699,11 @@ void MoonrakerPrinterAgent::timelapse_list_async(const nlohmann::json& params, s
     timelapse_list_run(base_url, api_key, params, std::chrono::milliseconds(15000), m_timelapse_gate, std::move(done));
 }
 
-void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::string>& object_names,
-                                                        std::function<void(bool ok, nlohmann::json result)> done)
+// Shared by the async query and the blocking guard read: the GET, with short timeouts. sync=true blocks in perform_sync() and `done` runs
+// on the caller's thread before this returns; otherwise it completes on Http's own thread, never the caller's.
+static void run_machine_objects_query(const std::string& base_url, const std::string& api_key, const std::vector<std::string>& object_names,
+                                      std::function<void(bool ok, nlohmann::json result)> done, bool sync)
 {
-    std::string base_url, api_key;
-    {
-        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
-        base_url = device_info.base_url;
-        api_key  = device_info.api_key;
-    }
     if (base_url.empty() || object_names.empty()) {
         if (done) done(false, nlohmann::json::object());
         return;
@@ -729,10 +726,11 @@ void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::s
         if (done) done(false, nlohmann::json::object());
         return;
     }
-    auto http = Http::get(join_url(base_url, "/printer/objects/query?" + query));
+    std::string url = base_url;
+    if (!url.empty() && url.back() == '/') url.pop_back();
+    auto http = Http::get(url + "/printer/objects/query?" + query);
     if (!api_key.empty())
         http.header("X-Api-Key", api_key);
-    // Read-only GET with short timeouts; completes on Http's own thread, never the caller's.
     http.timeout_connect(3)
         .timeout_max(5)
         .on_complete([done](std::string body, unsigned status) {
@@ -746,8 +744,29 @@ void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::s
         .on_error([done](std::string, std::string err, unsigned status) {
             BOOST_LOG_TRIVIAL(debug) << "MoonrakerPrinterAgent: machine object query failed: " << err << " (HTTP " << status << ")";
             if (done) done(false, nlohmann::json::object());
-        })
-        .perform();
+        });
+    if (sync) http.perform_sync(); else http.perform();
+}
+
+void MoonrakerPrinterAgent::query_machine_objects_async(const std::vector<std::string>& object_names,
+                                                        std::function<void(bool ok, nlohmann::json result)> done)
+{
+    std::string base_url, api_key;
+    {
+        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+        base_url = device_info.base_url;
+        api_key  = device_info.api_key;
+    }
+    run_machine_objects_query(base_url, api_key, object_names, std::move(done), false);
+}
+
+bool MoonrakerPrinterAgent::read_machine_state_sync(const std::string& base_url, const std::string& api_key, nlohmann::json& result)
+{
+    bool ok = false;
+    result  = nlohmann::json::object();
+    run_machine_objects_query(base_url, api_key, {"print_stats", "machine_state_manager"},
+                              [&](bool o, nlohmann::json r) { ok = o; result = std::move(r); }, true);
+    return ok;
 }
 
 void MoonrakerPrinterAgent::set_connect_error(std::string error)
@@ -964,15 +983,49 @@ int MoonrakerPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     return BAMBU_NETWORK_SUCCESS;
 }
 
+MoonrakerPrinterAgent::StartTarget MoonrakerPrinterAgent::start_target() const
+{
+    std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+    return {device_info.base_url, device_info.api_key, device_info.dev_id};
+}
+
+bool MoonrakerPrinterAgent::start_uploaded_print(const StartTarget& target, const PrintParams& params, const std::string& filename, std::string* error)
+{
+    return run_uploaded_start(target, params, filename, StartMode::LegacyNoPreferences, error);
+}
+
 bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const std::string& filename)
 {
+    return run_uploaded_start(start_target(), params, filename, StartMode::Page, nullptr);
+}
+
+bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const PrintParams& params, const std::string& filename, StartMode mode, std::string* error)
+{
+    const bool legacy = mode == StartMode::LegacyNoPreferences;
+    const auto fail   = [&](const std::string& why) {
+        BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: " << why;
+        if (error) *error = why;
+        return false;
+    };
+    // The legacy start's name is the server-confirmed one: it must pass the same allowlist as the pre-print file (no quote, newline, backslash,
+    // non-ASCII, .gcode suffix required), so nothing can break out of the quoted FILENAME argument. Checked before anything is sent.
+    if (legacy && !snapmaker_preprint_filename_ok(filename))
+        return fail("the file name is not one this start accepts (letters, digits, . _ - space and / only, ending in .gcode); nothing was sent");
+    // Fresh read of the printer's own state right before the first RPC, for every Snapmaker start: the map and preference lines change the
+    // printer's settings, so a busy or unreadable printer gets nothing at all.
+    if (supports_print_preferences()) {
+        nlohmann::json state;
+        if (!read_machine_state_sync(target.base_url, target.api_key, state) || !snapmaker_machine_idle(state))
+            return fail("the printer is busy or its state could not be read; nothing was sent");
+    }
+
     // Per-print preferences go to the printer first and the plate's G-code is not touched (Snapmaker Orca's send page,
     // resources/web/flutter_web/main.b347974c91352c2f.js setPrePrintConfiguration ~39855). A refused script means no print.
     // Klipper answers an unknown command on its console, not with an HTTP error, so ask the printer first: community firmware
     // such as 2.0.0-paxx12 has no SET_PRINT_PREFERENCE (seen on a real U1) and the lines would silently do nothing (#85).
     // Stack: this was inline in start_local_print before v2.5.0 moved the start into print_uploaded_file().
     bool preferences_known_unsupported = false;
-    if (supports_print_preferences() && gcode_command_known(device_info.base_url, device_info.api_key, "SET_PRINT_PREFERENCE", preferences_known_unsupported) &&
+    if (supports_print_preferences() && !legacy && gcode_command_known(target.base_url, target.api_key, "SET_PRINT_PREFERENCE", preferences_known_unsupported) &&
         preferences_known_unsupported)
         BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: the printer has no SET_PRINT_PREFERENCE command, time-lapse / bed-leveling / flow-calibration choices are not applied";
     if (supports_print_preferences()) {
@@ -1006,7 +1059,7 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
         if (!extruder_map.script.empty()) {
             for (const char* command : {"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}) {
                 bool missing = false;
-                if (gcode_command_known(device_info.base_url, device_info.api_key, command, missing) && missing) {
+                if (gcode_command_known(target.base_url, target.api_key, command, missing) && missing) {
                     BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: the printer has no " << command
                                              << " command, the filament-to-extruder mapping cannot be applied and the print is not started";
                     return false;
@@ -1014,7 +1067,7 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
             }
         }
         std::string script = extruder_map.script;
-        if (!preferences_known_unsupported) {
+        if (!legacy && !preferences_known_unsupported) {
             const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
                                                                                     params.task_bed_leveling);
             if (!is_snapmaker_print_preference_script(preferences)) {
@@ -1023,13 +1076,16 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
             }
             script += (script.empty() ? "" : "\n") + preferences;
         }
-        if (!script.empty() && !send_gcode_sync(device_info.dev_id, script)) {
-            BOOST_LOG_TRIVIAL(error) << "MoonrakerPrinterAgent: print preferences / extruder map not applied, the print is not started";
-            return false;
+        if (!script.empty() && !post_gcode_script(target.base_url, target.api_key, script)) {
+            return fail("print preferences / extruder map not applied, the print is not started");
         }
     }
+    const bool map_sent = legacy && !params.ams_mapping.empty() && supports_print_preferences();
     // Start print via gcode script (simpler than JSON-RPC); quoted so spaces and apostrophes stay part of the name
-    return send_gcode_sync(device_info.dev_id, "SDCARD_PRINT_FILE FILENAME=\"" + filename + "\"");
+    if (post_gcode_script(target.base_url, target.api_key, "SDCARD_PRINT_FILE FILENAME=\"" + filename + "\""))
+        return true;
+    return fail(map_sent ? "the print did not start, but the printer kept the new filament-to-extruder map; check the printer before printing"
+                         : "the print did not start");
 }
 
 bool MoonrakerPrinterAgent::accepts_3mf() const
@@ -2108,6 +2164,17 @@ bool MoonrakerPrinterAgent::gcode_command_known(const std::string& base_url, con
 
 bool MoonrakerPrinterAgent::send_gcode_sync(const std::string& dev_id, const std::string& gcode) const
 {
+    std::string base_url, api_key;
+    {
+        std::lock_guard<std::recursive_mutex> lock(connect_mutex);
+        base_url = device_info.base_url;
+        api_key  = device_info.api_key;
+    }
+    return post_gcode_script(base_url, api_key, gcode);
+}
+
+bool MoonrakerPrinterAgent::post_gcode_script(const std::string& base_url, const std::string& api_key, const std::string& gcode)
+{
     nlohmann::json payload;
     payload["script"]       = gcode;
     std::string payload_str = payload.dump();
@@ -2116,9 +2183,9 @@ bool MoonrakerPrinterAgent::send_gcode_sync(const std::string& dev_id, const std
     bool        success = false;
     std::string http_error;
 
-    auto http = Http::post(join_url(device_info.base_url, "/printer/gcode/script"));
-    if (!device_info.api_key.empty()) {
-        http.header("X-Api-Key", device_info.api_key);
+    auto http = Http::post(join_url(base_url, "/printer/gcode/script"));
+    if (!api_key.empty()) {
+        http.header("X-Api-Key", api_key);
     }
     http.header("Content-Type", "application/json")
         .set_post_body(payload_str)
@@ -3235,7 +3302,7 @@ std::string MoonrakerPrinterAgent::normalize_base_url(bool use_ssl, const std::s
     return value;
 }
 
-std::string MoonrakerPrinterAgent::join_url(const std::string& base_url, const std::string& path) const
+std::string MoonrakerPrinterAgent::join_url(const std::string& base_url, const std::string& path)
 {
     if (base_url.empty()) {
         return "";
