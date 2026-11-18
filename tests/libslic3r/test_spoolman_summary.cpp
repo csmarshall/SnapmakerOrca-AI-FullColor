@@ -1052,3 +1052,38 @@ TEST_CASE("summary countdown tick and text", "[Spoolman][SummaryTimer]")
     CHECK(summary_countdown_text(27) == "Closes in 27 s");
     CHECK(summary_countdown_text(-1) == "Closes in 0 s");
 }
+
+// #145: temperature guardrails appear as one flag per filament and make the filament worth showing.
+TEST_CASE("Spoolman summary: kept-parent temperatures are one readable flag (#145)", "[Spoolman][issue145]")
+{
+    SyncOutcome o;
+    o.catalog_size = 1;
+    PresetResult p;
+    p.spoolman_id = 26;
+    p.preset_name = "Inland High Speed PLA+ Black (Spoolman) @U1 0.4 nozzle";
+    p.parent_name = "Generic PLA High Speed @U1 0.4 nozzle";
+    p.parent_rule = "material alone";
+    o.report.created.push_back(p);
+    auto kept = [](const char *key, const char *suggest, const char *keep) {
+        RejectedValue v;
+        v.spoolman_id = 26;
+        v.preset_name = "Inland High Speed PLA+ Black (Spoolman) @U1 0.4 nozzle";
+        v.key_or_field = key;
+        v.reason = std::string("kept parent: Spoolman suggests ") + suggest;
+        v.warning = true;
+        v.value = suggest;
+        v.kept_parent = true;
+        v.kept_value = keep;
+        return v;
+    };
+    o.report.rejected.push_back(kept("nozzle_temperature", "195", "220"));
+    o.report.rejected.push_back(kept("cool_plate_temp", "42", "65"));
+    o.report.rejected.push_back(kept("filament_max_volumetric_speed", "25", "21"));
+    const SummaryModel m = build_summary(o);
+    REQUIRE(m.slots.size() == 1);
+    CHECK(m.show_dialog);
+    REQUIRE(m.slots[0].flags.size() == 1);
+    CHECK(m.slots[0].flags[0] == "Kept parent: nozzle kept 220 C (Spoolman suggests 195 C); bed kept 65 C (Spoolman suggests 42 C); "
+                                 "max volumetric speed kept 21 mm3/s (Spoolman suggests 25 mm3/s)");
+    CHECK(m.slots[0].ignored.empty()); // not repeated as an ignored row
+}

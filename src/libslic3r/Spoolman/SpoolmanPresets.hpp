@@ -78,6 +78,43 @@ struct PrinterLimits
 // The limits a printer preset states through machine_max_nozzle_temperature / machine_max_bed_temperature; 0 or absent = no limit (nullopt).
 PrinterLimits printer_limits_from_config(const ConfigBase &printer_config);
 
+// ---- temperature guardrails (ADR 0008 amendment 2026-11-18, ticket #145) -------------------------------------------------------------
+// Evidence (#145): real Spoolman records carried settings_extruder_temp 195 and settings_bed_temp 42 for PLA whose parent
+// 'Generic PLA High Speed @U1 0.4 nozzle' prints at 220 / 65; the G-code footers showed 195 C paired with the parent's high flow.
+// Rule: a Spoolman value that would LOWER a temperature is only taken when it stays inside these bounds; otherwise the PARENT's value is
+// kept and the decision is reported (never silent). Raising a temperature is always applied as Spoolman says.
+//  - nozzle: a drop of MORE than kMaxNozzleTempDrop C versus the parent is refused (a drop of exactly that much is allowed).
+//  - plate: a value below the material's floor (and below the parent's own value) is refused. The floors were chosen from the shipped
+//    profiles (resources/profiles, every filament json, first-element hot_plate_temp / textured / eng values) as a bit below the typical
+//    parent value: PLA parents 55..65 (mode 60) -> 50; PETG 70..80 -> 60; ABS 85..105 (mode 90) -> 80; ASA 90..110 -> 80. Cool-plate keys of
+//    PLA/TPU parents are legitimately 35..45, which is why a floor never overrides a parent that is itself below it (only a LOWERING is refused).
+//    Materials without a floor (TPU, PVA and everything unknown) get only the nozzle rule.
+//  - when a nozzle temperature was kept, filament_max_volumetric_speed is kept from the parent too: a lowered temperature is never
+//    paired with a raised flow.
+inline constexpr int kMaxNozzleTempDrop = 10;
+inline constexpr int kBedFloorPLA       = 50;
+inline constexpr int kBedFloorPETG      = 60;
+inline constexpr int kBedFloorABS       = 80;
+inline constexpr int kBedFloorASA       = 80;
+
+// The plate-temperature floor (deg C) for a material name (Spoolman material or filament_type: "PLA", "PLA+", "PETG", "pet-g", "ABS", "ASA");
+// 0 = no floor.
+int bed_temp_floor(const std::string &material);
+
+struct KeptParent
+{
+    std::string key;
+    std::string kept_value;     // the parent's value that stays
+    std::string spoolman_value; // what Spoolman suggested
+    std::string reason;         // starts with "kept parent: Spoolman suggests <value>"
+    std::string source;         // the dropped override's source
+};
+
+// Removes from `overrides` every temperature override refused by the rules above (and filament_max_volumetric_speed when a nozzle
+// temperature was refused), against the parent's own values. `material` = Spoolman's material, falling back to the parent's filament_type
+// when empty. Returns what was kept, in override order.
+std::vector<KeptParent> apply_temperature_guardrails(std::vector<Override> &overrides, const DynamicPrintConfig &parent, const std::string &material);
+
 struct UpsertContext
 {
     // The target printer preset (for compatibility filtering of parents). nullptr = every system preset is a candidate.
@@ -151,6 +188,9 @@ struct RejectedValue
     std::string reason;
     bool        warning = false;
     std::string value; // the offending value, "" when there is none
+    // Temperature guardrail (kept parent): the parent's value that stays; `value` is what Spoolman suggested. warning is true.
+    bool        kept_parent = false;
+    std::string kept_value;
 };
 
 struct UpsertReport

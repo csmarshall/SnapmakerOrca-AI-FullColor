@@ -35,6 +35,7 @@ const char *const kFlagSuperseded     = "Superseded: ";
 const char *const kFlagDuplicate      = "Duplicate: ";
 const char *const kFlagReselect       = "Needs re-select: ";
 const char *const kFlagOrphaned       = "Orphaned: ";
+const char *const kFlagKeptParent     = "Kept parent: ";
 const char *const kFlagMismatch       = "Mismatch: ";
 const char *const kStaleUnreachable   = "Spoolman could not be reached.";
 const char *const kStaleBadReply      = "Spoolman sent an unusable reply.";
@@ -270,8 +271,22 @@ SummaryModel build_summary(const SyncOutcome &o)
         d.linked_presets      = s.linked_presets;
         std::sort(d.linked_presets.begin(), d.linked_presets.end());
     }
+    // Temperature guardrails (#145): one flag per filament, e.g. "nozzle kept 220 C (Spoolman suggests 195 C); bed kept 65 C (Spoolman suggests 42 C)".
+    std::map<int, std::vector<std::string>> kept_nozzle, kept_bed, kept_flow;
     for (const RejectedValue &v : r.rejected) {
         IdData &d = data[v.spoolman_id];
+        if (v.kept_parent) {
+            const bool nozzle = v.key_or_field.rfind("nozzle_temperature", 0) == 0;
+            const bool flow   = v.key_or_field == "filament_max_volumetric_speed";
+            auto &dst         = nozzle ? kept_nozzle : flow ? kept_flow : kept_bed;
+            const char *unit  = flow ? " mm3/s" : " C";
+            dst[v.spoolman_id].push_back(std::string(nozzle ? "nozzle" : flow ? "max volumetric speed" : "bed") + " kept " + v.kept_value + unit +
+                                         " (Spoolman suggests " + v.value + unit + ")");
+            d.notable = true;
+            if (!v.preset_name.empty())
+                d.name_hints.insert(v.preset_name);
+            continue;
+        }
         SummaryIgnored ig;
         ig.key             = v.key_or_field;
         ig.value           = cap_value(v.value, ig.truncated);
@@ -283,6 +298,21 @@ SummaryModel build_summary(const SyncOutcome &o)
             d.notable = true;
         if (!v.preset_name.empty())
             d.name_hints.insert(v.preset_name);
+    }
+    {
+        std::set<int> ids;
+        for (const auto *g : {&kept_nozzle, &kept_bed, &kept_flow})
+            for (const auto &kv : *g)
+                ids.insert(kv.first);
+        for (int id : ids) {
+            std::vector<std::string> parts;
+            for (const auto *g : {&kept_nozzle, &kept_bed, &kept_flow}) {
+                auto it = g->find(id);
+                if (it != g->end())
+                    parts.insert(parts.end(), it->second.begin(), it->second.end());
+            }
+            data[id].flags.push_back({7, std::string(kFlagKeptParent) + join(parts, "; ")});
+        }
     }
     for (const AmbiguousFilament &a : r.ambiguous) {
         IdData &d = data[a.spoolman_id];

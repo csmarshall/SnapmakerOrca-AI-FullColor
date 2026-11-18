@@ -6,6 +6,7 @@
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -21,6 +22,24 @@ PrinterLimits printer_limits_from_config(const ConfigBase &printer_config)
     if (const auto *b = printer_config.option<ConfigOptionInt>("machine_max_bed_temperature"); b && b->value > 0)
         limits.max_bed_temp = b->value;
     return limits;
+}
+
+int bed_temp_floor(const std::string &material)
+{
+    std::string m;
+    for (char c : material)
+        if (std::isalnum(static_cast<unsigned char>(c)))
+            m += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    auto starts = [&](const char *p) { return m.rfind(p, 0) == 0; };
+    if (starts("PLA"))
+        return kBedFloorPLA;
+    if (starts("PETG"))
+        return kBedFloorPETG;
+    if (starts("ABS"))
+        return kBedFloorABS;
+    if (starts("ASA"))
+        return kBedFloorASA;
+    return 0;
 }
 
 namespace {
@@ -231,7 +250,67 @@ std::string limit_group(const std::string &k)
     return {};
 }
 
+std::optional<int> first_int(const DynamicPrintConfig &c, const std::string &key)
+{
+    const auto *o = dynamic_cast<const ConfigOptionInts *>(c.option(key));
+    if (!o || o->values.empty())
+        return std::nullopt;
+    return o->values.front();
+}
+
+std::string fmt_int_value(double v) { return std::to_string(static_cast<long long>(std::llround(v))); }
+
 } // namespace
+
+std::vector<KeptParent> apply_temperature_guardrails(std::vector<Override> &overrides, const DynamicPrintConfig &parent, const std::string &material)
+{
+    std::vector<KeptParent> kept;
+    const int               bed_floor = bed_temp_floor(material.empty() ? first_string(parent, "filament_type") : material);
+    std::vector<bool>       drop(overrides.size(), false);
+    bool                    nozzle_kept = false;
+    std::set<std::string>   seen;
+    for (size_t i = 0; i < overrides.size(); ++i) {
+        const Override &o = overrides[i];
+        double          v = 0;
+        if (!parse_number(o.value, v))
+            continue;
+        const auto pv = first_int(parent, o.key);
+        if (!pv)
+            continue;
+        std::string why;
+        if (is_nozzle_key(o.key)) {
+            if (*pv - v > kMaxNozzleTempDrop) {
+                why         = "nozzle temperature " + fmt_int_value(v) + " C is " + fmt_int_value(*pv - v) + " C below the parent's " + std::to_string(*pv) +
+                      " C (more than " + std::to_string(kMaxNozzleTempDrop) + " C)";
+                nozzle_kept = true;
+            }
+        } else if (is_bed_key(o.key) && bed_floor > 0 && v < bed_floor && v < *pv)
+            why = "plate temperature " + fmt_int_value(v) + " C is below the " + std::to_string(bed_floor) + " C floor for this material and the parent's " +
+                  std::to_string(*pv) + " C";
+        if (why.empty())
+            continue;
+        drop[i] = true;
+        // one report entry per (nozzle | plate, kept, suggested): twelve plate keys with the same pair are one decision to the user
+        if (!seen.insert(std::string(is_nozzle_key(o.key) ? "n|" : "p|") + std::to_string(*pv) + "|" + o.value).second)
+            continue;
+        kept.push_back({o.key, std::to_string(*pv), o.value, "kept parent: Spoolman suggests " + o.value + " (" + why + ")", o.source});
+    }
+    if (nozzle_kept)
+        for (size_t i = 0; i < overrides.size(); ++i)
+            if (overrides[i].key == "filament_max_volumetric_speed") {
+                drop[i] = true;
+                const auto *po = dynamic_cast<const ConfigOptionFloats *>(parent.option(overrides[i].key));
+                const std::string pv = po && !po->values.empty() ? display(po) : std::string();
+                kept.push_back({overrides[i].key, pv, overrides[i].value,
+                                "kept parent: Spoolman suggests " + overrides[i].value + " (the nozzle temperature was kept, so the flow is kept too)", overrides[i].source});
+            }
+    std::vector<Override> rest;
+    for (size_t i = 0; i < overrides.size(); ++i)
+        if (!drop[i])
+            rest.push_back(std::move(overrides[i]));
+    overrides = std::move(rest);
+    return kept;
+}
 
 std::vector<ParentCandidate> build_parent_candidates(const PresetCollection &filaments, const Preset *printer)
 {
@@ -348,6 +427,7 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
 
         // overrides, printer limits (per group)
         MappingResult mapping = map_filament(f, parent_cfg);
+        const std::vector<KeptParent> kept_parent = apply_temperature_guardrails(mapping.overrides, parent_cfg, f.material);
         std::map<std::string, std::string> bad_groups; // group -> reason
         for (const Override &o : mapping.overrides) {
             const std::string g = limit_group(o.key);
@@ -374,6 +454,12 @@ UpsertReport upsert_catalog(PresetCollection &filaments, const std::vector<Filam
                                     self_bad ? bad->second : "rejected with its group: " + bad->second, false, o.value});
             } else
                 applied.push_back(std::move(o));
+        }
+        for (const KeptParent &k : kept_parent) {
+            RejectedValue rv{f.id, std::string(), k.key, k.reason, true, k.spoolman_value};
+            rv.kept_parent = true;
+            rv.kept_value  = k.kept_value;
+            rejected.push_back(std::move(rv));
         }
         for (const Rejected &r : mapping.rejected)
             rejected.push_back({f.id, std::string(), r.key_or_field, r.reason, r.warning, r.value});
@@ -579,6 +665,21 @@ void log_sync(bool fetch_good, size_t catalog_size, const UpsertReport &report, 
                             << ", created " << report.created.size() << ", updated " << report.updated.size()
                             << ", unchanged " << report.unchanged.size() << ", skipped " << report.skipped.size()
                             << ", saved " << (save ? save->saved.size() : 0) << ", save-failed " << (save ? save->failed.size() : 0);
+    {
+        std::set<int> ids;
+        std::string   list;
+        size_t        n = 0;
+        for (const RejectedValue &r : report.rejected)
+            if (r.kept_parent) {
+                ++n;
+                ids.insert(r.spoolman_id);
+                list += (list.empty() ? "" : "; ") + std::string("filament ") + std::to_string(r.spoolman_id) + " '" + r.preset_name + "' " + r.key_or_field +
+                        " kept parent " + r.kept_value + " (Spoolman suggests " + r.value + ")";
+            }
+        if (n > 0)
+            BOOST_LOG_TRIVIAL(info) << "Spoolman sync: temperature guardrails kept the parent's value for " << n << " setting(s) on " << ids.size()
+                                    << " filament(s): " << list;
+    }
     for (const SkippedFilament &s : report.skipped)
         BOOST_LOG_TRIVIAL(warning) << "Spoolman sync: skipped filament " << s.spoolman_id << " '" << s.filament_name << "': " << s.reason;
     const std::vector<std::string> orphans = orphan_names(report, fetch_good);

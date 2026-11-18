@@ -1167,3 +1167,261 @@ TEST_CASE("Spoolman presets: a failed save is retried on the next sync (#133)", 
     // third sync: written, unchanged and present: not rewritten
     CHECK(names_to_save(f.run(cat), f.bundle.filaments, on_disk).empty());
 }
+
+// ---- #145: temperature guardrails (keep the parent's value when Spoolman would lower it too far) ---------------------------------------
+// VERIFIED: the rules in SpoolmanPresets.hpp against hand-set parent values. NOT shown: how a real printer behaves with any of these
+// temperatures (unverified; a sync and a read of the summary on the real machine is the check).
+
+namespace {
+void set_parent_temps(Preset &p, int noz, int bed, double flow = 0)
+{
+    p.config.set_key_value("nozzle_temperature", new ConfigOptionInts{noz});
+    p.config.set_key_value("nozzle_temperature_initial_layer", new ConfigOptionInts{noz});
+    for (const auto &k : kPlateKeys)
+        p.config.set_key_value(k, new ConfigOptionInts{bed});
+    if (flow > 0)
+        p.config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{flow});
+}
+
+const RejectedValue *kept_entry(const UpsertReport &r, const std::string &key)
+{
+    for (const auto &v : r.rejected)
+        if (v.kept_parent && v.key_or_field == key)
+            return &v;
+    return nullptr;
+}
+
+const RejectedValue *kept_plate(const UpsertReport &r)
+{
+    for (const auto &v : r.rejected)
+        if (v.kept_parent && v.key_or_field.find("plate_temp") != std::string::npos)
+            return &v;
+    return nullptr;
+}
+
+size_t kept_count(const UpsertReport &r) { return std::count_if(r.rejected.begin(), r.rejected.end(), [](const RejectedValue &v) { return v.kept_parent; }); }
+
+const Preset &only_user_preset(const Fixture &f)
+{
+    for (auto it = f.bundle.filaments.cbegin(); it != f.bundle.filaments.cend(); ++it)
+        if (it->is_user())
+            return *it;
+    FAIL("no user preset");
+    return *f.bundle.filaments.cbegin();
+}
+} // namespace
+
+TEST_CASE("Spoolman guardrails: constants and floors (#145)", "[Spoolman][issue145]")
+{
+    CHECK(kMaxNozzleTempDrop == 10);
+    CHECK(bed_temp_floor("PLA") == 50);
+    CHECK(bed_temp_floor("PLA+") == 50);
+    CHECK(bed_temp_floor("pla") == 50);
+    CHECK(bed_temp_floor("PETG") == 60);
+    CHECK(bed_temp_floor("PET-G") == 60);
+    CHECK(bed_temp_floor("ABS") == 80);
+    CHECK(bed_temp_floor("ASA") == 80);
+    for (const char *m : {"TPU", "PVA", "PC", "", "Nylon", "XYZ"})
+        CHECK(bed_temp_floor(m) == 0);
+}
+
+TEST_CASE("Spoolman guardrails: a nozzle drop of more than 10 C keeps the parent and says so (#145)", "[Spoolman][issue145]")
+{
+    Fixture f;
+    set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 65);
+    auto r = f.run({fil(5, "PLA Blue", "Acme", "PLA", 195, 60)});
+    REQUIRE(r.created.size() == 1);
+    const Preset &p = only_user_preset(f);
+    CHECK(nozzle(p) == 220);
+    CHECK(ival(p, "nozzle_temperature_initial_layer") == 220);
+    CHECK(ival(p, "hot_plate_temp") == 60); // 60 is above the PLA floor: applied
+    const auto *k = kept_entry(r, "nozzle_temperature");
+    REQUIRE(k != nullptr);
+    CHECK(k->warning);
+    CHECK(k->value == "195");
+    CHECK(k->kept_value == "220");
+    CHECK(k->spoolman_id == 5);
+    CHECK(k->preset_name == p.name);
+    CHECK(k->reason.rfind("kept parent: Spoolman suggests 195", 0) == 0);
+    CHECK(kept_entry(r, "nozzle_temperature_initial_layer") == nullptr); // same decision: one entry for both nozzle keys
+    CHECK(kept_plate(r) == nullptr);
+    // the kept key is not in the link's sources: it is the parent's value, not Spoolman's
+    CHECK(link_of(p).sources.count("nozzle_temperature") == 0);
+}
+
+TEST_CASE("Spoolman guardrails: a drop of exactly 10 C and any raise are applied (#145)", "[Spoolman][issue145]")
+{
+    {
+        Fixture f;
+        set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 205, 60);
+        auto r = f.run({fil(5, "PLA Blue", "Acme", "PLA", 195, 60)});
+        CHECK(nozzle(only_user_preset(f)) == 195);
+        CHECK(kept_count(r) == 0);
+    }
+    {
+        Fixture f;
+        set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 60);
+        auto r = f.run({fil(5, "PLA Blue", "Acme", "PLA", 196, 60)}); // 24 C below: kept
+        CHECK(nozzle(only_user_preset(f)) == 220);
+        CHECK(kept_count(r) == 1);
+    }
+    {
+        Fixture f;
+        set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 40);
+        auto r = f.run({fil(5, "PLA Blue", "Acme", "PLA", 230, 70)});
+        CHECK(nozzle(only_user_preset(f)) == 230);
+        CHECK(ival(only_user_preset(f), "hot_plate_temp") == 70);
+        CHECK(kept_count(r) == 0);
+    }
+}
+
+TEST_CASE("Spoolman guardrails: bed floors per material keep the parent (#145)", "[Spoolman][issue145]")
+{
+    struct Case { const char *mat; int parent_bed; int spool_bed; bool kept; };
+    for (const Case &c : {Case{"PLA", 65, 42, true}, Case{"PLA", 65, 50, false}, Case{"PLA", 65, 49, true}, Case{"PETG", 80, 50, true}, Case{"PETG", 80, 60, false},
+                          Case{"ABS", 100, 70, true}, Case{"ABS", 100, 80, false}, Case{"PLA", 40, 42, false} /* a raise */, Case{"PLA", 45, 40, true}}) {
+        INFO(c.mat << " parent " << c.parent_bed << " spoolman " << c.spool_bed);
+        PresetBundle bundle;
+        add_printer(bundle, "PrinterA");
+        Preset &par = add_system(bundle.filaments, std::string("Generic ") + c.mat + " @T", c.mat, "Generic");
+        set_parent_temps(par, 210, c.parent_bed);
+        UpsertContext ctx;
+        ctx.printer         = bundle.printers.find_preset("PrinterA");
+        ctx.preferred_token = "@T";
+        auto r = upsert_catalog(bundle.filaments, {fil(5, "X", "Acme", c.mat, 210, c.spool_bed)}, ctx);
+        REQUIRE(r.created.size() == 1);
+        const Preset *p = nullptr;
+        for (auto it = bundle.filaments.cbegin(); it != bundle.filaments.cend(); ++it)
+            if (it->is_user())
+                p = &*it;
+        REQUIRE(p != nullptr);
+        CHECK(ival(*p, "hot_plate_temp") == (c.kept ? c.parent_bed : c.spool_bed));
+        CHECK(ival(*p, "hot_plate_temp_initial_layer") == (c.kept ? c.parent_bed : c.spool_bed));
+        CHECK((kept_plate(r) != nullptr) == c.kept);
+        if (c.kept)
+            CHECK(kept_count(r) == 1); // twelve plate keys, one decision
+    }
+}
+
+TEST_CASE("Spoolman guardrails: TPU, PVA and unknown materials have no bed floor but keep the nozzle rule (#145)", "[Spoolman][issue145]")
+{
+    for (const char *mat : {"TPU", "PVA", "XYZ"}) {
+        INFO(mat);
+        PresetBundle bundle;
+        add_printer(bundle, "PrinterA");
+        Preset &par = add_system(bundle.filaments, std::string("Generic ") + mat + " @T", mat, "Generic");
+        set_parent_temps(par, 230, 60);
+        UpsertContext ctx;
+        ctx.printer         = bundle.printers.find_preset("PrinterA");
+        ctx.preferred_token = "@T";
+        auto r = upsert_catalog(bundle.filaments, {fil(5, "X", "Acme", mat, 200, 30)}, ctx);
+        REQUIRE(r.created.size() == 1);
+        const Preset *p = nullptr;
+        for (auto it = bundle.filaments.cbegin(); it != bundle.filaments.cend(); ++it)
+            if (it->is_user())
+                p = &*it;
+        REQUIRE(p != nullptr);
+        CHECK(ival(*p, "hot_plate_temp") == 30); // no floor
+        CHECK(nozzle(*p) == 230);                // 30 C drop: kept
+        CHECK(kept_plate(r) == nullptr);
+        CHECK(kept_entry(r, "nozzle_temperature") != nullptr);
+    }
+}
+
+TEST_CASE("Spoolman guardrails: a kept nozzle temperature keeps the parent's flow too (#145)", "[Spoolman][issue145]")
+{
+    {
+        Fixture f;
+        set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 60, 12);
+        Filament fl = fil(5, "PLA Blue", "Acme", "PLA", 195, 60);
+        fl.extras["max_volumetric_speed"] = "25";
+        auto r = f.run({fl});
+        const Preset &p = only_user_preset(f);
+        CHECK(nozzle(p) == 220);
+        CHECK(p.config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values.at(0) == 12);
+        const auto *k = kept_entry(r, "filament_max_volumetric_speed");
+        REQUIRE(k != nullptr);
+        CHECK(k->value == "25");
+        CHECK(k->kept_value == "12");
+    }
+    {   // nozzle not kept: the flow is applied
+        Fixture f;
+        set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 60, 12);
+        Filament fl = fil(5, "PLA Blue", "Acme", "PLA", 215, 60);
+        fl.extras["max_volumetric_speed"] = "25";
+        auto r = f.run({fl});
+        CHECK(only_user_preset(f).config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values.at(0) == 25);
+        CHECK(kept_count(r) == 0);
+    }
+    {   // Spoolman provides no temperature: unchanged behaviour, the flow is applied
+        Fixture f;
+        set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 60, 12);
+        Filament fl = fil(5, "PLA Blue", "Acme", "PLA");
+        fl.extras["max_volumetric_speed"] = "25";
+        auto r = f.run({fl});
+        CHECK(only_user_preset(f).config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values.at(0) == 25);
+        CHECK(kept_count(r) == 0);
+    }
+}
+
+TEST_CASE("Spoolman guardrails: a refresh after the parent kept stays stable and logs the decision (#145)", "[Spoolman][issue145]")
+{
+    Fixture f;
+    set_parent_temps(*f.bundle.filaments.find_preset("Generic PLA @T", false, true), 220, 65);
+    const std::vector<Filament> cat = {fil(5, "PLA Blue", "Acme", "PLA", 195, 42)};
+    f.run(cat);
+    auto r2 = f.run(cat);
+    CHECK(r2.unchanged.size() == 1);
+    CHECK(kept_count(r2) == 2); // one nozzle decision, one plate decision (reported again on every sync)
+    CHECK(nozzle(only_user_preset(f)) == 220);
+    log_sync(true, 1, r2, nullptr); // must not throw; the info line itself is not captured here
+}
+
+// The real case from the ticket: Inland 'High Speed PLA+' records (195 / 42) against the parent 'Generic PLA High Speed @U1 0.4 nozzle'.
+TEST_CASE("Spoolman guardrails: real Inland High Speed PLA+ keeps the U1 parent's 220/65 (#145)", "[Spoolman][issue145]")
+{
+    PresetBundle bundle;
+    Preset &printer = add_printer(bundle, "Snapmaker U1 (0.4 nozzle)");
+    std::ifstream in(std::string(TEST_DATA_DIR) + "/spoolman/candidates_u1_0.4.tsv");
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        std::vector<std::string> col;
+        std::stringstream ss(line);
+        std::string c;
+        while (std::getline(ss, c, '\t'))
+            col.push_back(c);
+        col.resize(7);
+        Preset &p = add_system(bundle.filaments, col[0], col[2], col[3], col[6] == "1" ? std::vector<std::string>{printer.name} : std::vector<std::string>{}, col[4], col[5]);
+        p.alias = col[1];
+        if (col[0] == "Generic PLA High Speed @U1 0.4 nozzle")
+            set_parent_temps(p, 220, 65, 21);
+    }
+    std::ifstream fin(std::string(TEST_DATA_DIR) + "/spoolman/real_filaments_130.json");
+    REQUIRE(fin.is_open());
+    const auto fils = parse_filaments(nlohmann::json::parse(fin)).items;
+    UpsertContext ctx;
+    ctx.printer = &printer;
+    const UpsertReport r = upsert_catalog(bundle.filaments, fils, ctx);
+    int checked = 0;
+    for (const PresetResult &c : r.created) {
+        if (c.parent_name != "Generic PLA High Speed @U1 0.4 nozzle")
+            continue;
+        const Preset *p = bundle.filaments.find_preset(c.preset_name, false);
+        REQUIRE(p != nullptr);
+        INFO(c.preset_name);
+        CHECK(nozzle(*p) == 220);
+        CHECK(ival(*p, "hot_plate_temp") == 65);
+        CHECK(ival(*p, "hot_plate_temp_initial_layer") == 65);
+        bool nz = false, bed = false;
+        for (const auto &v : r.rejected)
+            if (v.spoolman_id == c.spoolman_id && v.kept_parent) {
+                nz  = nz || (v.key_or_field == "nozzle_temperature" && v.value == "195" && v.kept_value == "220");
+                bed = bed || (v.key_or_field.find("plate_temp") != std::string::npos && v.value == "42" && v.kept_value == "65");
+            }
+        CHECK(nz);
+        CHECK(bed);
+        ++checked;
+    }
+    CHECK(checked >= 3); // ids 26, 27, 28
+}
