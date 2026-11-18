@@ -88,3 +88,34 @@ TEST_CASE("NetworkGuard: update URL overrides are ignored while the switch is of
     CHECK(cfg.version_check_url() == "https://example.com/version");
     CHECK(cfg.profile_update_url() == "https://example.com/profiles");
 }
+
+TEST_CASE("NetworkGuard: is_local_address judges the real connect address", "[NetworkGuard]")
+{
+    for (const char *a : {"127.0.0.1", "127.9.9.9", "10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1", "169.254.10.10", "::1", "fe80::1", "fe80::1%en0",
+                          "febf::1", "fc00::1", "fd12:3456::1", "::ffff:127.0.0.1", "::ffff:192.168.1.5", "::FFFF:10.1.2.3"})
+        { CAPTURE(a); CHECK(is_local_address(a)); }
+    for (const char *a : {"8.8.8.8", "1.1.1.1", "100.64.0.1", "100.127.255.254", "0.0.0.0", "255.255.255.255", "172.15.0.1", "172.32.0.1", "192.169.1.1",
+                          "169.253.1.1", "::", "2001:db8::1", "2606:4700::1111", "fec0::1", "::ffff:8.8.8.8", "::ffff:100.64.0.1", "::ffff:0.0.0.0", "64:ff9b::7f00:1",
+                          "::127.0.0.1", "", "garbage", "127.1", "0x7f.1", "1.2.3.4.5", "127.0.0.1 ", "localhost", "[::1]"})
+        { CAPTURE(a); CHECK_FALSE(is_local_address(a)); }
+}
+
+TEST_CASE("NetworkGuard: is_connect_allowed needs a local address unless the host is user-allowed", "[NetworkGuard]")
+{
+    const std::vector<std::string> allowed{"http://spoolman.example.com:7912", "printer.example.org"};
+    // a local-looking name that DNS resolved to a public address (the DNS-name bypass)
+    CHECK_FALSE(is_connect_allowed("printer", "8.8.8.8", none));
+    CHECK_FALSE(is_connect_allowed("http://nas.lan/x", "93.184.216.34", none));
+    CHECK_FALSE(is_connect_allowed("evil.local", "2606:4700::1111", none));
+    CHECK_FALSE(is_connect_allowed("printer", "::ffff:8.8.8.8", none));
+    CHECK_FALSE(is_connect_allowed("printer", "100.64.1.1", none));
+    CHECK(is_connect_allowed("printer", "192.168.1.9", none));
+    CHECK(is_connect_allowed("http://u1.local:7125/x", "fe80::1", none));
+    CHECK(is_connect_allowed("printer", "::ffff:10.0.0.2", none));
+    // explicitly allowed hosts may resolve anywhere
+    CHECK(is_connect_allowed("https://Spoolman.Example.com/api", "93.184.216.34", allowed));
+    CHECK(is_connect_allowed("printer.example.org", "2606:4700::1111", allowed));
+    CHECK_FALSE(is_connect_allowed("evil.example.org", "93.184.216.34", allowed));
+    CHECK_FALSE(is_connect_allowed("", "192.168.1.1", allowed));
+    CHECK_FALSE(is_connect_allowed("printer", "", allowed));
+}

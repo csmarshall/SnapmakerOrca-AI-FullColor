@@ -1,6 +1,7 @@
 #include "Http.hpp"
 #include "libslic3r_version.h"
 #include "libslic3r/NetworkGuard.hpp"
+#include "NetworkGuardCurl.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -147,6 +148,7 @@ struct Http::priv
 	bool follow_redirects = true;
 	bool report_redirects = false; // deliver a 3xx reply to completefn
 	std::string blocked_redirect;  // #139: Location header the network guard refused to follow
+	Slic3r::NetworkGuard::ConnectGuard connect_guard; // #139: refuses a connection whose resolved address is not local
 	std::atomic_bool cancel;
     std::unique_ptr<form_file> putFile;
 
@@ -324,16 +326,24 @@ size_t Http::priv::headers_cb(char *buffer, size_t size, size_t nitems, void *us
 {
 	auto self = static_cast<priv*>(userp);
 
-	// #139: with network access outside the LAN off, refuse a redirect to a non-local host. Returning a short count makes curl
-	// abort the transfer (CURLE_WRITE_ERROR), which http_perform reports as the blocked message. Relative Locations stay on the same host.
+	// #139: with network access outside the LAN off, refuse a redirect to a non-local host. The Location is resolved against the URL of
+	// the response that carried it by curl's own URL parser, so relative, scheme-relative and odd forms all mean what curl will follow.
+	// Returning a short count makes curl abort the transfer (CURLE_WRITE_ERROR), which http_perform reports as the blocked message.
 	if (self->follow_redirects && !Slic3r::NetworkGuard::internet_access_allowed() && nitems * size > 9 && boost::iequals(std::string(buffer, 9), "location:")) {
-		std::string target(buffer + 9, nitems * size - 9);
-		const size_t b = target.find_first_not_of(" \t");
-		target = b == std::string::npos ? std::string() : target.substr(b);
-		while (!target.empty() && (target.back() == '\r' || target.back() == '\n' || target.back() == ' ')) target.pop_back();
-		if ((target.find("://") != std::string::npos || target.compare(0, 2, "//") == 0) && !Slic3r::NetworkGuard::is_request_allowed(target)) {
-			self->blocked_redirect = target;
-			return 0;
+		long status = 0;
+		::curl_easy_getinfo(self->curl, CURLINFO_RESPONSE_CODE, &status);
+		if (status == 0 || (status >= 300 && status < 400)) {
+			std::string target(buffer + 9, nitems * size - 9);
+			const size_t b = target.find_first_not_of(" \t");
+			target = b == std::string::npos ? std::string() : target.substr(b);
+			while (!target.empty() && (target.back() == '\r' || target.back() == '\n' || target.back() == ' ' || target.back() == '\t')) target.pop_back();
+			char *effective = nullptr;
+			::curl_easy_getinfo(self->curl, CURLINFO_EFFECTIVE_URL, &effective);
+			const std::string base = effective != nullptr ? std::string(effective) : self->url;
+			if (!Slic3r::NetworkGuard::redirect_allowed(base, target)) {
+				self->blocked_redirect = target;
+				return 0;
+			}
 		}
 	}
 
@@ -466,10 +476,21 @@ std::string Http::priv::body_size_error()
 void Http::priv::http_perform()
 {
 	// #139 / ADR 0019: the single choke point for outbound HTTP. Nothing is sent to a non-local host while the switch is off.
-	if (!Slic3r::NetworkGuard::is_request_allowed(url)) {
-		Slic3r::NetworkGuard::log_blocked(url);
-		if (errorfn) { errorfn(std::string(), Slic3r::NetworkGuard::blocked_message(), 0); }
-		return;
+	// The host is the one curl's own URL parser reports, and CURLOPT_URL is set from the URL that was checked. A name that is local
+	// only by NAME is re-checked against the address it really resolves to when curl opens the socket.
+	blocked_redirect.clear();
+	connect_guard.blocked = false;
+	connect_guard.blocked_host.clear();
+	if (!Slic3r::NetworkGuard::internet_access_allowed()) {
+		std::string checked_url;
+		if (!Slic3r::NetworkGuard::request_allowed(url, &checked_url)) {
+			Slic3r::NetworkGuard::log_blocked(url);
+			if (errorfn) { errorfn(std::string(), Slic3r::NetworkGuard::blocked_message(), 0); }
+			return;
+		}
+		::curl_easy_setopt(curl, CURLOPT_URL, checked_url.c_str());
+		::curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, long(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+		Slic3r::NetworkGuard::install_connect_guard(curl, &connect_guard);
 	}
 	::curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, follow_redirects ? 1L : 0L);
 	::curl_easy_setopt(curl, CURLOPT_POSTREDIR, CURL_REDIR_POST_ALL);
@@ -534,6 +555,10 @@ void Http::priv::http_perform()
 				// The abort comes from the CURLOPT_READFUNCTION callback, which means reading file failed
 				if (errorfn) { errorfn(std::move(buffer), "Error reading file for file upload", 0); }
 			}
+		}
+		else if (connect_guard.blocked) {
+			Slic3r::NetworkGuard::log_blocked(connect_guard.blocked_host);
+			if (errorfn) { errorfn(std::move(buffer), Slic3r::NetworkGuard::blocked_message(), 0); }
 		}
 		else if (res == CURLE_WRITE_ERROR && !blocked_redirect.empty()) {
 			Slic3r::NetworkGuard::log_blocked(blocked_redirect);

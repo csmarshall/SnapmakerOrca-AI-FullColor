@@ -132,6 +132,40 @@ bool ipv6_is_local(const boost::asio::ip::address_v6 &a)
 
 } // namespace
 
+bool is_local_address(const std::string &address)
+{
+    std::string text = address;
+    const size_t pct = text.find('%');
+    if (pct != std::string::npos)
+        text.erase(pct); // zone id
+    if (text.empty() || text.find_first_of(" \t\r\n[]") != std::string::npos)
+        return false;
+    boost::system::error_code ec;
+    if (text.find(':') == std::string::npos) {
+        const auto a = boost::asio::ip::make_address_v4(text, ec);
+        return !ec && ipv4_is_local(a.to_uint());
+    }
+    const auto a = boost::asio::ip::make_address_v6(text, ec);
+    if (ec)
+        return false;
+    if (a.is_v4_mapped()) {
+        const auto b = a.to_bytes();
+        return ipv4_is_local((uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16) | (uint32_t(b[14]) << 8) | uint32_t(b[15]));
+    }
+    return ipv6_is_local(a);
+}
+
+bool is_connect_allowed(const std::string &host_or_url, const std::string &address, const std::vector<std::string> &user_allowed_hosts)
+{
+    const std::string host = extract_host(host_or_url);
+    if (host.empty() || address.empty())
+        return false;
+    for (const std::string &allowed : user_allowed_hosts)
+        if (!allowed.empty() && extract_host(allowed) == host)
+            return true;
+    return is_local_address(address);
+}
+
 std::string extract_host(const std::string &input)
 {
     std::string s = input;

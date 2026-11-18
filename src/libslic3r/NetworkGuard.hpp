@@ -23,6 +23,15 @@ std::string extract_host(const std::string &url_or_host);
 // or public is NOT local. IPv4-mapped IPv6 ([::ffff:192.168.1.1]) is deliberately NOT local (add it to the allowed hosts if needed).
 bool is_local_network_host(const std::string &url_or_host, const std::vector<std::string> &user_allowed_hosts);
 
+// True when a resolved/connect address (canonical text: "192.168.1.5", "fe80::1", "fe80::1%en0", "::ffff:10.0.0.1") is loopback, RFC1918,
+// IPv4 link-local, IPv6 link-local fe80::/10 or ULA fc00::/7. IPv4-mapped IPv6 is judged by the embedded IPv4. Public, CGNAT (100.64/10),
+// unspecified (0.0.0.0, ::), broadcast, NAT64 and anything that does not parse as a canonical address are NOT local.
+bool is_local_address(const std::string &address);
+
+// The connect-time check (#139 review): a name is only local by NAME, so once the resolver has answered, the connection is allowed
+// when the host (URL or bare host) is an exact match of user_allowed_hosts, or the address it resolved to is_local_address().
+bool is_connect_allowed(const std::string &host_or_url, const std::string &address, const std::vector<std::string> &user_allowed_hosts);
+
 // Process-wide state, set at startup and whenever the preference or the configured hosts change. Thread safe.
 void set_internet_access_allowed(bool allowed);
 bool internet_access_allowed();
