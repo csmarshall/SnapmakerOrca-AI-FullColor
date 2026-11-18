@@ -81,9 +81,10 @@ class PreprintDialog : public wxDialog
 {
 public:
     PreprintDialog(wxWindow* parent, std::shared_ptr<PreprintCapabilityStore> store, std::shared_ptr<SnapmakerPreprintContext> ctx,
-                   std::shared_ptr<SnapmakerPreprintSession> session)
+                   std::shared_ptr<SnapmakerPreprintSession> session,
+                   std::shared_ptr<MoonrakerPrinterAgent> agent, std::shared_ptr<MoonrakerPreprintPrinter> printer)
         : wxDialog(parent, wxID_ANY, wxString(), wxDefaultPosition, wxSize(kDialogWidth, kDialogHeight), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
-        , m_store(std::move(store)), m_ctx(std::move(ctx)), m_session(std::move(session)), m_timer(this)
+        , m_store(std::move(store)), m_ctx(std::move(ctx)), m_session(std::move(session)), m_agent(std::move(agent)), m_printer(std::move(printer)), m_timer(this)
     {
         SetSizer(new wxBoxSizer(wxVERTICAL));
         Bind(wxEVT_TIMER, [this](wxTimerEvent&) { if (m_bridge) m_bridge->tick(); });
@@ -169,6 +170,30 @@ public:
         opt.preprint_run  = [](std::function<void()> work, std::function<void()> on_ui) { run_guarded(std::move(work), std::move(on_ui)); };
         opt.preprint_post = [](std::function<void()> fn) { post_ui(std::move(fn)); };
         opt.preprint_done = m_on_done;
+        // #137: the same two read-only readers as the Device tab (printer.objects.query on the allow-listed objects, GET /machine/system_info
+        // and the other read-allow-listed GETs), but through THIS dialog's agent (the one the pin was taken from, not the app's current one), and
+        // only while that agent is still on the pinned address. The raw calls run on Http's thread and hand back on the UI thread.
+        {
+            std::shared_ptr<MoonrakerPrinterAgent>    agent   = m_agent;
+            std::shared_ptr<MoonrakerPreprintPrinter> printer = m_printer;
+            std::shared_ptr<SnapmakerPreprintSession> session = m_session;
+            snapmaker_attach_pinned_readers(
+                opt,
+                [agent](const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done) {
+                    agent->query_machine_objects_async(objects, [done](bool ok, nlohmann::json result) {
+                        post_ui([done, ok, result = std::move(result)]() mutable { done(ok, std::move(result)); });
+                    });
+                },
+                [agent](const std::string& path, std::size_t max_bytes, std::function<void(bool, std::string)> done) {
+                    agent->read_machine_resource_async(path, max_bytes, [done](bool ok, std::string body) {
+                        post_ui([done, ok, body = std::move(body)]() mutable { done(ok, std::move(body)); });
+                    });
+                },
+                [printer, session, epoch] {
+                    const auto pin = session->pinned_printer(epoch);
+                    return pin && printer->on_pinned_endpoint(*pin);
+                });
+        }
         m_bridge = std::make_unique<SnapmakerDeviceBridge>(std::move(opt));
         m_timer.Start(1000);
     }
@@ -187,6 +212,8 @@ private:
     std::shared_ptr<PreprintCapabilityStore>  m_store;
     std::shared_ptr<SnapmakerPreprintContext> m_ctx;
     std::shared_ptr<SnapmakerPreprintSession> m_session;
+    std::shared_ptr<MoonrakerPrinterAgent>    m_agent;
+    std::shared_ptr<MoonrakerPreprintPrinter> m_printer;
     std::unique_ptr<WebPageServer>            m_server;
     std::unique_ptr<SnapmakerDeviceBridge>    m_bridge;
     wxWebView*                                m_browser{nullptr};
@@ -256,6 +283,7 @@ std::shared_ptr<PreprintDialogController> create_preprint_controller(wxWindow* p
     if (!agent) return nullptr;
     auto store   = std::make_shared<PreprintCapabilityStore>();
     auto ctx     = std::make_shared<SnapmakerPreprintContext>();
+    auto agent_ref = agent;
     auto printer = std::make_shared<MoonrakerPreprintPrinter>(std::move(agent));
     auto session = std::make_shared<SnapmakerPreprintSession>(ctx, printer);
     session->set_notifier([](const std::string& msg) { preprint_notify(msg, false); }); // preprint_notify posts to the UI thread
@@ -267,7 +295,7 @@ std::shared_ptr<PreprintDialogController> create_preprint_controller(wxWindow* p
     d.context      = ctx;
     d.session      = session;
     d.bind_printer = [printer] { return printer->bind_current(); };
-    d.make_view    = [parent, store, ctx, session, holder, printer](std::uint64_t open_id) -> std::unique_ptr<PreprintView> {
+    d.make_view    = [parent, store, ctx, session, holder, printer, agent_ref](std::uint64_t open_id) -> std::unique_ptr<PreprintView> {
         // One printer, three sources: the CSP origin comes from the AGENT's connected device (the one the pin is taken from); the selected
         // machine must name the same host, otherwise the send is refused. No fallback, no print_host.
         const std::string origin = printer->connected_origin();
@@ -283,7 +311,7 @@ std::shared_ptr<PreprintDialogController> create_preprint_controller(wxWindow* p
             preprint_notify("The selected printer and the connected printer differ (" + selected_origin + " vs " + origin + "). Reconnect and try again.", true);
             return nullptr;
         }
-        auto* dlg = new PreprintDialog(parent, store, ctx, session);
+        auto* dlg = new PreprintDialog(parent, store, ctx, session, agent_ref, printer);
         if (!dlg->init(origin)) {
             dlg->Destroy();
             return nullptr;

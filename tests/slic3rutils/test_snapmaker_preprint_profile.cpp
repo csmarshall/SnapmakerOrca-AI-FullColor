@@ -921,6 +921,95 @@ TEST_CASE("pre-print read-only family answers empty for a stale epoch or a close
     }
 }
 
+// ---- #137: the pre-print dialog's real readers (snapmaker_attach_pinned_readers), pinned device only ----
+
+namespace {
+// Stands in for the agent's two read-only calls. Records what would go to the printer; answers like Moonraker does for print_task_config.
+struct RawPrinter
+{
+    std::vector<std::vector<std::string>> queries;
+    std::vector<std::string>              fetches;
+    bool                                  pinned = true; // what the dialog's pin check (the agent still on the pinned host) would say
+    void attach(SnapmakerDeviceBridge::Options& o)
+    {
+        snapmaker_attach_pinned_readers(
+            o,
+            [this](const std::vector<std::string>& objects, std::function<void(bool, json)> done) {
+                queries.push_back(objects);
+                done(true, json{{"eventtime", 7},
+                                {"status", {{"print_task_config", {{"filament_vendor", json::array({"Snapmaker", "Snapmaker", "NONE", "NONE"})},
+                                                                   {"filament_type", json::array({"PLA", "PETG", "NONE", "NONE"})},
+                                                                   {"filament_sub_type", json::array({"SnapSpeed", "Basic", "NONE", "NONE"})}}}}}});
+            },
+            [this](const std::string& path, std::size_t, std::function<void(bool, std::string)> done) {
+                fetches.push_back(path);
+                done(true, json{{"result", {{"system_info", {{"product_info", {{"serial_number", "SNPLACEHOLDER"}}}}}}}}.dump());
+            },
+            [this] { return pinned; });
+    }
+};
+} // namespace
+
+TEST_CASE("pre-print readers: sw_GetMachineState returns the pinned printer's print_task_config, with queries only", "[SSWCP][preprint_profile][read_family][readers]")
+{
+    Profile    h(true, false);
+    RawPrinter raw;
+    h.printer->pin = SnapmakerPreprintPin{"192.0.2.10", "7125", "SNPLACEHOLDER"};
+    REQUIRE(h.open(true) != 0);
+    h.bridge = h.make(~std::uint64_t(0), [&](SnapmakerDeviceBridge::Options& o) { raw.attach(o); });
+    h.printer->forget();
+
+    const json st = h.call("sw_GetMachineState", {{"objects", {{"print_task_config", nullptr}, {"filament_detect", nullptr}, {"print_stats", nullptr}}}});
+    REQUIRE(is_ok(st));
+    const json cfg = st["data"]["status"]["print_task_config"];
+    CHECK(cfg["filament_vendor"] == json::array({"Snapmaker", "Snapmaker", "NONE", "NONE"}));
+    CHECK(cfg["filament_type"][1] == "PETG");
+    CHECK(cfg["filament_sub_type"][0] == "SnapSpeed");
+    REQUIRE_FALSE(raw.queries.empty());
+    for (const auto& q : raw.queries) { // only allow-listed objects reach the printer
+        CHECK(std::count(q.begin(), q.end(), "print_task_config") == 1);
+        for (const auto& name : q) CHECK(snapmaker_state_object_allowed(name));
+    }
+    const json si = h.call("sw_GetMachineSystemInfo");
+    REQUIRE(is_ok(si));
+    for (const auto& f : raw.fetches) CHECK(f == "/machine/system_info");
+    CHECK(h.printer->calls.empty()); // no session printer call: nothing written, nothing started
+    CHECK(h.printer->sends == 0);
+    CHECK(h.printer->starts == 0);
+}
+
+TEST_CASE("pre-print readers: nothing is read when the agent is no longer on the pinned printer", "[SSWCP][preprint_profile][read_family][readers]")
+{
+    Profile    h(true, false);
+    RawPrinter raw;
+    raw.pinned = false;
+    h.printer->pin = SnapmakerPreprintPin{"192.0.2.10", "7125", "SNPLACEHOLDER"};
+    REQUIRE(h.open(true) != 0);
+    h.bridge = h.make(~std::uint64_t(0), [&](SnapmakerDeviceBridge::Options& o) { raw.attach(o); });
+    const json st = h.call("sw_GetMachineState", {{"objects", {{"print_task_config", nullptr}}}});
+    CHECK(is_ok(st));
+    CHECK(st["data"]["status"] == json::object()); // the empty state, no slot data
+    h.call("sw_GetMachineSystemInfo");
+    CHECK(raw.queries.empty());
+    CHECK(raw.fetches.empty());
+}
+
+TEST_CASE("pre-print readers: a stale epoch or a closed context gets the empty state and reaches nothing", "[SSWCP][preprint_profile][read_family][readers]")
+{
+    RawPrinter raw;
+    auto tweak = [&](SnapmakerDeviceBridge::Options& o) { raw.attach(o); };
+    auto check = [&](Profile& h, SnapmakerDeviceBridge* b) {
+        const json st = h.call("sw_GetMachineState", {{"objects", {{"print_task_config", nullptr}}}}, b);
+        CHECK(is_ok(st));
+        CHECK(st["data"]["status"] == json::object());
+        h.call("sw_GetMachineSystemInfo", json::object(), b);
+        CHECK(raw.queries.empty());
+        CHECK(raw.fetches.empty());
+    };
+    SECTION("stale epoch") { Profile h; auto b = h.make(h.epoch + 1, tweak); check(h, b.get()); }
+    SECTION("closed context") { Profile h; auto b = h.make(~std::uint64_t(0), tweak); h.session->finish(h.epoch); check(h, b.get()); }
+}
+
 // ---- review addendum (F2, F3, F4, F7, F8) ----
 
 namespace {

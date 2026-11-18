@@ -219,7 +219,7 @@ public:
         // sw_SetFilamentMappingComplete and sw_FinishFilamentMapping, each answered by the session, plus sw_GetConnectedMachine and (#137) the Device tab's
         // read-only family (state, system info, cache / MQTT / filament-info stubs), each answered only for the pinned printer of the live epoch
         // (uploads, deletes and controls are not registered). `preprint` (the context) should be the session's. `preprint_epoch` is what session->open() returned;
-        // a reopen makes it stale and every request is then refused. Leave the Device-tab members above (query_state, control, ...) null.
+        // a reopen makes it stale and every request is then refused. Leave the Device-tab members above null (control, ...); query_state and fetch_resource are set only via snapmaker_attach_pinned_readers (#137).
         // The Device tab's bridge never sets these: its registered set is unchanged (pinned by tests and snapmaker_bridge_commands.txt).
         std::shared_ptr<SnapmakerPreprintSession>            preprint_session;
         std::uint64_t                                        preprint_epoch = 0;
@@ -333,6 +333,16 @@ private:
     int                                 m_ticks           = 0;
     std::map<std::string, std::string>  m_filament_info;
 };
+
+// #137: fills the two READ-ONLY readers of a pre-print bridge's Options (query_state = printer.objects.query, fetch_resource = GET of the
+// agent's read allow-list) from raw agent calls. Each call first asks `still_pinned()` (UI thread, no network: is the agent still on the
+// printer the session pinned?) and is refused with (false, empty) when it says no. The bridge itself additionally refuses a stale epoch or
+// a closed context before reaching these. The raw callbacks must hand `done` back on the UI thread. Nothing else is attached.
+void snapmaker_attach_pinned_readers(
+    SnapmakerDeviceBridge::Options&                                                                                                          options,
+    std::function<void(const std::vector<std::string>&, std::function<void(bool, nlohmann::json)>)>                                         raw_query,
+    std::function<void(const std::string&, std::size_t, std::function<void(bool, std::string)>)>                                            raw_fetch,
+    std::function<bool()>                                                                                                                    still_pinned);
 
 }} // namespace Slic3r::GUI
 

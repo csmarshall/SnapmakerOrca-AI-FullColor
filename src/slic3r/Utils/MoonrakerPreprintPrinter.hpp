@@ -45,6 +45,9 @@ public:
     // "http://<host>" of the agent's CURRENT connected device (no HTTP, no serial read), "" when nothing is connected or the address is not a
     // plain host. Used to build the page's CSP origin from the SAME device the pin is taken from (never from the Device tab's selection).
     std::string                  connected_origin() const;
+    // True when the agent's CURRENT device has the pin's host and port (no HTTP, no serial read). Guards the read-only state reads (#137): they
+    // go through the agent, so they must not run once it has switched to another address. The serial is not re-read here.
+    bool                         on_pinned_endpoint(const SnapmakerPreprintPin& pin) const;
 
     // The exact start line for a pinned name, or empty when snapmaker_preprint_filename_ok() refuses the name (allowlist, see the gate).
     static std::string start_line(const std::string& filename);

@@ -572,6 +572,24 @@ void SnapmakerDeviceBridge::fetch_system_info(const std::string& dev_id, std::fu
     });
 }
 
+void snapmaker_attach_pinned_readers(
+    SnapmakerDeviceBridge::Options&                                                                    options,
+    std::function<void(const std::vector<std::string>&, std::function<void(bool, nlohmann::json)>)> raw_query,
+    std::function<void(const std::string&, std::size_t, std::function<void(bool, std::string)>)>    raw_fetch,
+    std::function<bool()>                                                                              still_pinned)
+{
+    options.query_state = [raw_query = std::move(raw_query), still_pinned](const std::vector<std::string>& objects,
+                                                                           std::function<void(bool, nlohmann::json)> done) {
+        if (!raw_query || !still_pinned || !still_pinned()) { done(false, nlohmann::json::object()); return; }
+        raw_query(objects, std::move(done));
+    };
+    options.fetch_resource = [raw_fetch = std::move(raw_fetch), still_pinned](const std::string& path, std::size_t max_bytes,
+                                                                              std::function<void(bool, std::string)> done) {
+        if (!raw_fetch || !still_pinned || !still_pinned()) { done(false, std::string()); return; }
+        raw_fetch(path, max_bytes, std::move(done));
+    };
+}
+
 std::optional<SnapmakerTab> snapmaker_tab_for_target(const std::string& target)
 {
     std::string t = target;
@@ -889,8 +907,8 @@ void SnapmakerDeviceBridge::register_preprint_commands()
     // (stubs, nothing stored), sw_create_mqtt_client / sw_mqtt_* (inert emulation), sw_SetSubscribeFilter, sw_UnSubscribeMachineState and
     // sw_StopMachineStateSubscription (local subscription bookkeeping), sw_UpdateMachineFilamentInfo (bounded in-memory map, never written out). (b) a printer read the Device tab already does:
     // sw_GetMachineState / sw_SubscribeMachineState (printer.objects.query via Options::query_state, allow-listed objects) and
-    // sw_GetMachineSystemInfo (GET /machine/system_info via Options::fetch_resource), pinned printer only. The PreprintDialog sets neither
-    // option, so today they answer the empty state / {}. (c) writes: none of these. sw_FileGetStatus is NOT in this family.
+    // sw_GetMachineSystemInfo (GET /machine/system_info via Options::fetch_resource), pinned printer only. The PreprintDialog fills both through
+    // snapmaker_attach_pinned_readers (#137), so a test without them answers the empty state / {}. (c) writes: none of these. sw_FileGetStatus is NOT in this family.
     register_read_only_family(true);
 }
 

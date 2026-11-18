@@ -24,6 +24,12 @@ std::string MoonrakerPreprintPrinter::connected_origin() const
     return ep.host.empty() ? std::string() : "http://" + ep.host;
 }
 
+bool MoonrakerPreprintPrinter::on_pinned_endpoint(const SnapmakerPreprintPin& pin) const
+{
+    const SnapmakerPreprintPin ep = endpoint_of(snapshot().base_url);
+    return !ep.host.empty() && ep.host == pin.host && ep.port == pin.port;
+}
+
 SnapmakerPreprintPin MoonrakerPreprintPrinter::endpoint_of(const std::string& base_url)
 {
     std::string rest;
