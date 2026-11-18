@@ -2,9 +2,14 @@
 # i.e. the pre-print dialog's webview. Same format and same bundle gate as snapmaker_bridge_commands.txt (which is the DEVICE TAB's list and
 # is not changed by this profile). Checked by scripts/verify_bridge_commands.cmake (every bundle name classified, nothing stale) and by the
 # [SSWCP][preprint_profile][list] Catch2 test (the live registry of that profile equals the REGISTERED lines).
-# REGISTERED here = the core's 13 built-in commands (SSWCP cannot unregister them; none touches the printer) + the seven pre-print commands,
-# each answered by SnapmakerPreprintSession (docs/records/snapmaker-u1-send-flow-design.md section 3). Everything else is DENIED (501): uploads,
-# downloads, deletes, renames, purifier, nozzle temperature, SendCommand and the Device tab's machine controls and state reads.
+# REGISTERED here = the core's 13 built-in commands (SSWCP cannot unregister them; none touches the printer) + sw_GetConnectedMachine + the seven
+# pre-print commands, each answered by SnapmakerPreprintSession (docs/records/snapmaker-u1-send-flow-design.md section 3) + (#137, ADR 0010
+# amendment 2026-11-17) the Device tab's READ-ONLY family: machine state / subscribe, system info, the cache, MQTT and filament-info stubs. Each of
+# those answers only for the pinned printer of the live epoch (stale or closed = empty reply, nothing contacted) and sends at most a read.
+# Everything else is DENIED (501): uploads, downloads, deletes, renames, purifier, nozzle temperature, SendCommand and the Device tab's machine
+# controls. The 12 names the parity audit found unrecorded (sw_AddDevice, sw_Connect, sw_ConnectOtherMachine, sw_Disconnect, sw_GetPincode,
+# sw_StartMachineFind, sw_StopMachineFind, sw_DeleteDevices, sw_DeleteRecentFiles, sw_mqtt_set_engine, sw_test_mqtt_moonraker, sw_SnapLog) stay
+# DENIED (ADR 0010); sw_SnapLog is undecided.
 # sw_StartLocalPrint is answered -1/"failure" on purpose (the page then falls back to the validated script + printer.print.start).
 
 DENIED sw_AddDevice
@@ -36,7 +41,7 @@ DENIED sw_FileView
 DENIED sw_FilesThumbnailsBase64
 REGISTERED sw_FinishFilamentMapping
 REGISTERED sw_GetActiveFile
-DENIED sw_GetCache
+REGISTERED sw_GetCache
 DENIED sw_GetCameraTimelapseInstance
 REGISTERED sw_GetConnectedMachine
 DENIED sw_GetDeviceDataStorageSpace
@@ -47,8 +52,8 @@ DENIED sw_GetFilesFromDir
 REGISTERED sw_GetLocalDevices
 DENIED sw_GetMachineFilamentMapping
 DENIED sw_GetMachineObjects
-DENIED sw_GetMachineState
-DENIED sw_GetMachineSystemInfo
+REGISTERED sw_GetMachineState
+REGISTERED sw_GetMachineSystemInfo
 DENIED sw_GetPincode
 DENIED sw_GetPrinterInfo
 DENIED sw_GetRecentProjects
@@ -61,7 +66,7 @@ DENIED sw_MachineFilesGetDirectory
 DENIED sw_MachineFilesMetadata
 DENIED sw_MachineFilesRoots
 DENIED sw_MachineFilesThumbnails
-DENIED sw_MachineHeartbeat
+REGISTERED sw_MachineHeartbeat
 DENIED sw_MachinePrintCancel
 DENIED sw_MachinePrintPause
 DENIED sw_MachinePrintResume
@@ -77,39 +82,39 @@ DENIED sw_OpenTimelapseFolder
 DENIED sw_PrinterDefectDetection
 DENIED sw_PullCloudFile
 DENIED sw_Query
-DENIED sw_RemoveCache
+REGISTERED sw_RemoveCache
 DENIED sw_RenameDevice
 DENIED sw_SendCommand
 REGISTERED sw_SendGCodes
 DENIED sw_ServerClientManagerSetUserinfo
-DENIED sw_SetCache
+REGISTERED sw_SetCache
 DENIED sw_SetDeviceName
 REGISTERED sw_SetFilamentMappingComplete
 DENIED sw_SetLogLevel
-DENIED sw_SetSubscribeFilter
+REGISTERED sw_SetSubscribeFilter
 DENIED sw_SnapLog
 DENIED sw_StartCloudPrint
 REGISTERED sw_StartLocalPrint
 DENIED sw_StartMachineFind
 DENIED sw_StopMachineFind
-DENIED sw_StopMachineStateSubscription
+REGISTERED sw_StopMachineStateSubscription
 REGISTERED sw_SubUserUpdatePrivacy
 REGISTERED sw_SubscribeCacheKey
 DENIED sw_SubscribeDownloadState
 REGISTERED sw_SubscribeForegroundChange
 REGISTERED sw_SubscribeLocalDevices
-DENIED sw_SubscribeMachineState
+REGISTERED sw_SubscribeMachineState
 REGISTERED sw_SubscribePageStateChange
 REGISTERED sw_SubscribeRecentFiles
 REGISTERED sw_SubscribeUserLoginState
 DENIED sw_SwitchModel
 DENIED sw_SwitchTab
-DENIED sw_SystemGetDeviceInfo
-DENIED sw_UnSubscribeMachineState
-DENIED sw_UnsubscribeCacheKeys
+REGISTERED sw_SystemGetDeviceInfo
+REGISTERED sw_UnSubscribeMachineState
+REGISTERED sw_UnsubscribeCacheKeys
 DENIED sw_Unsubscribe_Filter
 DENIED sw_UpdateDeviceInfo
-DENIED sw_UpdateMachineFilamentInfo
+REGISTERED sw_UpdateMachineFilamentInfo
 DENIED sw_UploadAsyncTimelapseInstance
 DENIED sw_UploadCameraTimelapse
 REGISTERED sw_UploadEvent
@@ -119,12 +124,12 @@ DENIED sw_UploadFiletoMachine
 REGISTERED sw_UserLogin
 DENIED sw_UserLogout
 DENIED sw_Webview_Unsubscribe
-DENIED sw_create_mqtt_client
-DENIED sw_exception_query
-DENIED sw_mqtt_connect
-DENIED sw_mqtt_disconnect
-DENIED sw_mqtt_publish
+REGISTERED sw_create_mqtt_client
+REGISTERED sw_exception_query
+REGISTERED sw_mqtt_connect
+REGISTERED sw_mqtt_disconnect
+REGISTERED sw_mqtt_publish
 DENIED sw_mqtt_set_engine
-DENIED sw_mqtt_subscribe
-DENIED sw_mqtt_unsubscribe
+REGISTERED sw_mqtt_subscribe
+REGISTERED sw_mqtt_unsubscribe
 DENIED sw_test_mqtt_moonraker

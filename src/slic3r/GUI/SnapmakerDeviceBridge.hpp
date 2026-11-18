@@ -216,8 +216,9 @@ public:
         std::function<bool(SnapmakerTab)>                    switch_tab;
         // The PRE-PRINT profile (send-flow S4b). A non-null session turns this bridge into the pre-print dialog's: it registers ONLY the
         // core's built-in commands plus sw_GetActiveFile, sw_GetFileFilamentMapping, sw_SendGCodes, sw_MachinePrintStart, sw_StartLocalPrint,
-        // sw_SetFilamentMappingComplete and sw_FinishFilamentMapping, each answered by the session (the Device-tab commands, uploads, deletes
-        // and controls are not registered). `preprint` (the context) should be the session's. `preprint_epoch` is what session->open() returned;
+        // sw_SetFilamentMappingComplete and sw_FinishFilamentMapping, each answered by the session, plus sw_GetConnectedMachine and (#137) the Device tab's
+        // read-only family (state, system info, cache / MQTT / filament-info stubs), each answered only for the pinned printer of the live epoch
+        // (uploads, deletes and controls are not registered). `preprint` (the context) should be the session's. `preprint_epoch` is what session->open() returned;
         // a reopen makes it stale and every request is then refused. Leave the Device-tab members above (query_state, control, ...) null.
         // The Device tab's bridge never sets these: its registered set is unchanged (pinned by tests and snapmaker_bridge_commands.txt).
         std::shared_ptr<SnapmakerPreprintSession>            preprint_session;
@@ -268,6 +269,8 @@ private:
     static constexpr int kStatePushEveryTicks = 3;
     void register_commands();
     void register_preprint_commands(); // the pre-print profile (Options::preprint_session)
+    void register_read_only_family(bool preprint); // machine state / cache / MQTT stubs / system info: Device tab and (guarded) pre-print
+    bool preprint_unpinned() const; // pre-print profile only: no printer is pinned for this bridge's epoch (stale, closed, never opened)
     void preprint_finish(bool from_handler); // closes the session for this bridge's epoch; fires preprint_done once
     void fire_preprint_done(bool started);
     std::vector<std::function<void()>> m_preprint_queue; // preprint_post == null: drained by tick()

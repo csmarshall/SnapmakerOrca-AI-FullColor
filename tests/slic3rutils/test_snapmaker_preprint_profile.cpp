@@ -107,7 +107,7 @@ struct Profile
         epoch = session->open(o, err);
         return epoch;
     }
-    std::unique_ptr<SnapmakerDeviceBridge> make(std::uint64_t e = ~std::uint64_t(0))
+    std::unique_ptr<SnapmakerDeviceBridge> make(std::uint64_t e = ~std::uint64_t(0), const std::function<void(SnapmakerDeviceBridge::Options&)>& tweak = nullptr)
     {
         SnapmakerDeviceBridge::Options o;
         o.port             = 5000;
@@ -122,6 +122,7 @@ struct Profile
             if (hold) held.emplace_back(std::move(work), std::move(on_ui));
             else { work(); on_ui(); }
         };
+        if (tweak) tweak(o);
         return std::make_unique<SnapmakerDeviceBridge>(std::move(o));
     }
     json reply(std::size_t n) const
@@ -670,14 +671,22 @@ TEST_CASE("the pre-print profile registers exactly the REGISTERED lines of snapm
         "sw_GetSoftwareInfo", "sw_UploadEvent", "sw_GetLocalDevices",
         // the pre-print profile
         "sw_GetConnectedMachine", "sw_GetActiveFile", "sw_GetFileFilamentMapping", "sw_SendGCodes", "sw_MachinePrintStart", "sw_StartLocalPrint",
-        "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping"};
+        "sw_SetFilamentMappingComplete", "sw_FinishFilamentMapping",
+        // #137 (ADR 0010 amendment 2026-11-17): the read-only family, shared with the Device tab, pinned-device only
+        "sw_GetMachineState", "sw_SubscribeMachineState", "sw_SetSubscribeFilter", "sw_UnSubscribeMachineState", "sw_StopMachineStateSubscription",
+        "sw_GetMachineSystemInfo", "sw_SystemGetDeviceInfo", "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys",
+        "sw_UpdateMachineFilamentInfo", "sw_MachineHeartbeat", "sw_exception_query", "sw_create_mqtt_client", "sw_mqtt_connect", "sw_mqtt_disconnect",
+        "sw_mqtt_subscribe", "sw_mqtt_unsubscribe", "sw_mqtt_publish"};
     CHECK(listed == expected);
-    CHECK(listed.size() == 21);
+    CHECK(listed.size() == 41);
     for (const auto& n : listed) { CAPTURE(n); CHECK(h.bridge->sswcp().is_registered(n)); }
     for (const auto& n : denied) { CAPTURE(n); CHECK_FALSE(h.bridge->sswcp().is_registered(n)); }
     for (const char* n : {"sw_UploadFile", "sw_UploadFileResult", "sw_UploadFiletoMachine", "sw_DownLoadFile", "sw_DownloadMachineFile", "sw_GetFileStream",
                           "sw_ControlLed", "sw_ControlBedTemp", "sw_ControlExtruderTemp", "sw_ControlPurifier", "sw_SendCommand", "sw_MachinePrintPause",
-                          "sw_MachinePrintCancel", "sw_DeleteDevices", "sw_RenameDevice", "sw_GetMachineState", "sw_MachineFilesRoots", "sw_CameraStartMonitor"})
+                          "sw_MachinePrintCancel", "sw_DeleteDevices", "sw_RenameDevice", "sw_MachineFilesRoots", "sw_CameraStartMonitor", "sw_FileGetStatus",
+                          "sw_PrinterDefectDetection", "sw_SnapLog", "sw_AddDevice", "sw_Connect", "sw_ConnectOtherMachine", "sw_Disconnect", "sw_GetPincode",
+                          "sw_StartMachineFind", "sw_StopMachineFind", "sw_DeleteRecentFiles", "sw_mqtt_set_engine", "sw_test_mqtt_moonraker",
+                          "sw_GetMachineObjects", "sw_GetPrinterInfo", "sw_MachineFilesMetadata", "sw_GetFileListPage", "sw_FilesThumbnailsBase64"})
         CHECK_FALSE(h.bridge->sswcp().is_registered(n));
     // the Device tab's list keeps its classification of the same names
     std::set<std::string> device_denied;
@@ -777,6 +786,138 @@ TEST_CASE("pre-print sw_GetConnectedMachine is an empty record when no printer i
         h.session->finish(h.epoch);
         const json r = h.call("sw_GetConnectedMachine");
         CHECK(r["data"] == json::object());
+    }
+}
+
+// ---- #137 (ADR 0010 amendment 2026-11-17): the read-only family on the pre-print page, pinned device only ----
+
+namespace {
+// What the family may reach: only Options::query_state (a Klipper objects query) and Options::fetch_resource (a GET). The PreprintDialog sets
+// neither today, so these hooks are how the tests see what the handlers WOULD send if it did. Nothing else is hooked: no control, no camera.
+struct ReadHooks
+{
+    std::vector<std::vector<std::string>> queries;
+    std::vector<std::string>              fetches;
+    void attach(SnapmakerDeviceBridge::Options& o)
+    {
+        o.query_state = [this](const std::vector<std::string>& objects, std::function<void(bool, json)> done) {
+            queries.push_back(objects);
+            done(true, json{{"eventtime", 7}, {"status", {{"print_stats", {{"state", "standby"}}}}}});
+        };
+        o.fetch_resource = [this](const std::string& path, std::size_t, std::function<void(bool, std::string)> done) {
+            fetches.push_back(path);
+            done(true, json{{"result", {{"system_info", {{"product_info", {{"serial_number", "SNPLACEHOLDER"}}}}}}}}.dump());
+        };
+    }
+};
+json family_msg(const std::string& cmd, const json& params, const std::string& event_id = "")
+{
+    json p = {{"cmd", cmd}, {"params", params}};
+    if (!event_id.empty()) p["event_id"] = event_id;
+    return json{{"header", {{"id", 1}}}, {"payload", p}};
+}
+const std::vector<std::string> kFamilyNoState = {"sw_SetSubscribeFilter", "sw_UnSubscribeMachineState", "sw_StopMachineStateSubscription",
+                                                 "sw_SystemGetDeviceInfo", "sw_GetCache", "sw_SetCache", "sw_RemoveCache", "sw_UnsubscribeCacheKeys",
+                                                 "sw_UpdateMachineFilamentInfo", "sw_MachineHeartbeat", "sw_exception_query", "sw_create_mqtt_client",
+                                                 "sw_mqtt_connect", "sw_mqtt_disconnect", "sw_mqtt_subscribe", "sw_mqtt_unsubscribe", "sw_mqtt_publish"};
+} // namespace
+
+TEST_CASE("pre-print read-only family: every handler answers for the pinned device and reaches the printer only with reads", "[SSWCP][preprint_profile][read_family]")
+{
+    Profile    h(true, false);
+    ReadHooks  hooks;
+    h.printer->pin = SnapmakerPreprintPin{"192.0.2.10", "7125", "SNPLACEHOLDER"};
+    REQUIRE(h.open(true) != 0);
+    h.bridge = h.make(~std::uint64_t(0), [&](SnapmakerDeviceBridge::Options& o) { hooks.attach(o); });
+    h.printer->forget();
+
+    for (const auto& cmd : kFamilyNoState) {
+        CAPTURE(cmd);
+        const json r = h.call(cmd, json::object());
+        CHECK(is_ok(r));
+    }
+    CHECK(h.call("sw_create_mqtt_client")["data"] == json{{"id", "emu-1"}, {"type", "mqtts"}}); // inert local emulation, as on the Device tab
+
+    const json st = h.call("sw_GetMachineState", {{"objects", {{"print_stats", nullptr}, {"configfile", nullptr}}}});
+    REQUIRE(is_ok(st));
+    CHECK(st["data"]["status"]["print_stats"]["state"] == "standby");
+    CHECK(st["data"]["status"]["configfile"] == json::object()); // not on the object allow-list: asked for, never queried
+    for (const auto& q : hooks.queries) CHECK(q == std::vector<std::string>{"print_stats"});
+    CHECK_FALSE(hooks.queries.empty());
+
+    const json si = h.call("sw_GetMachineSystemInfo");
+    REQUIRE(is_ok(si));
+    CHECK(si["data"]["system_info"]["product_info"]["serial_number"] == "SNPLACEHOLDER");
+    for (const auto& f : hooks.fetches) CHECK(f == "/machine/system_info"); // the one GET the Device tab does for this
+    CHECK_FALSE(hooks.fetches.empty());
+
+    // a subscription: acked, then a push of the state (notify_status_update), never anything but the same query
+    const std::size_t before = h.sent.size();
+    h.bridge->on_script_message(h.good, family_msg("sw_SubscribeMachineState", json::object(), "pre-sub").dump());
+    CHECK(h.sent.size() > before);
+    CHECK(h.bridge->sswcp().subscriber_count("sw_SubscribeMachineState") == 1);
+    CHECK(is_ok(h.call("sw_UnSubscribeMachineState")));
+    CHECK(h.bridge->sswcp().subscriber_count("sw_SubscribeMachineState") == 0);
+
+    CHECK(h.printer->calls.empty());                  // the session's printer interface (pin, state, send, start) was never touched
+    CHECK(h.printer->sends == 0);
+    CHECK(h.printer->starts == 0);
+}
+
+TEST_CASE("pre-print sw_UpdateMachineFilamentInfo and sw_SetCache keep nothing outside this bridge's memory", "[SSWCP][preprint_profile][read_family]")
+{
+    Profile    h(true, false);
+    ReadHooks  hooks;
+    h.printer->pin = SnapmakerPreprintPin{"192.0.2.10", "7125", "SNPLACEHOLDER"};
+    REQUIRE(h.open(true) != 0);
+    h.bridge = h.make(~std::uint64_t(0), [&](SnapmakerDeviceBridge::Options& o) { hooks.attach(o); });
+    h.printer->forget();
+    CHECK(is_ok(h.call("sw_UpdateMachineFilamentInfo", {{"objects", json::array({{{"key", "SNPLACEHOLDER"}, {"value", "[1]"}}})}})));
+    CHECK(h.bridge->filament_info().at("SNPLACEHOLDER") == "[1]");  // in-memory page state, bounded, not written anywhere
+    CHECK(is_ok(h.call("sw_SetCache", {{"key", "k"}, {"value", "v"}})));
+    { const json c = h.call("sw_GetCache", {{"key", "k"}})["data"]; CHECK((c.is_null() || c == json::object())); } // sw_SetCache is not backed by a store at all
+    CHECK(hooks.queries.empty());
+    CHECK(hooks.fetches.empty());
+    CHECK(h.printer->calls.empty());
+}
+
+TEST_CASE("pre-print read-only family answers empty for a stale epoch or a closed context and contacts nothing", "[SSWCP][preprint_profile][read_family]")
+{
+    ReadHooks hooks;
+    auto tweak = [&](SnapmakerDeviceBridge::Options& o) { hooks.attach(o); };
+    auto check_all = [&](Profile& h, SnapmakerDeviceBridge* b) {
+        for (const auto& cmd : kFamilyNoState) {
+            CAPTURE(cmd);
+            const json r = h.call(cmd, cmd == "sw_UpdateMachineFilamentInfo" ? json{{"objects", json::array({{{"key", "k"}, {"value", "v"}}})}} : json::object(), b);
+            CHECK(is_ok(r));
+            if (cmd != "sw_create_mqtt_client")
+                CHECK((r["data"].is_null() || r["data"] == json::object()));
+        }
+        const json st = h.call("sw_GetMachineState", json::object(), b);
+        CHECK(is_ok(st));
+        CHECK(st["data"]["status"] == json::object());
+        const json si = h.call("sw_GetMachineSystemInfo", json::object(), b);
+        CHECK(is_ok(si));
+        CHECK((si["data"].is_null() || si["data"] == json::object()));
+        b->on_script_message(h.good, family_msg("sw_SubscribeMachineState", json::object(), "pre-sub").dump());
+        b->tick();
+        b->tick();
+        b->tick();
+        CHECK(hooks.queries.empty());
+        CHECK(hooks.fetches.empty());
+        CHECK(h.printer->calls.empty());
+        CHECK(b->filament_info().empty());
+    };
+    SECTION("stale epoch") {
+        Profile h;
+        auto stale = h.make(h.epoch + 1, tweak);
+        check_all(h, stale.get());
+    }
+    SECTION("closed context") {
+        Profile h;
+        auto b = h.make(~std::uint64_t(0), tweak);
+        h.session->finish(h.epoch);
+        check_all(h, b.get());
     }
 }
 

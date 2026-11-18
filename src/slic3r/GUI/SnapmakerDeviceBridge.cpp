@@ -383,6 +383,16 @@ SnapmakerDeviceBridge::SnapmakerDeviceBridge(Options options) : m_options(std::m
     register_commands();
 }
 
+bool SnapmakerDeviceBridge::preprint_unpinned() const
+{
+    if (!m_options.preprint_session)
+        return false;
+    for (const auto& d : current_devices())
+        if (d.connected)
+            return false;
+    return true;
+}
+
 // The host's machines with sn filled from the serial read off the machine, once known (dev_id until then).
 std::vector<SnapmakerDeviceInfo> SnapmakerDeviceBridge::current_devices() const
 {
@@ -552,7 +562,7 @@ void SnapmakerDeviceBridge::fetch_system_info(const std::string& dev_id, std::fu
         for (auto& cb : cbs) cb();
         refresh_devices(); // the record's sn may just have changed: tell subscribers
     };
-    if (!m_options.fetch_resource) {
+    if (!m_options.fetch_resource || preprint_unpinned()) {
         finish(false, nlohmann::json::object());
         return;
     }
@@ -645,7 +655,7 @@ SnapmakerDeviceBridge::Selection SnapmakerDeviceBridge::select_objects(const nlo
 
 void SnapmakerDeviceBridge::run_query(const std::vector<std::string>& objects, std::function<void(bool, nlohmann::json)> done)
 {
-    if (!m_options.query_state) {
+    if (!m_options.query_state || preprint_unpinned()) { // pre-print: never query for a stale epoch or a closed context
         done(false, nlohmann::json::object());
         return;
     }
@@ -725,7 +735,7 @@ void SnapmakerDeviceBridge::abandon_state_query()
 
 void SnapmakerDeviceBridge::push_state(bool force)
 {
-    if (m_closed || !m_active || m_sswcp.subscriber_count("sw_SubscribeMachineState") == 0)
+    if (m_closed || !m_active || m_sswcp.subscriber_count("sw_SubscribeMachineState") == 0 || preprint_unpinned())
         return;
     if (force)
         m_force_push = true; // a new subscriber: the next completed query pushes even if nothing changed
@@ -874,6 +884,14 @@ void SnapmakerDeviceBridge::register_preprint_commands()
     m_sswcp.register_command("sw_SetFilamentMappingComplete", finish, false);
     // event 1 (CustomFlowRegroup) would open Snapmaker's filament-group dialog: ignored; the page's finish just closes the context.
     m_sswcp.register_command("sw_FinishFilamentMapping", finish, false);
+    // #137 (ADR 0010 amendment 2026-11-17): the read-only family, each handler guarded by the pinned printer of this epoch. Classification
+    // (a) own state only: sw_Set/Get/RemoveCache, sw_UnsubscribeCacheKeys, sw_SystemGetDeviceInfo, sw_MachineHeartbeat, sw_exception_query
+    // (stubs, nothing stored), sw_create_mqtt_client / sw_mqtt_* (inert emulation), sw_SetSubscribeFilter, sw_UnSubscribeMachineState and
+    // sw_StopMachineStateSubscription (local subscription bookkeeping), sw_UpdateMachineFilamentInfo (bounded in-memory map, never written out). (b) a printer read the Device tab already does:
+    // sw_GetMachineState / sw_SubscribeMachineState (printer.objects.query via Options::query_state, allow-listed objects) and
+    // sw_GetMachineSystemInfo (GET /machine/system_info via Options::fetch_resource), pinned printer only. The PreprintDialog sets neither
+    // option, so today they answer the empty state / {}. (c) writes: none of these. sw_FileGetStatus is NOT in this family.
+    register_read_only_family(true);
 }
 
 void SnapmakerDeviceBridge::fire_preprint_done(bool started)
@@ -897,6 +915,139 @@ void SnapmakerDeviceBridge::preprint_finish(bool from_handler)
     };
     if (m_options.preprint_post) m_options.preprint_post(std::move(fn));
     else m_preprint_queue.push_back(std::move(fn));
+}
+
+// The read-only family (#137): machine state, the cache / MQTT / filament-info stubs, system info. Shared by the Device tab and (ADR 0010
+// amendment 2026-11-17) the pre-print page. On the pre-print profile every handler first requires the pinned printer of THIS bridge's epoch;
+// a stale epoch or closed context is answered empty without running the handler, so nothing is stored, queried or fetched for it.
+void SnapmakerDeviceBridge::register_read_only_family(bool preprint)
+{
+    auto reg = [this, preprint](const char* name, std::function<void(SSWCP_Instance&)> handler, bool subscribe) {
+        if (!preprint) {
+            m_sswcp.register_command(name, std::move(handler), subscribe);
+            return;
+        }
+        m_sswcp.register_command(
+            name,
+            [this, handler = std::move(handler)](SSWCP_Instance& i) {
+                if (preprint_unpinned()) {
+                    if ((i.cmd() == "sw_GetMachineState" || i.cmd() == "sw_SubscribeMachineState") && i.event_id().empty())
+                        i.reply_ok(snapmaker_empty_machine_state());
+                    else
+                        i.reply_ok();
+                    return;
+                }
+                handler(i);
+            },
+            subscribe);
+    };
+    // --- machine state: the Moonraker printer.objects.query result, UNWRAPPED ({eventtime, status}) ---
+    // GetMachineState and an event_id-less SubscribeMachineState share ONE Moonraker query at a time (request_state);
+    // objects outside the allow-list are never queried and come back as empty entries.
+    auto one_state = [this](SSWCP_Instance& i) {
+        const Selection sel = select_objects(i.params());
+        if (sel.allowed.empty()) { // everything asked for was refused (or nothing usable): no query at all
+            i.reply_ok(snapmaker_state_reply(false, nlohmann::json::object(), sel.rejected));
+            return;
+        }
+        auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+        auto alive = m_alive;
+        // The reply may come later (the query runs off-thread); the dispatcher keeps the instance until it is sent.
+        request_state(sel.allowed, [this, weak, alive, rejected = sel.rejected](bool ok, nlohmann::json result) {
+            if (!*alive)
+                return;
+            // A failed query is answered with the last good state of this machine, not an empty one: the page applies a
+            // reply as the whole state, and an empty one showed "idle" and bed 0/0 during a print. The next push corrects it.
+            if (!ok && m_last_good_state.is_object() && m_last_good_state.contains("status")) {
+                ok     = true;
+                result = m_last_good_state;
+            }
+            if (auto inst = weak.lock())
+                inst->reply_ok(snapmaker_state_reply(ok, std::move(result), rejected));
+        });
+    };
+    reg("sw_GetMachineState", one_state, false);
+    reg(
+        "sw_SubscribeMachineState",
+        [this, one_state](SSWCP_Instance& i) {
+            if (i.event_id().empty()) { // nothing to push to: behave like one GetMachineState
+                one_state(i);
+                return;
+            }
+            m_state_objects = select_objects(i.params()).allowed;
+            i.reply_ok(); // the ack went out in process(); this registers the subscription
+            push_state(true);
+        },
+        true);
+    reg(
+        "sw_SetSubscribeFilter",
+        [this](SSWCP_Instance& i) {
+            const Selection sel = select_objects(i.params());
+            if (sel.requested)
+                m_state_objects = sel.allowed;
+            i.reply_ok();
+        },
+        false);
+    auto unsubscribe = [this](SSWCP_Instance& i) {
+        m_sswcp.drop_subscriptions("sw_SubscribeMachineState");
+        i.reply_ok();
+    };
+    reg("sw_UnSubscribeMachineState", unsubscribe, false);
+    reg("sw_StopMachineStateSubscription", unsubscribe, false);
+
+    // --- the page's MQTT surface, answered locally; no network, no keys (bridge-level emulation) ---
+    reg(
+        "sw_create_mqtt_client", [](SSWCP_Instance& i) { i.reply_ok(nlohmann::json{{"id", "emu-1"}, {"type", "mqtts"}}); }, false);
+    for (const char* cmd : {"sw_mqtt_connect", "sw_mqtt_disconnect", "sw_mqtt_subscribe", "sw_mqtt_unsubscribe", "sw_mqtt_publish"})
+        reg(cmd, [](SSWCP_Instance& i) { i.reply_ok(); }, false);
+
+    // --- the page tells the host the filaments per sn; stored, not used yet ---
+    reg(
+        "sw_UpdateMachineFilamentInfo",
+        [this](SSWCP_Instance& i) {
+            const nlohmann::json& p = i.params();
+            if (p.is_object() && p.contains("objects") && p["objects"].is_array()) {
+                for (const auto& o : p["objects"]) {
+                    if (!o.is_object() || !o.contains("key") || !o["key"].is_string() || !o.contains("value"))
+                        continue;
+                    const std::string key = o["key"].get<std::string>();
+                    std::string       val = o["value"].is_string() ? o["value"].get<std::string>() : o["value"].dump();
+                    if (key.empty() || key.size() > 128 || val.size() > 65536)
+                        continue;
+                    if (m_filament_info.size() >= 16 && m_filament_info.count(key) == 0)
+                        continue;
+                    m_filament_info[key] = std::move(val);
+                }
+            }
+            i.reply_ok();
+        },
+        false);
+
+    // --- machine.system_info: the page reads product_info.serial_number from it and must find the sn of our records ---
+    reg(
+        "sw_GetMachineSystemInfo",
+        [this](SSWCP_Instance& i) {
+            std::string dev_id;
+            for (const auto& d : current_devices())
+                if (d.connected) { dev_id = d.dev_id; break; }
+            if (dev_id.empty()) { i.reply_ok(); return; }
+            auto weak = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
+            auto alive = m_alive;
+            fetch_system_info(dev_id, [this, weak, alive, dev_id] {
+                if (!*alive) return;
+                if (auto inst = weak.lock()) {
+                    auto it = m_system_info.find(dev_id);
+                    inst->reply_ok(it != m_system_info.end() ? it->second : nlohmann::json::object());
+                }
+            });
+        },
+        false);
+
+    // --- read-only commands the harness showed the page accepts `{}` for (contract doc 7.4). The cache family is not
+    // backed by a store: the page re-derives what it writes. ---
+    for (const char* cmd : {"sw_SystemGetDeviceInfo", "sw_exception_query", "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache",
+                            "sw_UnsubscribeCacheKeys"})
+        reg(cmd, [](SSWCP_Instance& i) { i.reply_ok(); }, false);
 }
 
 void SnapmakerDeviceBridge::register_commands()
@@ -984,107 +1135,7 @@ void SnapmakerDeviceBridge::register_commands()
         },
         false);
 
-    // --- machine state: the Moonraker printer.objects.query result, UNWRAPPED ({eventtime, status}) ---
-    // GetMachineState and an event_id-less SubscribeMachineState share ONE Moonraker query at a time (request_state);
-    // objects outside the allow-list are never queried and come back as empty entries.
-    auto one_state = [this](SSWCP_Instance& i) {
-        const Selection sel = select_objects(i.params());
-        if (sel.allowed.empty()) { // everything asked for was refused (or nothing usable): no query at all
-            i.reply_ok(snapmaker_state_reply(false, nlohmann::json::object(), sel.rejected));
-            return;
-        }
-        auto weak  = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
-        auto alive = m_alive;
-        // The reply may come later (the query runs off-thread); the dispatcher keeps the instance until it is sent.
-        request_state(sel.allowed, [this, weak, alive, rejected = sel.rejected](bool ok, nlohmann::json result) {
-            if (!*alive)
-                return;
-            // A failed query is answered with the last good state of this machine, not an empty one: the page applies a
-            // reply as the whole state, and an empty one showed "idle" and bed 0/0 during a print. The next push corrects it.
-            if (!ok && m_last_good_state.is_object() && m_last_good_state.contains("status")) {
-                ok     = true;
-                result = m_last_good_state;
-            }
-            if (auto inst = weak.lock())
-                inst->reply_ok(snapmaker_state_reply(ok, std::move(result), rejected));
-        });
-    };
-    m_sswcp.register_command("sw_GetMachineState", one_state, false);
-    m_sswcp.register_command(
-        "sw_SubscribeMachineState",
-        [this, one_state](SSWCP_Instance& i) {
-            if (i.event_id().empty()) { // nothing to push to: behave like one GetMachineState
-                one_state(i);
-                return;
-            }
-            m_state_objects = select_objects(i.params()).allowed;
-            i.reply_ok(); // the ack went out in process(); this registers the subscription
-            push_state(true);
-        },
-        true);
-    m_sswcp.register_command(
-        "sw_SetSubscribeFilter",
-        [this](SSWCP_Instance& i) {
-            const Selection sel = select_objects(i.params());
-            if (sel.requested)
-                m_state_objects = sel.allowed;
-            i.reply_ok();
-        },
-        false);
-    auto unsubscribe = [this](SSWCP_Instance& i) {
-        m_sswcp.drop_subscriptions("sw_SubscribeMachineState");
-        i.reply_ok();
-    };
-    m_sswcp.register_command("sw_UnSubscribeMachineState", unsubscribe, false);
-    m_sswcp.register_command("sw_StopMachineStateSubscription", unsubscribe, false);
-
-    // --- the page's MQTT surface, answered locally; no network, no keys (bridge-level emulation) ---
-    m_sswcp.register_command(
-        "sw_create_mqtt_client", [](SSWCP_Instance& i) { i.reply_ok(nlohmann::json{{"id", "emu-1"}, {"type", "mqtts"}}); }, false);
-    for (const char* cmd : {"sw_mqtt_connect", "sw_mqtt_disconnect", "sw_mqtt_subscribe", "sw_mqtt_unsubscribe", "sw_mqtt_publish"})
-        m_sswcp.register_command(cmd, [](SSWCP_Instance& i) { i.reply_ok(); }, false);
-
-    // --- the page tells the host the filaments per sn; stored, not used yet ---
-    m_sswcp.register_command(
-        "sw_UpdateMachineFilamentInfo",
-        [this](SSWCP_Instance& i) {
-            const nlohmann::json& p = i.params();
-            if (p.is_object() && p.contains("objects") && p["objects"].is_array()) {
-                for (const auto& o : p["objects"]) {
-                    if (!o.is_object() || !o.contains("key") || !o["key"].is_string() || !o.contains("value"))
-                        continue;
-                    const std::string key = o["key"].get<std::string>();
-                    std::string       val = o["value"].is_string() ? o["value"].get<std::string>() : o["value"].dump();
-                    if (key.empty() || key.size() > 128 || val.size() > 65536)
-                        continue;
-                    if (m_filament_info.size() >= 16 && m_filament_info.count(key) == 0)
-                        continue;
-                    m_filament_info[key] = std::move(val);
-                }
-            }
-            i.reply_ok();
-        },
-        false);
-
-    // --- machine.system_info: the page reads product_info.serial_number from it and must find the sn of our records ---
-    m_sswcp.register_command(
-        "sw_GetMachineSystemInfo",
-        [this](SSWCP_Instance& i) {
-            std::string dev_id;
-            for (const auto& d : current_devices())
-                if (d.connected) { dev_id = d.dev_id; break; }
-            if (dev_id.empty()) { i.reply_ok(); return; }
-            auto weak = std::weak_ptr<SSWCP_Instance>(i.shared_from_this());
-            auto alive = m_alive;
-            fetch_system_info(dev_id, [this, weak, alive, dev_id] {
-                if (!*alive) return;
-                if (auto inst = weak.lock()) {
-                    auto it = m_system_info.find(dev_id);
-                    inst->reply_ok(it != m_system_info.end() ? it->second : nlohmann::json::object());
-                }
-            });
-        },
-        false);
+    register_read_only_family(false);
 
     // --- camera preview: the page asks the machine to start/stop its monitor stream, then loads the snapshot itself from the
     // machine (the page server's CSP carries that one origin). Timelapse commands are not part of this and stay denied. ---
@@ -1325,12 +1376,8 @@ void SnapmakerDeviceBridge::register_commands()
         },
         false);
 
-    // --- read-only commands the harness showed the page accepts `{}` for (contract doc 7.4). The cache family is not
-    // backed by a store: the page re-derives what it writes. ---
-    for (const char* cmd : {"sw_SystemGetDeviceInfo", "sw_FileGetStatus", "sw_exception_query",
-                            "sw_MachineHeartbeat", "sw_GetCache", "sw_SetCache", "sw_RemoveCache",
-                            "sw_UnsubscribeCacheKeys"})
-        m_sswcp.register_command(cmd, [](SSWCP_Instance& i) { i.reply_ok(); }, false);
+    // --- sw_FileGetStatus: read-only, `{}` is accepted (contract doc 7.4); denied on the pre-print profile ---
+    m_sswcp.register_command("sw_FileGetStatus", [](SSWCP_Instance& i) { i.reply_ok(); }, false);
 }
 
 bool SnapmakerDeviceBridge::on_script_message(const std::string& page_url, const std::string& message)
