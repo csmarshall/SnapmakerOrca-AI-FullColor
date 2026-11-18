@@ -6,6 +6,7 @@
 // guard cannot disagree with the transfer about where a request goes.
 
 #include <string>
+#include <vector>
 
 #include <curl/curl.h>
 
@@ -22,6 +23,11 @@ struct ParsedUrl
 // Parse with curl_url (CURLU_GUESS_SCHEME, like CURLOPT_URL). False when curl rejects the URL, it holds control characters, or the
 // scheme is not http / https: such a request is blocked while the guard is active.
 bool parse_url(const std::string &url, ParsedUrl &out);
+
+// Default TLS verification for a request to `url` (#144): false (unverified, self-signed printers) only when curl parses the URL and its
+// host is local or in `allowed`; true for every public host and, failing closed, for a URL curl rejects. Independent of the switch.
+bool default_tls_verify(const std::string &url, const std::vector<std::string> &allowed);
+bool default_tls_verify(const std::string &url); // with user_allowed_hosts()
 
 // Switch ON: always true, checked_url is left as given. Switch OFF: true only when curl's parse succeeds and the host curl will connect to
 // is local or user-configured; checked_url receives curl's normalised URL (set CURLOPT_URL from it).

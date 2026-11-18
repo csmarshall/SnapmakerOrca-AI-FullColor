@@ -56,6 +56,7 @@ protected:
     std::string m_apikey;
     std::string m_cafile;
     bool        m_ssl_revoke_best_effort;
+    bool        m_ssl_verify;
 
     void set_auth(Http &http) const;
     std::string make_url(const std::string &path) const;

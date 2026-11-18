@@ -39,6 +39,7 @@ private:
     std::string host;
     std::string apikey;
     std::string cafile;
+    bool        ssl_verify;
     std::string port;
 
     void set_auth(Http &http) const;

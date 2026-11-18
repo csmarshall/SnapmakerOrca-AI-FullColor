@@ -309,6 +309,7 @@ bool CrealityPrintAgent::fetch_filament_info(std::string dev_id, FilamentSyncMod
     cfg.set_key_value("printhost_port",              new ConfigOptionString(""));
     cfg.set_key_value("printhost_apikey",            new ConfigOptionString(device_info.api_key));
     cfg.set_key_value("printhost_ssl_ignore_revoke", new ConfigOptionBool(false));
+    cfg.set_key_value("printhost_ssl_verify",        new ConfigOptionBool(false));
 
     CrealityPrint             host(&cfg);
     const CrealityPrinterInfo info = host.read_printer_info();

@@ -65,6 +65,19 @@ bool parse_url(const std::string &url, ParsedUrl &out)
     return true;
 }
 
+bool default_tls_verify(const std::string &url, const std::vector<std::string> &allowed)
+{
+    ParsedUrl p;
+    if (!parse_url(url, p))
+        return true;
+    return !is_local_network_host(p.host, allowed);
+}
+
+bool default_tls_verify(const std::string &url)
+{
+    return default_tls_verify(url, user_allowed_hosts());
+}
+
 bool request_allowed(const std::string &url, std::string *checked_url)
 {
     if (internet_access_allowed()) {

@@ -36,6 +36,7 @@ Repetier::Repetier(DynamicPrintConfig *config) :
     host(config->opt_string("print_host")),
     apikey(config->opt_string("printhost_apikey")),
     cafile(config->opt_string("printhost_cafile")),
+    ssl_verify(printhost_ssl_verify(config)),
     port(config->opt_string("printhost_port"))
 {}
 
@@ -186,9 +187,7 @@ void Repetier::set_auth(Http &http) const
 {
     http.header("X-Api-Key", apikey);
 
-    if (! cafile.empty()) {
-        http.ca_file(cafile);
-    }
+    http.printer_tls(cafile, ssl_verify);
 }
 
 std::string Repetier::make_url(const std::string &path) const

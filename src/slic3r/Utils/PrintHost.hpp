@@ -57,6 +57,9 @@ struct PrintHostUpload
     }
 };
 
+// The per-printer "verify TLS" option (printhost_ssl_verify, #144). False when the config does not carry the key (hand-built configs).
+bool printhost_ssl_verify(const DynamicPrintConfig *config);
+
 class PrintHost
 {
 public:

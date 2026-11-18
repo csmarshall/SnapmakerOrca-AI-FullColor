@@ -39,6 +39,7 @@ private:
     std::string host;
     std::string apikey;
     std::string cafile;
+    bool        ssl_verify;
 
     void set_auth(Http &http) const;
     std::string make_url(const std::string &path) const;

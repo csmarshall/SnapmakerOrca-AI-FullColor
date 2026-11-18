@@ -169,6 +169,17 @@ struct Http::priv
 	static size_t form_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp);
     static size_t headers_cb(char *buffer, size_t size, size_t nitems, void *userp);
 
+	bool tls_verifying = false;
+	// The ONE place the verification options are set: used by the constructor default and by Http::tls_verify().
+	void set_tls_verify(bool enable)
+	{
+		tls_verifying = enable;
+		::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, enable ? 1L : 0L);
+		::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, enable ? 2L : 0L);
+		if (enable)
+			::curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+	}
+
 	void set_timeout_connect(long timeout);
     void set_timeout_max(long timeout);
 	void form_add_file(const char *name, const fs::path &path, const char* filename, boost::filesystem::ifstream::off_type offset, size_t length);
@@ -221,8 +232,9 @@ Http::priv::priv(const std::string &url)
 #ifdef __WINDOWS__
 	::curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_MAX_TLSv1_2);
 #endif
-	::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-	::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+	// Default by host class (#144, ADR 0019 amendment): non-local hosts (and anything curl cannot parse) verify the certificate against the
+	// native CA store, local / user-configured hosts stay unverified for self-signed printers. Http::tls_verify() called later overrides either way.
+	set_tls_verify(NetworkGuard::default_tls_verify(url));
 
 	// https://everything.curl.dev/http/post/expect100.html
 	// remove the Expect: header, it will add a second delay to each request,
@@ -716,11 +728,22 @@ Http& Http::ca_file(const std::string &name)
 
 Http& Http::tls_verify(bool enable)
 {
-	if (p) {
-		::curl_easy_setopt(p->curl, CURLOPT_SSL_VERIFYPEER, enable ? 1L : 0L);
-		::curl_easy_setopt(p->curl, CURLOPT_SSL_VERIFYHOST, enable ? 2L : 0L);
-		::curl_easy_setopt(p->curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
-	}
+	if (p)
+		p->set_tls_verify(enable);
+	return *this;
+}
+
+bool Http::tls_verify_enabled() const
+{
+	return p && p->tls_verifying;
+}
+
+Http& Http::printer_tls(const std::string &cafile, bool verify)
+{
+	if (!cafile.empty())
+		ca_file(cafile);
+	if (verify)
+		tls_verify(true);
 	return *this;
 }
 

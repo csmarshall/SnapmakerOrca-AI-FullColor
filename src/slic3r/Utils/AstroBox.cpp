@@ -29,7 +29,8 @@ namespace Slic3r {
 AstroBox::AstroBox(DynamicPrintConfig *config) :
     host(config->opt_string("print_host")),
     apikey(config->opt_string("printhost_apikey")),
-    cafile(config->opt_string("printhost_cafile"))
+    cafile(config->opt_string("printhost_cafile")),
+    ssl_verify(printhost_ssl_verify(config))
 {}
 
 const char* AstroBox::get_name() const { return "AstroBox"; }
@@ -155,9 +156,7 @@ void AstroBox::set_auth(Http &http) const
 {
     http.header("X-Api-Key", apikey);
 
-    if (! cafile.empty()) {
-        http.ca_file(cafile);
-    }
+    http.printer_tls(cafile, ssl_verify);
 }
 
 std::string AstroBox::make_url(const std::string &path) const

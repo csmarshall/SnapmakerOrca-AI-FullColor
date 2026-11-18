@@ -452,6 +452,10 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
         m_optgroup->append_line(line);
     }
 
+    // #144: per-printer TLS verification (LAN hosts are unverified by default, public hosts are always verified)
+    option = m_optgroup->get_option("printhost_ssl_verify");
+    m_optgroup->append_single_option_line(option);
+
     for (const std::string& opt_key : std::vector<std::string>{ "printhost_user", "printhost_password" }) {        
         option = m_optgroup->get_option(opt_key);
         option.opt.width = Field::def_width_wider();
@@ -608,6 +612,7 @@ void PhysicalPrinterDialog::update(bool printer_change)
         m_optgroup->hide_field("bbl_use_print_host_webui");
         m_optgroup->enable_field("printhost_cafile");
         m_optgroup->enable_field("printhost_ssl_ignore_revoke");
+        m_optgroup->enable_field("printhost_ssl_verify");
         if (m_printhost_cafile_browse_btn) { m_printhost_cafile_browse_btn->Enable(); }
 
         // hide pre-configured address, in case user switched to a different host type
@@ -685,6 +690,7 @@ void PhysicalPrinterDialog::update(bool printer_change)
                 m_optgroup->hide_field("printhost_apikey");
                 m_optgroup->disable_field("printhost_cafile");
                 m_optgroup->disable_field("printhost_ssl_ignore_revoke");
+                m_optgroup->disable_field("printhost_ssl_verify");
                 if (m_printhost_cafile_browse_btn)
                     m_printhost_cafile_browse_btn->Disable();
             } else if (opt->value == ht3DPrinterOS) {

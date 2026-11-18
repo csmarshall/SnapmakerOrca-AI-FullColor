@@ -107,6 +107,8 @@ TEST_CASE("NetworkGuard: the host the guard checks is the host curl reports, for
         std::string checked;
         const bool allowed = NetworkGuard::request_allowed(url, &checked);
         CHECK(allowed == r.allowed);
+        // #144: the TLS default is the exact complement (local = unverified, everything else incl. unparsable = verified)
+        CHECK(NetworkGuard::default_tls_verify(url) == !r.allowed);
         if (parsed && url.find('\0') == std::string::npos) {
             // the host the guard classified is the host libcurl reports for the same input
             CHECK(p.host == curl_host(url));
@@ -252,4 +254,49 @@ TEST_CASE("NetworkGuard: a local-looking name that resolves to a public address 
     CHECK(guard.blocked_address == "2606:4700::1111");
     curl_slist_free_all(resolve);
     curl_easy_cleanup(curl);
+}
+
+// ---- #144: TLS verification default by host class ----
+
+TEST_CASE("default_tls_verify: public hosts verify, LAN and local names do not, unparsable fails closed", "[NetworkGuard][Http][TlsVerify]")
+{
+    NetworkGuard::set_user_allowed_hosts({});
+    for (const char *url : {"https://example.com/", "https://api.github.com/x", "http://8.8.8.8/", "https://[2001:4860:4860::8888]/", "evil.com",
+                            "http://192.168.1.1@evil.com/"})
+        CHECK(NetworkGuard::default_tls_verify(url));
+    for (const char *url : {"https://192.168.1.50/", "https://10.1.2.3:8443/", "https://printer/", "https://u1.local/", "https://u1.lan/",
+                            "http://127.0.0.1:7125/", "https://localhost/", "https://[::1]/", "https://[fe80::1]/", "https://172.16.0.9/"})
+        CHECK_FALSE(NetworkGuard::default_tls_verify(url));
+    for (const char *url : {"", "http://", "ftp://example.com/", "http://exa mple.com/"})
+        CHECK(NetworkGuard::default_tls_verify(url));
+}
+
+TEST_CASE("default_tls_verify: user-allowed hosts stay unverified", "[NetworkGuard][Http][TlsVerify]")
+{
+    CHECK(NetworkGuard::default_tls_verify("https://printer.example.com/", {}));
+    CHECK_FALSE(NetworkGuard::default_tls_verify("https://printer.example.com/", {"printer.example.com"}));
+    CHECK_FALSE(NetworkGuard::default_tls_verify("https://printer.example.com/x", {"https://printer.example.com:7125"}));
+    CHECK(NetworkGuard::default_tls_verify("https://other.example.com/", {"printer.example.com"}));
+    {
+        GuardOff off({"printer.example.com"});
+        CHECK_FALSE(NetworkGuard::default_tls_verify("https://printer.example.com/"));
+    }
+}
+
+// The constructor applies the default, an explicit tls_verify() wins, printer_tls() is the per-printer switch. No socket is opened.
+TEST_CASE("Http: constructor TLS default follows the host class and tls_verify() overrides it", "[NetworkGuard][Http][TlsVerify]")
+{
+    NetworkGuard::set_user_allowed_hosts({});
+    CHECK(Http::get("https://example.com/").tls_verify_enabled());
+    CHECK_FALSE(Http::get("https://192.168.1.50/").tls_verify_enabled());
+    CHECK_FALSE(Http::get("http://printer.local:7125/").tls_verify_enabled());
+    CHECK(Http::get("not a url ://").tls_verify_enabled());
+
+    CHECK_FALSE(Http::get("https://example.com/").tls_verify(false).tls_verify_enabled());
+    CHECK(Http::get("https://192.168.1.50/").tls_verify(true).tls_verify_enabled());
+
+    // printhost_ssl_verify on: LAN host verifies; off: the host-class default stays
+    CHECK(Http::get("https://192.168.1.50/").printer_tls("", true).tls_verify_enabled());
+    CHECK_FALSE(Http::get("https://192.168.1.50/").printer_tls("", false).tls_verify_enabled());
+    CHECK(Http::get("https://example.com/").printer_tls("", false).tls_verify_enabled());
 }

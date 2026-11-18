@@ -53,6 +53,11 @@ using Slic3r::GUI::PrintHostQueueDialog;
 
 namespace Slic3r {
 
+bool printhost_ssl_verify(const DynamicPrintConfig *config)
+{
+    return config != nullptr && config->has("printhost_ssl_verify") && config->opt_bool("printhost_ssl_verify");
+}
+
 
 PrintHost::~PrintHost() {}
 

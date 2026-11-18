@@ -26,6 +26,7 @@ Moonraker::Moonraker(DynamicPrintConfig *config)
     , m_apikey(config->opt_string("printhost_apikey"))
     , m_cafile(config->opt_string("printhost_cafile"))
     , m_ssl_revoke_best_effort(config->opt_bool("printhost_ssl_ignore_revoke"))
+    , m_ssl_verify(printhost_ssl_verify(config))
 {}
 
 const char* Moonraker::get_name() const { return "Moonraker"; }
@@ -54,8 +55,7 @@ void Moonraker::set_auth(Http &http) const
 {
     if (!m_apikey.empty())
         http.header("X-Api-Key", m_apikey);
-    if (!m_cafile.empty())
-        http.ca_file(m_cafile);
+    http.printer_tls(m_cafile, m_ssl_verify);
 }
 
 bool Moonraker::test(wxString &msg) const

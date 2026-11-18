@@ -130,10 +130,15 @@ public:
 	// specifically, this is supported with OpenSSL and NOT supported with Windows and OS X native certificate store.
 	// See also ca_file_supported().
 	Http& ca_file(const std::string &filename);
-	// Enables TLS certificate verification (peer + hostname). Off by default in the
-	// shared client for compatibility with self-signed print hosts; opt in for any
-	// request carrying authentication credentials or sensitive user data.
+	// TLS certificate verification (peer + hostname, native CA store). The default is chosen by host class when the request is
+	// constructed (#144, ADR 0019 amendment 2026-11-18): verified for non-local hosts and for URLs curl cannot parse (fail closed),
+	// unverified for local / LAN / user-configured hosts (self-signed print hosts). An explicit call overrides the default either way.
 	Http& tls_verify(bool enable);
+	// What the request will do (test / diagnostics; reads the state tls_verify() and the constructor default set).
+	bool tls_verify_enabled() const;
+	// The per-printer TLS settings in one call: ca_file(cafile) when non-empty, and tls_verify(true) when `verify` (the printhost_ssl_verify
+	// option). `verify` false changes nothing, so the host-class default stays.
+	Http& printer_tls(const std::string &cafile, bool verify);
 	// Bypass every proxy (environment included) for this request: CURLOPT_NOPROXY "*". For LAN-only servers.
 	Http& no_proxy(bool enable);
 

@@ -1170,6 +1170,13 @@ void PrintConfigDef::init_common_params()
 
     // Options used by physical printers
 
+    def = this->add("printhost_ssl_verify", coBool);
+    def->label = L("Verify HTTPS certificate");
+    def->tooltip = L("Verify the printer's TLS certificate. Leave off for printers with self-signed certificates.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("preset_names", coStrings);
     def->label = L("Printer preset names");
     //def->tooltip = L("Names of presets related to the physical printer.");
