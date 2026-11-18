@@ -9469,3 +9469,81 @@ TEST_CASE("filament_is_high_temperature is carried by filament presets and the f
     REQUIRE(full.option<ConfigOptionBools>("filament_is_high_temperature") != nullptr);
     CHECK(full.option<ConfigOptionBools>("filament_is_high_temperature")->values.size() == 2);
 }
+
+// #143: a project saved by an older app lacks an option added since. The GUI lays the file over the full defaults, so the option reads as its
+// DEFAULT, and the project must instead take the value of the system printer preset it names. Real Snapmaker U1 profiles, a config built the
+// way the GUI builds it (defaults + the file's keys). NOT exercised: a real 2.4.x .3mf read from disk.
+namespace {
+struct U1ProjectFixture
+{
+    PresetBundle library;
+    PresetBundle bundle;
+    DynamicPrintConfig file_config;       // what the .3mf holds (no gcode_header_product)
+    DynamicPrintConfig gui_config;        // defaults + file_config, as Plater builds it
+
+    U1ProjectFixture()
+    {
+        library.load_vendor_configs_from_json(PROFILES_DIR, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                              ForwardCompatibilitySubstitutionRule::EnableSilent, nullptr, false);
+        bundle.load_vendor_configs_from_json(PROFILES_DIR, "Snapmaker", PresetBundle::LoadSystem,
+                                             ForwardCompatibilitySubstitutionRule::EnableSilent, &library, false);
+        const Preset *u1 = bundle.printers.find_preset("Snapmaker U1 (0.4 nozzle)", false);
+        REQUIRE(u1 != nullptr);
+        REQUIRE(u1->config.opt_string("gcode_header_product") == "Snapmaker Orca");
+        file_config = u1->config;
+        file_config.erase("gcode_header_product");
+        file_config.option<ConfigOptionString>("printer_settings_id", true)->value = u1->name;
+        file_config.option<ConfigOptionStrings>("filament_colour", true)->values = { "#FF0000" };
+        file_config.option<ConfigOptionFloats>("filament_diameter", true)->values = { 1.75 };
+        file_config.option<ConfigOptionInts>("filament_self_index", true)->values = { 1 };
+        file_config.option<ConfigOptionStrings>("filament_extruder_variant", true)->values = { "Direct Drive Standard" };
+        file_config.option<ConfigOptionStrings>("filament_type", true)->values = { "PLA" };
+        gui_config.apply(FullPrintConfig::defaults());
+        gui_config += DynamicPrintConfig(file_config);
+        Preset::normalize(gui_config);
+    }
+};
+} // namespace
+
+TEST_CASE("A project lacking a printer option takes the named system preset's value, not the default (#143)", "[Preset][Bundle][issue143]")
+{
+    U1ProjectFixture f;
+    REQUIRE(f.gui_config.opt_string("gcode_header_product").empty());   // the hole: default
+    f.bundle.load_config_model("old.3mf", std::move(f.gui_config));
+    CHECK(f.bundle.printers.get_edited_preset().config.opt_string("gcode_header_product") == "Snapmaker Orca");
+    CHECK(f.bundle.full_config().opt_string("gcode_header_product") == "Snapmaker Orca");
+}
+
+TEST_CASE("A project's own printer option wins over the system preset (#143)", "[Preset][Bundle][issue143]")
+{
+    U1ProjectFixture f;
+    f.file_config.option<ConfigOptionString>("gcode_header_product", true)->value = "Mine";
+    f.gui_config.option<ConfigOptionString>("gcode_header_product", true)->value = "Mine";
+    // A value the project changed is listed in different_settings_to_system (print, one filament, printer); that is what makes it win.
+    f.gui_config.option<ConfigOptionStrings>("different_settings_to_system", true)->values = { "", "", "gcode_header_product" };
+    f.bundle.load_config_model("new.3mf", std::move(f.gui_config));
+    CHECK(f.bundle.printers.get_edited_preset().config.opt_string("gcode_header_product") == "Mine");
+}
+
+TEST_CASE("A project naming an unknown printer preset keeps the default for an absent option (#143)", "[Preset][Bundle][issue143]")
+{
+    U1ProjectFixture f;
+    f.gui_config.option<ConfigOptionString>("printer_settings_id", true)->value = "No Such Printer";
+    f.bundle.load_config_model("old.3mf", std::move(f.gui_config));
+    CHECK(f.bundle.printers.get_edited_preset().config.opt_string("gcode_header_product").empty());
+}
+
+// #143 root cause: gcode_header_product was added to fdm_U1.json without a Snapmaker.json version bump, so an existing datadir (installed at
+// 02.04.00.25) never refreshed its system profile and every U1 job, project or not, got the empty default. A datadir at or below the last
+// version that lacked the option must be older than the shipped one. Raise the floor whenever the U1 machine profile gains an option.
+TEST_CASE("The shipped Snapmaker profile version is past the last one that lacked gcode_header_product (#143)", "[Preset][Bundle][issue143]")
+{
+    std::ifstream in(std::string(PROFILES_DIR) + "/Snapmaker.json");
+    REQUIRE(in.is_open());
+    const auto j = nlohmann::json::parse(in);
+    const auto shipped = Semver::parse(j.at("version").get<std::string>());
+    const auto lacking = Semver::parse("02.04.00.25");
+    REQUIRE(shipped.has_value());
+    REQUIRE(lacking.has_value());
+    CHECK(*lacking < *shipped);
+}
