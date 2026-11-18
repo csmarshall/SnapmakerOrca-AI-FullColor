@@ -97,6 +97,8 @@ public:
         m_sha256_hex      = epoch ? std::move(o.sha256_hex) : std::string();
         m_size            = epoch ? o.gate.snapshot_size : 0;
         m_started_forwarded = false;
+        m_accepted_script.clear();
+        m_accepted_data = nlohmann::json::object();
         return epoch;
     }
     // A non-modal, user-visible notice (the plater's notification manager, wired in PreprintDialog.cpp). Called on the thread that
@@ -158,6 +160,11 @@ public:
         const std::string script = params["script"].get<std::string>();
         SnapmakerPreprintGcode parsed;
         SnapmakerPreprintResult r;
+        // #142: the page sends the same script up to three times (pre-print configuration, preferences, and again after our -1 on
+        // sw_StartLocalPrint). An exact repeat of the script the printer was already given is answered ok without spending the budget and
+        // WITHOUT forwarding it a second time. Only an exact string match to a script that passed every gate and was forwarded (or
+        // deliberately dropped under #141) counts; anything else takes the full path below.
+        if (auto again = repeat_of_accepted(epoch, script)) return *again;
         // F6: the cheap refusals first, so a page that keeps calling after Closed (or with a bad script) causes no printer traffic.
         if (const auto d = m_gate.precheck_configure(epoch, script); d != SnapmakerPreprintDecision::Allowed)
             return SnapmakerPreprintReply::fail(std::string("refused: ") + snapmaker_preprint_decision_name(d));
@@ -179,9 +186,8 @@ public:
         } catch (...) {
             sent = false;
         }
-        const bool applied = m_gate.confirm(r.ticket, sent);
-        if (!sent) return SnapmakerPreprintReply::fail("refused: " + why);
-        // F2: the printer HAS the script; a context closed meanwhile does not undo that, so this is not "refused".
+        // #142: recorded BEFORE confirm(): the gate only reaches Configured (which repeat_configure_ok() requires) inside confirm(), so a
+        // repeat can never see a gap in which the script is accepted but not yet recorded (it would otherwise be forwarded twice).
         nlohmann::json data = nlohmann::json::object();
         if (dropped) {
             data["dropped_preferences"] = true; // F7: the printer has no preference command: only the map and used lines were sent
@@ -205,6 +211,14 @@ public:
             }
             if (notifier) notifier(snapmaker_identity_map_note());
         }
+        if (sent) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_accepted_script = script;
+            m_accepted_data   = data;
+        }
+        const bool applied = m_gate.confirm(r.ticket, sent);
+        if (!sent) return SnapmakerPreprintReply::fail("refused: " + why);
+        // F2: the printer HAS the script; a context closed meanwhile does not undo that, so this is not "refused".
         if (!applied) data["context_closed"] = true;
         return SnapmakerPreprintReply::success(std::move(data));
     }
@@ -270,6 +284,20 @@ public:
     }
 
 private:
+    // #142: ok again for an exact repeat of the accepted script while the gate is Configured, idle (no request in flight) and live.
+    // Contacts nothing and changes nothing (no budget, no forward, no notice).
+    std::optional<SnapmakerPreprintReply> repeat_of_accepted(std::uint64_t epoch, const std::string& script)
+    {
+        nlohmann::json data;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (epoch == 0 || epoch != m_epoch || m_accepted_script.empty() || script != m_accepted_script) return std::nullopt;
+            data = m_accepted_data;
+        }
+        if (m_gate.repeat_configure_ok(epoch) != SnapmakerPreprintDecision::Allowed) return std::nullopt;
+        BOOST_LOG_TRIVIAL(info) << "SnapmakerPreprintSession: an identical repeat of the accepted script is answered ok and not sent again";
+        return SnapmakerPreprintReply::success(std::move(data));
+    }
     void set_epoch(std::uint64_t e)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -369,6 +397,8 @@ private:
     std::uint64_t                             m_epoch = 0;
     std::string                               m_capability_path, m_sha256_hex;
     std::uint64_t                             m_size = 0;
+    std::string                               m_accepted_script;   // #142, guarded by m_mutex: the last script that passed the gate and was forwarded/dropped
+    nlohmann::json                            m_accepted_data = nlohmann::json::object(); // its reply data (notes, without context_closed)
     bool                                      m_started_forwarded = false, m_start_forwarding = false;
 };
 

@@ -361,6 +361,15 @@ public:
         }
         return validate_snapmaker_preprint_gcode(script, filaments, extruders).ok ? D::Allowed : D::RefusedInvalid;
     }
+    // #142: Allowed only when a script was already confirmed (state Configured), the epoch is live, nothing is in flight and the context
+    // allows a start. The caller must itself compare the script text against the accepted one; the gate keeps no text. Pure.
+    SnapmakerPreprintDecision repeat_configure_ok(std::uint64_t epoch) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (auto d = state_refusal(epoch, /*start=*/false); d != D::Allowed) return d;
+        if (!m_open.allow_start) return D::RefusedStartDisallowed;
+        return m_state == SnapmakerPreprintState::Configured ? D::Allowed : D::RefusedState;
+    }
     SnapmakerPreprintDecision precheck_start(std::uint64_t epoch, const std::string& filename) const
     {
         std::lock_guard<std::mutex> lock(m_mutex);

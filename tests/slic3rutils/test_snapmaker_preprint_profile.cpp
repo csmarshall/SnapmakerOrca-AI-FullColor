@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -354,12 +355,141 @@ TEST_CASE("pre-print profile: StartLocalPrint answers -1 failure; the page's fal
     REQUIRE(is_ok(h.start()));            // n5 -> printer.print.start
     CHECK(h.printer->sends == 1);
     CHECK(h.printer->starts == 1);
-    // the page's two scripts (a first one, then the forced re-send) are allowed, a third is not
+    // #142: the page's identical re-sends are answered ok but forwarded only once, however many there are
     Profile g;
     CHECK(is_ok(g.gcodes(plural())));
     CHECK(is_ok(g.gcodes(plural())));
-    CHECK(g.gcodes(plural())["code"] == SSWCPCode::Failure);
-    CHECK(g.printer->sends == 2);
+    CHECK(is_ok(g.gcodes(plural())));
+    CHECK(g.printer->sends == 1);
+}
+
+TEST_CASE("pre-print session: an identical repeat of the accepted script is ok without a second forward or budget (#142)", "[SSWCP][preprint_profile]")
+{
+    const std::vector<int> identity = {0, 1};
+    const std::string      identity_script = build_snapmaker_plural_preference_script(identity, {});
+    const auto             no_map_cmds = [](Profile& h) {
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"]   = Known::No;
+        h.printer->known["SET_PRINT_USED_EXTRUDERS"] = Known::No;
+    };
+    SECTION("the real page sequence: script, script, StartLocalPrint -1, script, print.start (identity map dropped, nothing forwarded)") {
+        Profile h;
+        no_map_cmds(h);
+        std::vector<std::string> notices;
+        h.session->set_notifier([&notices](const std::string& m) { notices.push_back(m); });
+        const json a = h.gcodes(identity_script);
+        const json b = h.gcodes(identity_script);
+        CHECK(h.call("sw_StartLocalPrint", {{"type", "local"}, {"path", kFile}, {"options", json::object()}})["code"] == -1);
+        const json c = h.gcodes(identity_script);
+        for (const json* r : {&a, &b, &c}) {
+            CHECK(is_ok(*r));
+            CHECK((*r)["data"]["identity_map_assumed"] == true);
+        }
+        CHECK(h.printer->sends == 0);
+        CHECK(notices.size() == 1); // the user is told once
+        h.printer->forget();
+        CHECK(is_ok(h.start()));
+        CHECK(h.printer->starts == 1);
+        // print.start still passes every gate: a fresh idle read, the pin, the remote size
+        const auto k = h.printer->kinds();
+        CHECK(std::count(k.begin(), k.end(), "state") == 1);
+        CHECK(std::count(k.begin(), k.end(), "size") == 1);
+        CHECK(std::count(k.begin(), k.end(), "pin") >= 1);
+    }
+    SECTION("a forwarded script is forwarded once; its repeats are ok and not sent, even while the printer is busy") {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        h.printer->state = std::string("printing");
+        h.printer->forget();
+        CHECK(is_ok(h.gcodes(plural())));
+        CHECK(is_ok(h.gcodes(plural())));
+        CHECK(h.printer->sends == 1);
+        CHECK(h.printer->calls.empty()); // a repeat contacts nothing
+        CHECK(h.start()["code"] == SSWCPCode::Failure); // a busy printer still refuses the start
+        CHECK(h.printer->starts == 0);
+    }
+    SECTION("a different second script is not a repeat: it takes the budget and is forwarded; a third distinct one is refused") {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        REQUIRE(is_ok(h.gcodes(plural_no_prefs())));
+        CHECK(h.printer->sends == 2);
+        CHECK(h.gcodes(singular())["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 2);
+    }
+    SECTION("the comparison is the exact text: a one-character difference or a different command is not a repeat") {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        std::string edited = plural();
+        edited.back() = edited.back() == '1' ? '0' : '1'; // flips the last preference value
+        CHECK(is_ok(h.gcodes(edited)));                    // validated and sent as a second script, not waved through
+        CHECK(h.printer->sends == 2);
+        CHECK(h.gcodes(plural())["code"] == SSWCPCode::Failure); // the budget is now spent, and the first text is no longer the accepted one
+        CHECK(h.gcodes(plural() + "\nM104 S300")["code"] == SSWCPCode::Failure);
+        CHECK(h.gcodes(plural() + "\n")["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 2);
+    }
+    SECTION("a refused first script is not remembered: nothing counts as accepted") {
+        Profile h;
+        h.printer->send_ok = false;
+        CHECK(h.gcodes(plural())["code"] == SSWCPCode::Failure);
+        CHECK(h.gcodes(plural())["code"] == SSWCPCode::Failure); // the repeat is a real attempt again, not an ok
+        CHECK(h.printer->sends == 2);
+        h.printer->send_ok = true;
+        CHECK(is_ok(h.gcodes(plural())));
+    }
+    SECTION("identity map + unreadable probe on the first script: refused, and its repeat is refused too") {
+        Profile h;
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"] = Known::Unreadable;
+        CHECK(h.gcodes(identity_script)["code"] == SSWCPCode::Failure);
+        CHECK(h.gcodes(identity_script)["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 0);
+    }
+    SECTION("non-identity map + missing command: refused, and a repeat is refused") {
+        Profile h;
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"] = Known::No;
+        CHECK(h.gcodes(plural())["code"] == SSWCPCode::Failure);
+        CHECK(h.gcodes(plural())["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 0);
+    }
+    SECTION("after the start, a repeat is refused like any script") {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        REQUIRE(is_ok(h.start()));
+        CHECK(h.gcodes(plural())["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 1);
+    }
+    SECTION("a reopen forgets the accepted script; a repeat from the old epoch or a closed context is refused") {
+        Profile h;
+        REQUIRE(is_ok(h.gcodes(plural())));
+        const std::uint64_t old_epoch = h.epoch;
+        h.open();
+        CHECK_FALSE(h.session->configure(old_epoch, {{"script", plural()}}).ok);
+        CHECK(h.session->configure(h.epoch, {{"script", plural()}}).ok); // the new epoch remembers nothing: the script is forwarded afresh
+        CHECK(h.printer->sends == 2);
+        REQUIRE(h.session->finish(h.epoch).has_value());
+        CHECK_FALSE(h.session->configure(h.epoch, {{"script", plural()}}).ok);
+        CHECK(h.printer->sends == 2);
+    }
+    SECTION("upload-only: a script is refused, a repeat too") {
+        Profile h(true, false);
+        SnapmakerPreprintSession::Open o;
+        o.gate.printer = h.printer->pin; o.gate.remote_filename = kFile; o.gate.plate_filaments = {0, 1}; o.gate.extruder_count = 4;
+        o.gate.snapshot_size = kSize; o.gate.allow_start = false; o.capability_path = kCap; o.sha256_hex = kSha;
+        std::string err;
+        const std::uint64_t e = h.session->open(o, err);
+        CHECK_FALSE(h.session->configure(e, {{"script", plural()}}).ok);
+        CHECK_FALSE(h.session->configure(e, {{"script", plural()}}).ok);
+        CHECK(h.printer->sends == 0);
+    }
+    SECTION("a repeat arriving while the first is still being forwarded is refused (in flight), not answered ok") {
+        Profile h;
+        std::vector<json> nested;
+        h.nested_ok = true;
+        h.printer->in_send = [&] { nested.push_back(h.gcodes(plural())); };
+        REQUIRE(is_ok(h.gcodes(plural())));
+        REQUIRE(nested.size() == 1);
+        CHECK(nested[0]["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 1);
+    }
 }
 
 TEST_CASE("pre-print profile: a request from an earlier epoch is refused after a reopen", "[SSWCP][preprint_profile]")
@@ -575,7 +705,8 @@ TEST_CASE("pre-print profile: racing threads cannot start twice or configure thr
     CHECK(ok_starts == 1);
     CHECK(h.printer->starts == 1);
     CHECK(ok_configs <= snapmaker_preprint_max_configures);
-    CHECK(h.printer->sends == ok_configs);
+    CHECK(ok_configs >= 1);
+    CHECK(h.printer->sends == 1); // #142: identical repeats are answered ok, never forwarded again
 }
 
 namespace {
