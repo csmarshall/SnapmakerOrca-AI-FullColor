@@ -31,7 +31,7 @@ class PreprintCapabilityStore;
 //    The ONE exception is opt-in: after set_capability_store(), GET /web/flutter_web/cap/<256-bit token>/<name> serves the private snapshot
 //    registered under exactly that path (PreprintCapabilityStore), once, with the session cookie required. That prefix is matched BEFORE the static-bundle lookup, so
 //    nothing under it falls through to the bundle. Without a store it is just another (404) bundle path;
-//  * every response (200, 302, 403, 404, 405, HEAD...) carries the Content-Security-Policy read at start() from
+//  * every response (200, 302, 403, 404, 405, HEAD...) carries the Content-Security-Policy read at start() (the internet-free variant of it while the NetworkGuard switch is OFF) from
 //    flutter_web.csp next to the bundle: default-src 'none', hashes for the bundle's few inline blocks, frame-src 'none',
 //    no unsafe-inline / unsafe-eval. A missing, empty or malformed policy file makes start() fail (fail closed): the server
 //    never serves without a policy;
@@ -72,7 +72,9 @@ public:
     // `extra_query` (e.g. "path=2", the bundle's Device route) is appended after the token and survives the 302 that
     // takes the token out of the URL.
     std::string start_url(const std::string& extra_query = std::string()) const;
-    // The policy in force (empty before a successful start()).
+    // The policy in force NOW (empty before a successful start()): the full policy while NetworkGuard::internet_access_allowed(), else the
+    // variant without internet hosts. Chosen per response, so a preference change applies to the next page load (an already-loaded page keeps
+    // the policy it was served with until it is reloaded).
     const std::string& content_security_policy() const;
 
 private:
@@ -92,6 +94,9 @@ int resolve_within(const boost::filesystem::path& canonical_root, const boost::f
 // Parses a policy file: '#' lines and blank lines are ignored, the rest is joined into one line. Returns "" (refuse) for an
 // empty result, one containing control characters, 'unsafe-inline' / 'unsafe-eval', or longer than 8 KiB.
 std::string parse_csp_file(const std::string& text);
+// The policy for the "internet access OFF" switch (#139 slice 1b): every source that is not a keyword ('self', hashes...), data: or blob:
+// or a LOCAL host (loopback, private ranges) is dropped from every directive; a directive left empty becomes 'none'. Pure.
+std::string csp_without_internet_hosts(const std::string& policy);
 // The policy with `origin` ("http://192.168.1.5", "https://host:8443", no path) added to connect-src and img-src ONLY (no other
 // directive, media-src included, is touched or created), for the camera snapshot. Returns "" for anything that is not a plain
 // http(s) origin.

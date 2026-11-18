@@ -2,6 +2,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include "slic3r/GUI/WebPageServer.hpp"
+#include "libslic3r/NetworkGuard.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
@@ -774,8 +775,18 @@ TEST_CASE("csp_with_extra_origin adds a printer origin to img-src and connect-sr
     CHECK(csp_with_extra_origin("", "http://h").empty());
 }
 
+namespace {
+// Runs a test with the internet switch at a given state and restores the test default (OFF) afterwards.
+struct InternetSwitch
+{
+    explicit InternetSwitch(bool on) { Slic3r::NetworkGuard::set_internet_access_allowed(on); }
+    ~InternetSwitch() { Slic3r::NetworkGuard::set_internet_access_allowed(false); }
+};
+} // namespace
+
 TEST_CASE("the page server serves one extra printer origin, only when valid, and only per page load (#76)", "[WebPageServer][CSP]")
 {
+    InternetSwitch internet_on(true); // these checks are about the full policy; the OFF variant is tested below
     const std::string base = read_policy_file();
     fs::path csp = fs::temp_directory_path() / fs::unique_path("wps-extra-%%%%-%%%%.csp");
     { std::ofstream(csp.string(), std::ios::binary) << base; }

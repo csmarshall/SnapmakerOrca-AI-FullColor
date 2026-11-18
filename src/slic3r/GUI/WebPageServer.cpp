@@ -1,5 +1,6 @@
 #include "WebPageServer.hpp"
 #include "PreprintCapabilityStore.hpp"
+#include "libslic3r/NetworkGuard.hpp"
 #include <cstring>
 #include <regex>
 #include <sstream>
@@ -214,7 +215,10 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
 {
     fs::path                root;           // as given
     fs::path                csp_file;
-    std::string             csp;            // the policy sent on every response; set by start()
+    std::string             csp;            // the full policy; set by start()
+    std::string             csp_offline;    // the same policy without internet hosts (#139 slice 1b); set by start()
+    // The policy for THIS response: chosen by the CURRENT NetworkGuard switch, so a preference change applies to the next response.
+    const std::string&      current_csp() const { return Slic3r::NetworkGuard::internet_access_allowed() ? csp : csp_offline; }
     std::string             extra_origin;   // validated by set_extra_origin(); added to csp by start()
     fs::path                canonical_root; // set by start()
     std::shared_ptr<PreprintCapabilityStore> caps; // opt-in; set before start()
@@ -367,7 +371,7 @@ struct WebPageServer::Impl : std::enable_shared_from_this<WebPageServer::Impl>
             res.set(http::field::cache_control, "no-store");
             res.set("Referrer-Policy", "no-referrer");
             res.set("X-Content-Type-Options", "nosniff");
-            res.set("Content-Security-Policy", impl->csp); // every response shape, not only HTML
+            res.set("Content-Security-Policy", impl->current_csp()); // every response shape, not only HTML
             res.keep_alive(false);
             // No Access-Control-* header is ever added.
         }
@@ -563,6 +567,37 @@ std::string parse_csp_file(const std::string& text)
     return out;
 }
 
+std::string csp_without_internet_hosts(const std::string& policy)
+{
+    std::string out;
+    std::size_t pos = 0;
+    while (pos < policy.size()) {
+        std::size_t semi = policy.find(';', pos);
+        if (semi == std::string::npos) semi = policy.size();
+        const std::string d = policy.substr(pos, semi - pos);
+        pos = semi + 1;
+        std::istringstream words(d);
+        std::string        w, name, kept;
+        bool               first = true, dropped = false;
+        while (words >> w) {
+            if (first) { name = w; first = false; continue; }
+            bool keep = true;
+            if (w.front() == '\'') keep = true;                           // 'self', 'none', 'sha256-...', 'wasm-unsafe-eval'
+            else if (w == "data:" || w == "blob:") keep = true;
+            else {
+                const auto scheme = w.find("://");
+                // "scheme-only" (https:), "*", wildcard hosts and bare hosts have no scheme://: only a local host[:port] survives.
+                keep = scheme != std::string::npos && Slic3r::NetworkGuard::is_local_network_host(w, {});
+            }
+            if (keep) kept += " " + w; else dropped = true;
+        }
+        if (name.empty()) continue;
+        if (dropped && kept.empty()) kept = " 'none'"; // never leave a fetch directive empty (that would mean "allow nothing" only by accident)
+        out += (out.empty() ? "" : "; ") + name + kept;
+    }
+    return out;
+}
+
 std::string csp_with_extra_origin(const std::string& policy, const std::string& origin)
 {
     static const std::regex ok(R"(^https?://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:[0-9]{1,5})?$)");
@@ -613,7 +648,7 @@ bool WebPageServer::set_capability_store(std::shared_ptr<PreprintCapabilityStore
     return true;
 }
 
-const std::string& WebPageServer::content_security_policy() const { return m_impl->csp; }
+const std::string& WebPageServer::content_security_policy() const { return m_impl->current_csp(); }
 
 WebPageServer::~WebPageServer() { stop(); }
 
@@ -636,12 +671,17 @@ bool WebPageServer::start()
             BOOST_LOG_TRIVIAL(error) << "WebPageServer: refusing to start without a valid Content-Security-Policy file: " << m_impl->csp_file.string();
             return false;
         }
+        // The offline variant is derived from the full policy, so the two cannot drift. The extra (printer) origin is LAN and goes to both.
+        m_impl->csp_offline = web_page_server_detail::csp_without_internet_hosts(m_impl->csp);
         if (!m_impl->extra_origin.empty()) {
-            const std::string widened = web_page_server_detail::csp_with_extra_origin(m_impl->csp, m_impl->extra_origin);
-            if (widened.empty())
+            const std::string widened         = web_page_server_detail::csp_with_extra_origin(m_impl->csp, m_impl->extra_origin);
+            const std::string widened_offline = web_page_server_detail::csp_with_extra_origin(m_impl->csp_offline, m_impl->extra_origin);
+            if (widened.empty() || widened_offline.empty())
                 BOOST_LOG_TRIVIAL(warning) << "WebPageServer: extra origin refused, serving the static policy";
-            else
-                m_impl->csp = widened;
+            else {
+                m_impl->csp         = widened;
+                m_impl->csp_offline = widened_offline;
+            }
         }
     }
     try {
