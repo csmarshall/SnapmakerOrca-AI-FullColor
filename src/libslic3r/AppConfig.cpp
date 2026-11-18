@@ -495,6 +495,11 @@ void AppConfig::set_defaults()
         set_bool("spoolman_preset_sync", false);
     }
 
+    // #140: seconds the Spoolman summary stays open before closing itself (0 = never); clamped 0..600 where it is read.
+    if (get("spoolman_summary_seconds").empty()) {
+        set("spoolman_summary_seconds", "30");
+    }
+
     if (get("preset_bundle_auto_update").empty()) {
         set_bool("preset_bundle_auto_update", false);
     }

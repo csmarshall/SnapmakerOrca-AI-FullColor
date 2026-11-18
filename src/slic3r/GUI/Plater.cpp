@@ -188,6 +188,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Spoolman/SpoolmanSummary.hpp"
 #include "SpoolmanSummaryDialog.hpp"
+#include "UiDialogLog.hpp"
 #include "libslic3r/Spoolman/SpoolmanSyncRun.hpp"
 #include "slic3r/Utils/SpoolmanDirect.hpp"
 #include "slic3r/Utils/MoonrakerPrinterAgent.hpp"
@@ -6673,6 +6674,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     // Spoolman sync summary (#95 S8): only collected and shown for a sync started by sync_spoolman_filaments() (#104).
     const bool spoolman_summary_on = p->spoolman_fetch.has_value() && wxGetApp().app_config->get_bool("spoolman_preset_sync"); // #104: only when started by the Spoolman button
     SpoolmanTierReport spoolman_tiers;
+    bool spoolman_summary_shown = false; // #140: the Spoolman summary dialog replaces the small success popup for this sync
     auto n              = wxGetApp().preset_bundle->sync_ams_list(unknowns, !sync_result.direct_sync, sync_result.sync_maps, enable_append, merge_info, sync_color_only,
                                                                   spoolman_summary_on ? &spoolman_tiers : nullptr);
     wxString detail;
@@ -6773,7 +6775,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
                 sync_ams_list(false);
             };
         }
-        SpoolmanSummaryDialog::show_if_needed(this, Spoolman::build_summary(outcome), spoolman_summary_on, std::move(rerun));
+        spoolman_summary_shown = SpoolmanSummaryDialog::show_if_needed(this, Spoolman::build_summary(outcome), spoolman_summary_on, std::move(rerun));
     }
 
     // BBS:Synchronized consumables information
@@ -6893,9 +6895,14 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
             }
         }
     }
+    if (spoolman_summary_shown) {
+        // #140: one popup per sync; the summary stays until closed (or its countdown ends), so the small success popup is skipped.
+        log_ui_dialog("spoolman-summary", "", "event=small-success-popup-suppressed");
+    } else {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "begin pop_finsish_sync_ams_dialog";
     pop_finsish_sync_ams_dialog();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "finish pop_finsish_sync_ams_dialog";
+    }
 }
 
 

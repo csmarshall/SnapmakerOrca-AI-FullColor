@@ -12,7 +12,10 @@
 #include <functional>
 #include <vector>
 
+#include <wx/timer.h>
+
 class wxScrolledWindow;
+class wxStaticText;
 class wxWindow;
 
 namespace Slic3r { namespace GUI {
@@ -32,10 +35,19 @@ protected:
 
 private:
     void set_details_visible(bool visible);
+    // #140 countdown: on_tick runs each second; stop_countdown(reason) cancels it and hides the label and the "Keep open" button.
+    void on_tick();
+    void stop_countdown(const char *reason);
+    void log_event(const std::string &event);
 
     wxScrolledWindow          *m_body = nullptr;
     std::vector<wxWindow *>    m_detail_widgets; // table rows / ignored lines hidden by the Details button
     bool                       m_details_visible = true;
+    wxTimer                    m_timer;                  // 1 s ticks while the countdown runs; stopped before the dialog is destroyed
+    wxStaticText              *m_countdown_label = nullptr;
+    wxWindow                  *m_keep_open       = nullptr;
+    int                        m_remaining       = 0;    // seconds left; 0 with no timer running = no auto-close
+    bool                       m_closing         = false;
 };
 
 }} // namespace Slic3r::GUI

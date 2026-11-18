@@ -10,6 +10,7 @@
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Spoolman/SpoolmanTransport.hpp"
+#include "libslic3r/Spoolman/SpoolmanSummary.hpp"
 #include "libslic3r/Format/DRC.hpp"
 #include <wx/gdicmn.h>
 #include <wx/arrstr.h>
@@ -2487,6 +2488,11 @@ void PreferencesDialog::create_items()
             wxGetApp().app_config->erase("app", "spoolman_reread_answer");
         });
     g_sizer->Add(item_spoolman_reread);
+    // #140: how long the Spoolman summary stays open before closing itself; the dialog shows a countdown and a "Keep open" button.
+    auto item_spoolman_summary_seconds = create_item_spinctrl(_L("Spoolman summary stays open"), "", _L("seconds"),
+        _L("How long the Spoolman sync summary stays open before it closes itself. While it is open it shows a countdown and a \"Keep open\" button. 0 keeps it open until you close it."),
+        "spoolman_summary_seconds", 0, Slic3r::Spoolman::kSummarySecondsMax, [](int) {});
+    g_sizer->Add(item_spoolman_summary_seconds);
 
     //// DEVELOPER > Storage
 

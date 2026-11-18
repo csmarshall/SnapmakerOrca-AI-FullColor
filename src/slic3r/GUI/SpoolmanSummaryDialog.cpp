@@ -4,6 +4,8 @@
 #include "I18N.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/Label.hpp"
+#include "UiDialogLog.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 #include <wx/app.h>
 #include <wx/colour.h>
@@ -29,7 +31,8 @@ wxStaticText *plain_text(wxWindow *parent, const std::string &s, int wrap_width 
 } // namespace
 
 SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::SummaryModel &model, std::function<void()> rerun_as_sync)
-    : DPIDialog(parent, wxID_ANY, _L("Spoolman Sync Summary"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+    : DPIDialog(parent, wxID_ANY, _L("Spoolman Sync Summary"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT),
+      m_timer(this)
 {
     SetFont(wxGetApp().normal_font());
     const bool dark = wxGetApp().dark_mode();
@@ -120,6 +123,14 @@ SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::S
     details->SetStyle(ButtonStyle::Regular, ButtonType::Window);
     auto *close = new Button(this, _L("Close"));
     close->SetStyle(ButtonStyle::Confirm, ButtonType::Window);
+    // #140: countdown label and "Keep open" on the left; both vanish once the countdown stops. Not shown when auto-close is off (0).
+    m_remaining = Spoolman::summary_seconds_from_config(wxGetApp().app_config->get("spoolman_summary_seconds"));
+    m_countdown_label = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    auto *keep_open   = new Button(this, _L("Keep open"));
+    keep_open->SetStyle(ButtonStyle::Regular, ButtonType::Window);
+    m_keep_open = keep_open;
+    buttons->Add(m_countdown_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(12));
+    buttons->Add(keep_open, 0, wxRIGHT, FromDIP(8));
     buttons->AddStretchSpacer();
     if (rerun_as_sync) {
         auto *rerun = new Button(this, _L("Run again as Sync (changes only)"));
@@ -127,6 +138,8 @@ SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::S
         buttons->Add(rerun, 0, wxRIGHT, FromDIP(8));
         // Close first (the dialog destroys itself), then re-run from the GUI loop: the re-run opens its own summary.
         rerun->Bind(wxEVT_BUTTON, [this, rerun_as_sync](wxCommandEvent &) {
+            stop_countdown("rerun-as-sync");
+            log_event("event=manual-close reason=rerun-as-sync");
             Close();
             wxTheApp->CallAfter(rerun_as_sync);
         });
@@ -139,11 +152,56 @@ SpoolmanSummaryDialog::SpoolmanSummaryDialog(wxWindow *parent, const Spoolman::S
     m_body->Layout();
     m_body->FitInside();
 
-    details->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { set_details_visible(!m_details_visible); });
-    close->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { Close(); });
-    Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent &) { Destroy(); }); // non-modal: owns itself
+    // Reviewing (Details) also counts as "still reading": it cancels the countdown. Mouse movement does not (not cheap to catch reliably).
+    details->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { stop_countdown("details"); set_details_visible(!m_details_visible); });
+    keep_open->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { stop_countdown("keep-open"); });
+    close->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { log_event("event=manual-close"); Close(); });
+    Bind(wxEVT_TIMER, [this](wxTimerEvent &) { on_tick(); });
+    Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent &) {
+        m_timer.Stop(); // no timer event after this point
+        m_closing = true;
+        log_event("event=destroy");
+        Destroy(); // non-modal: owns itself
+    });
     wxGetApp().UpdateDlgDarkUI(this);
     CenterOnParent();
+
+    if (m_remaining > 0) {
+        m_countdown_label->SetLabelText(wxString::Format(_L("Closes in %d s"), m_remaining));
+        m_timer.Start(1000);
+    } else {
+        m_countdown_label->Hide();
+        keep_open->Hide();
+        Layout();
+    }
+    log_event("event=show seconds=" + std::to_string(m_remaining) + (m_remaining > 0 ? "" : " auto-close=off"));
+}
+
+void SpoolmanSummaryDialog::log_event(const std::string &event) { log_ui_dialog("spoolman-summary", "", event); }
+
+void SpoolmanSummaryDialog::on_tick()
+{
+    if (m_closing || m_remaining <= 0)
+        return;
+    m_remaining = Spoolman::summary_countdown_tick(m_remaining);
+    if (m_remaining == 0) {
+        log_event("event=auto-close reason=countdown-ended");
+        Close();
+        return;
+    }
+    m_countdown_label->SetLabelText(wxString::Format(_L("Closes in %d s"), m_remaining));
+}
+
+void SpoolmanSummaryDialog::stop_countdown(const char *reason)
+{
+    m_timer.Stop();
+    if (m_remaining <= 0 && !m_countdown_label->IsShown())
+        return; // already stopped (or never ran)
+    log_event(std::string("event=keep-open reason=") + reason + " remaining=" + std::to_string(m_remaining));
+    m_remaining = 0;
+    m_countdown_label->Hide();
+    m_keep_open->Hide();
+    Layout();
 }
 
 void SpoolmanSummaryDialog::set_details_visible(bool visible)

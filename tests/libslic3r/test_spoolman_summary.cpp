@@ -1027,3 +1027,28 @@ TEST_CASE("Spoolman summary #103: a slot with a preset and no differing values s
         found = found || (l.kind == SummaryLine::Kind::slot_note && l.cells[0] == "No values differ from the preset.");
     CHECK(found);
 }
+
+// #140: expected values written by hand.
+TEST_CASE("summary_seconds_from_config parses and clamps", "[Spoolman][SummaryTimer]")
+{
+    CHECK(summary_seconds_from_config("") == 30);
+    CHECK(summary_seconds_from_config("abc") == 30);
+    CHECK(summary_seconds_from_config("12x") == 30);
+    CHECK(summary_seconds_from_config("-") == 30);
+    CHECK(summary_seconds_from_config("45") == 45);
+    CHECK(summary_seconds_from_config("0") == 0);
+    CHECK(summary_seconds_from_config("-5") == 0);
+    CHECK(summary_seconds_from_config("600") == 600);
+    CHECK(summary_seconds_from_config("601") == 600);
+    CHECK(summary_seconds_from_config("99999999999999") == 30); // too long to be a sane number: default, not overflow
+}
+
+TEST_CASE("summary countdown tick and text", "[Spoolman][SummaryTimer]")
+{
+    CHECK(summary_countdown_tick(27) == 26);
+    CHECK(summary_countdown_tick(1) == 0);
+    CHECK(summary_countdown_tick(0) == 0);
+    CHECK(summary_countdown_tick(-3) == 0);
+    CHECK(summary_countdown_text(27) == "Closes in 27 s");
+    CHECK(summary_countdown_text(-1) == "Closes in 0 s");
+}

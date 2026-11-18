@@ -632,4 +632,28 @@ std::vector<SummaryLine> summary_lines(const SummaryModel &m)
     return out;
 }
 
+int summary_seconds_from_config(const std::string &stored)
+{
+    if (stored.empty() || stored.size() > 9)
+        return kSummarySecondsDefault;
+    size_t i = 0;
+    bool   neg = false;
+    if (stored[0] == '-' || stored[0] == '+') { neg = stored[0] == '-'; i = 1; }
+    if (i >= stored.size())
+        return kSummarySecondsDefault;
+    long v = 0;
+    for (; i < stored.size(); ++i) {
+        if (stored[i] < '0' || stored[i] > '9')
+            return kSummarySecondsDefault;
+        v = v * 10 + (stored[i] - '0');
+    }
+    if (neg)
+        return 0;
+    return v > kSummarySecondsMax ? kSummarySecondsMax : int(v);
+}
+
+int summary_countdown_tick(int remaining) { return remaining > 0 ? remaining - 1 : 0; }
+
+std::string summary_countdown_text(int remaining) { return "Closes in " + std::to_string(remaining < 0 ? 0 : remaining) + " s"; }
+
 }} // namespace Slic3r::Spoolman

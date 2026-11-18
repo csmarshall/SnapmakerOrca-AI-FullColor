@@ -171,6 +171,16 @@ struct SummaryLine
     std::vector<std::string> cells;
 };
 
+// #140: how long the summary dialog stays open before it closes itself (app_config key spoolman_summary_seconds).
+constexpr int kSummarySecondsDefault = 30;
+constexpr int kSummarySecondsMax     = 600;
+// Parses the stored value: empty or not a whole number -> default; negative -> 0; above the max -> max. 0 means never auto-close.
+int summary_seconds_from_config(const std::string &stored);
+// One countdown tick: remaining - 1, never below 0. The dialog closes when the result is 0.
+int summary_countdown_tick(int remaining);
+// "Closes in 27 s" (the GUI translates its own format string; this is the plain-English form used by the log and tests).
+std::string summary_countdown_text(int remaining);
+
 // Replaces every control character (< 0x20, 0x7F) with a space; other bytes (UTF-8) are kept.
 std::string sanitize_for_display(const std::string &s);
 
