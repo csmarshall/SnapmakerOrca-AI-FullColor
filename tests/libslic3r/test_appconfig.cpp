@@ -286,8 +286,10 @@ TEST_CASE("The update-check and profile-sync feeds are empty by default", "[AppC
     CHECK(config.version_check_url().empty());
     CHECK(config.profile_update_url().empty());
 
-    // An explicit setting is still honoured, so a private mirror can be configured later.
+    // An explicit setting is ignored while network access outside the LAN is off (default, #139) and honoured once it is on.
     config.set("version_check_url", "https://example.invalid/latest");
+    CHECK(config.version_check_url().empty());
+    config.set_bool("allow_internet_access", true);
     CHECK(config.version_check_url() == "https://example.invalid/latest");
 }
 

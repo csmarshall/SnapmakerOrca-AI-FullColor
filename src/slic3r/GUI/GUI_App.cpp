@@ -1,4 +1,5 @@
 #include "CloudProvider.hpp"
+#include "libslic3r/NetworkGuard.hpp"
 #include "ExportPresetBundleDialog.hpp"
 #include "ICloudServiceAgent.hpp"
 #include "IPrinterAgent.hpp"
@@ -2859,7 +2860,37 @@ void GUI_App::init_app_config()
     if (app_config->get("enable_speed_dial").empty())
         app_config->set_bool("enable_speed_dial", true);
     set_logging_level(Slic3r::level_string_to_boost(app_config->get("log_severity_level")));
+    refresh_network_guard(); // #139: the switch is in force before any request; hosts are filled in once the presets are loaded
+    Slic3r::NetworkGuard::log_state();
+}
 
+// #139 / ADR 0019: push the switch and the user's configured printer / Spoolman hosts to the process-wide NetworkGuard.
+void GUI_App::refresh_network_guard()
+{
+    if (app_config == nullptr)
+        return;
+    Slic3r::NetworkGuard::set_internet_access_allowed(app_config->get_bool(Slic3r::NetworkGuard::k_allow_internet_key));
+
+    std::vector<std::string> hosts;
+    auto add = [&hosts](const std::string &h) {
+        if (!h.empty())
+            hosts.push_back(h);
+    };
+    add(app_config->get("spoolman_server_url"));
+    if (preset_bundle != nullptr) {
+        auto add_config = [&add](const Slic3r::DynamicPrintConfig &cfg) {
+            for (const char *key : {"print_host", "print_host_webui"})
+                if (const auto *opt = cfg.option<Slic3r::ConfigOptionString>(key))
+                    add(opt->value);
+        };
+        for (const auto &preset : preset_bundle->printers)
+            add_config(preset.config);
+        for (const auto &printer : preset_bundle->physical_printers)
+            add_config(printer.config);
+    }
+    std::sort(hosts.begin(), hosts.end());
+    hosts.erase(std::unique(hosts.begin(), hosts.end()), hosts.end());
+    Slic3r::NetworkGuard::set_user_allowed_hosts(hosts);
 }
 
 // returns true if found newer version and user agreed to use it
@@ -3730,6 +3761,7 @@ bool GUI_App::on_init_inner()
             // installation of a compatible system preset, thus nullifying the system preset substitutions.
             if (scrn) { scrn->SetText(_L("Loading printer & filament profiles") + dots, 30); wxYield(); }
             init_params->preset_substitutions = preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::EnableSystemSilent);
+            refresh_network_guard();
         }
         catch (const std::exception& ex) {
             show_error(nullptr, ex.what());
@@ -9529,6 +9561,7 @@ bool GUI_App::checked_tab(Tab* tab)
 //BBS: add preset combo box re-activate logic
 void GUI_App::load_current_presets(bool active_preset_combox/*= false*/, bool check_printer_presets_ /*= true*/)
 {
+    refresh_network_guard(); // #139: printer hosts may have changed
     // check printer_presets for the containing information about "Print Host upload"
     // and create physical printer from it, if any exists
     if (check_printer_presets_)

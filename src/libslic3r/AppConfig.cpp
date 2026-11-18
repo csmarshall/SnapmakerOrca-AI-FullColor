@@ -7,6 +7,7 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Format/DRC.hpp"
 #include "AppConfig.hpp"
+#include "NetworkGuard.hpp"
 //BBS
 #include "Preset.hpp"
 #include "Exception.hpp"
@@ -489,6 +490,10 @@ void AppConfig::set_defaults()
     }
     if (get("allow_abnormal_storage").empty()) {
         set_bool("allow_abnormal_storage", false);
+    }
+    // #139 / ADR 0019: nothing leaves the local network unless the user opts in.
+    if (get(NetworkGuard::k_allow_internet_key).empty()) {
+        set_bool(NetworkGuard::k_allow_internet_key, false);
     }
     // Read-only Spoolman catalog sync (#95): off unless the user turns it on; while off no Spoolman request of any kind is made.
     if (get("spoolman_preset_sync").empty()) {
@@ -1994,13 +1999,14 @@ bool AppConfig::peek_bool(const std::string &data_dir, const std::string &key)
 
 std::string AppConfig::version_check_url() const
 {
-    auto from_settings = get("version_check_url");
+    // #139: the override is ignored (compiled-in URL, empty) while network access outside the LAN is off.
+    auto from_settings = get_bool(NetworkGuard::k_allow_internet_key) ? get("version_check_url") : std::string();
     return from_settings.empty() ? VERSION_CHECK_URL : from_settings;
 }
 
 std::string AppConfig::profile_update_url() const
 {
-    std::string orca_updater_url = get(CONFIG_ORCA_UPDATER_URL);
+    std::string orca_updater_url = get_bool(NetworkGuard::k_allow_internet_key) ? get(CONFIG_ORCA_UPDATER_URL) : std::string();
     if (orca_updater_url.empty())
         return PROFILE_UPDATE_URL;
     return orca_updater_url;

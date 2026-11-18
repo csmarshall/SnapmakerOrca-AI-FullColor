@@ -362,6 +362,8 @@ set(lisbslic3r_sources
     Line.cpp
     Line.hpp
     LocalesUtils.cpp
+    NetworkGuard.cpp
+    NetworkGuard.hpp
     LocalesUtils.hpp
     MarchingSquares.hpp
     Measure.cpp

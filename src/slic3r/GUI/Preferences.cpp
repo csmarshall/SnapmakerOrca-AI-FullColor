@@ -1,4 +1,5 @@
 #include "Preferences.hpp"
+#include "libslic3r/NetworkGuard.hpp"
 #include "CloudProvider.hpp"
 #include "OptionsGroup.hpp"
 #include "GUI_App.hpp"
@@ -723,6 +724,7 @@ wxBoxSizer *PreferencesDialog::create_item_spoolman_url(wxString title, wxString
         if (app_config->get("spoolman_server_url") != check.url) {
             app_config->set("spoolman_server_url", check.url);
             app_config->save();
+            wxGetApp().refresh_network_guard();
         }
     };
     input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit](wxCommandEvent &e) { commit(); e.Skip(); });
@@ -1123,6 +1125,10 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxString too
         }
         else if (param == SETTING_OPENGL_SCENE_CACHE) {
             if (m_skip_identical_frames_checkbox) m_skip_identical_frames_checkbox->Enable(checkbox->GetValue());
+        }
+        else if (param == Slic3r::NetworkGuard::k_allow_internet_key) {
+            wxGetApp().refresh_network_guard();
+            Slic3r::NetworkGuard::log_state();
         }
         else if (param == "stealth_mode") {
             bool enabled = app_config->get_stealth_mode();
@@ -2479,6 +2485,12 @@ void PreferencesDialog::create_items()
         _L("Show the Spoolman button in the filament panel. It reads the Spoolman catalog (read-only, nothing is ever written to Spoolman) and creates or updates filament presets from it.\nWhile off, no Spoolman request of any kind is made."),
         "spoolman_preset_sync");
     g_sizer->Add(item_spoolman_sync);
+    // #139 / ADR 0019
+    auto item_allow_internet = create_item_checkbox(
+        _L("Allow network access outside the local network (off by default)"),
+        _L("While off, nothing is sent to hosts outside your local network: loopback, private (192.168/16, 10/8, 172.16/12), link-local and *.local / *.lan names, plus the printer and Spoolman addresses you configured, stay reachable.\nThis also ignores the version-check and profile-update URL overrides. Takes effect immediately."),
+        Slic3r::NetworkGuard::k_allow_internet_key);
+    g_sizer->Add(item_allow_internet);
     auto item_spoolman_url = create_item_spoolman_url(
         _L("Spoolman server URL"),
         _L("Optional. The address of your Spoolman server, for example http://192.168.1.20:7912 (http or https, no user name or password, no query).\nWhen set, the catalog is read directly from this server with plain GET requests. When empty, it is read through the Moonraker server of the selected printer."));

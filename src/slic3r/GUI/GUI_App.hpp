@@ -718,6 +718,7 @@ public:
     bool            check_print_host_queue();
     bool            checked_tab(Tab* tab);
     //BBS: add preset combox re-active logic
+    void            refresh_network_guard();
     void            load_current_presets(bool active_preset_combox = false, bool check_printer_presets = true);
     void            process_delete_presets();
     // Queues the cloud delete of a user preset synced to the signed-in account; any other preset is ignored.

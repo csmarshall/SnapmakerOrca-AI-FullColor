@@ -9,6 +9,7 @@
 
 #include "catch2/interfaces/catch_interfaces_reporter.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "libslic3r/NetworkGuard.hpp"
 #include "python_test_support.hpp"
 
 namespace {
@@ -38,7 +39,17 @@ public:
 
 CATCH_REGISTER_LISTENER(PythonInterpreterRunEnd)
 
+namespace {
+// #139: these [NotWorking] cases talk to the public internet by design, so they switch the network guard on for their duration.
+struct InternetAllowed
+{
+    InternetAllowed() { Slic3r::NetworkGuard::set_internet_access_allowed(true); }
+    ~InternetAllowed() { Slic3r::NetworkGuard::set_internet_access_allowed(false); }
+};
+} // namespace
+
 TEST_CASE("Check SSL certificates paths", "[Http][NotWorking]") {
+    InternetAllowed internet_allowed;
     
     Slic3r::Http g = Slic3r::Http::get("https://github.com/");
     
@@ -57,6 +68,7 @@ TEST_CASE("Check SSL certificates paths", "[Http][NotWorking]") {
 }
 
 TEST_CASE("Http digest authentication", "[Http][NotWorking]") {
+    InternetAllowed internet_allowed;
     Slic3r::Http g = Slic3r::Http::get("https://httpbingo.org/digest-auth/auth/guest/guest");
 
     g.auth_digest("guest", "guest");
@@ -76,6 +88,7 @@ TEST_CASE("Http digest authentication", "[Http][NotWorking]") {
 }
 
 TEST_CASE("Http basic authentication", "[Http][NotWorking]") {
+    InternetAllowed internet_allowed;
     Slic3r::Http g = Slic3r::Http::get("https://httpbingo.org/basic-auth/guest/guest");
 
     g.auth_basic("guest", "guest");
