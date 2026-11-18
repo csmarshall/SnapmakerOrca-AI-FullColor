@@ -48,6 +48,57 @@ inline bool is_snapmaker_print_preference_script(const std::string& script)
 constexpr int snapmaker_max_filaments = 32;
 constexpr int snapmaker_max_extruders = 4; // the U1
 
+// #141: community firmware (2.0.0-paxx12) has no SET_PRINT_EXTRUDER_MAP / SET_PRINT_USED_EXTRUDERS. A map that is the IDENTITY (filament i on
+// extruder i, which is what a printer without the commands does anyway) may then go without the lines; any other map cannot be applied and
+// stays refused. map[f] = extruder for filament f; -1, 254 and 255 mean "unused" and are ignored. Every used filament must satisfy
+// map[f] == f and f < extruder_count (so a map longer than the extruder count is not an identity when it uses the extra entries).
+// Vacuously true for a map that uses nothing: callers decide separately whether there is anything to send at all.
+inline bool snapmaker_extruder_map_is_identity(const std::vector<int>& map, int extruder_count = snapmaker_max_extruders)
+{
+    for (size_t f = 0; f < map.size(); ++f) {
+        const int e = map[f];
+        if (e == -1 || e == 254 || e == 255)
+            continue;
+        if (e != int(f) || e >= extruder_count)
+            return false;
+    }
+    return true;
+}
+// The same test on the page's CONFIG_EXTRUDER -> MAP_EXTRUDER pairs. An empty list is NOT an identity here (there is nothing to assume).
+inline bool snapmaker_extruder_map_pairs_are_identity(const std::vector<std::pair<int, int>>& pairs, int extruder_count = snapmaker_max_extruders)
+{
+    if (pairs.empty())
+        return false;
+    for (const auto& [config, mapped] : pairs)
+        if (config != mapped || config < 0 || config >= extruder_count)
+            return false;
+    return true;
+}
+// The visible note for a send that went without the map lines (#141).
+inline const char* snapmaker_identity_map_note()
+{
+    return "This firmware has no extruder-map command; identity mapping assumed (each filament prints on the extruder with its own number).";
+}
+// Drops every line of a "\n"-joined script that starts with one of the given command names followed by a space. No trailing newline is left.
+inline std::string snapmaker_script_without_commands(const std::string& script, const std::vector<std::string>& commands)
+{
+    std::string out;
+    size_t      pos = 0;
+    while (pos <= script.size()) {
+        size_t end = script.find('\n', pos);
+        if (end == std::string::npos)
+            end = script.size();
+        const std::string line = script.substr(pos, end - pos);
+        bool drop = false;
+        for (const auto& c : commands)
+            drop = drop || line.compare(0, c.size() + 1, c + " ") == 0;
+        if (!drop && !line.empty())
+            out += (out.empty() ? "" : "\n") + line;
+        pos = end + 1;
+    }
+    return out;
+}
+
 struct SnapmakerExtruderMapResult
 {
     std::string script; // empty when no map lines are to be sent

@@ -2060,10 +2060,79 @@ TEST_CASE("legacy start: a help probe that fails or lacks the map command refuse
         if (c.has_help)
             printer.set_gcode_commands(c.commands);
         std::string error;
-        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+        // [2,0] is not the identity: a command known missing refuses it (#141). The no-help case cannot be confirmed and refuses any map.
+        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params(c.has_help ? "[2,0]" : "[0,1]"), "part.gcode", &error));
         CHECK(printer.requests_to("/printer/gcode/script") == 0);
         CHECK_FALSE(error.empty());
     }
+}
+
+TEST_CASE("legacy start: identity map + map commands known missing goes without the map lines and says so (#141)", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    SECTION("both commands missing: only SDCARD_PRINT_FILE is sent, with a note") {
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        printer.set_gcode_commands({"SDCARD_PRINT_FILE"});
+        std::string error, note;
+        REQUIRE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1,-1,3]"), "part.gcode", &error, &note));
+        REQUIRE(printer.scripts().size() == 1);
+        CHECK(printer.scripts()[0] == "SDCARD_PRINT_FILE FILENAME=\"part.gcode\"");
+        CHECK(note.find("identity mapping assumed") != std::string::npos);
+    }
+    SECTION("only the used command missing: the map lines are still sent, the used line is not") {
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        printer.set_gcode_commands({"SET_PRINT_EXTRUDER_MAP"});
+        std::string note;
+        REQUIRE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", nullptr, &note));
+        REQUIRE(printer.scripts().size() == 2);
+        CHECK(printer.scripts()[0] == "SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=0 MAP_EXTRUDER=0\nSET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=1 MAP_EXTRUDER=1");
+        CHECK_FALSE(note.empty());
+    }
+    SECTION("commands present: unchanged, no note") {
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        list_map_commands(printer);
+        std::string note;
+        REQUIRE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", nullptr, &note));
+        REQUIRE(printer.scripts().size() == 2);
+        CHECK(printer.scripts()[0].find("SET_PRINT_USED_EXTRUDERS EXTRUDERS=0,1") != std::string::npos);
+        CHECK(note.empty());
+    }
+    SECTION("a failing start after a dropped map does not claim the printer kept a map") {
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        printer.set_gcode_commands({"SDCARD_PRINT_FILE"});
+        printer.reject_scripts_starting_with("SDCARD_PRINT_FILE");
+        std::string error;
+        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+        CHECK(error.find("kept the new") == std::string::npos);
+    }
+}
+
+TEST_CASE("legacy start: non-identity map + map commands known missing is refused, nothing sent (#141)", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    for (const char* mapping : {"[2,0]", "[1,0]", "[0,2]", "[1]"}) {
+        CAPTURE(mapping);
+        FakePrinter     printer(Behavior::Silent);
+        PreferenceAgent agent(printer);
+        printer.set_gcode_commands({"SDCARD_PRINT_FILE"});
+        std::string error, note;
+        CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params(mapping), "part.gcode", &error, &note));
+        CHECK(printer.requests_to("/printer/gcode/script") == 0);
+        CHECK(error.find("cannot be applied") != std::string::npos);
+        CHECK(note.empty());
+    }
+}
+
+TEST_CASE("legacy start: an unanswered probe stays fail-closed even for an identity map (#141)", "[MoonrakerPrinterAgent][LegacyStart]")
+{
+    FakePrinter     printer(Behavior::Silent);
+    PreferenceAgent agent(printer); // no help route: the probe cannot answer
+    std::string error;
+    CHECK_FALSE(agent.start_uploaded_print(agent.start_target(), legacy_params("[0,1]"), "part.gcode", &error));
+    CHECK(printer.requests_to("/printer/gcode/script") == 0);
+    CHECK(error.find("could not confirm") != std::string::npos);
 }
 
 TEST_CASE("legacy start: every refusal says why", "[MoonrakerPrinterAgent][LegacyStart]")

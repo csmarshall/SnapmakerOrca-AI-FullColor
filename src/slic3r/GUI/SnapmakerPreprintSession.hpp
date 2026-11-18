@@ -170,10 +170,12 @@ public:
 
         bool sent = false;
         bool dropped = false;
+        bool identity_assumed = false;
         std::string why = "the printer did not accept the script";
         try {
             std::string to_send = script;
-            if (probe_script(script, parsed, to_send, why, dropped)) sent = m_printer->send_gcode(to_send);
+            // #141: when every line was left out (identity map, firmware without the map commands) there is nothing to forward: answer ok.
+            if (probe_script(script, parsed, to_send, why, dropped, identity_assumed)) sent = to_send.empty() ? true : m_printer->send_gcode(to_send);
         } catch (...) {
             sent = false;
         }
@@ -192,6 +194,16 @@ public:
             if (notifier)
                 notifier("The printer does not know the print-preference command (SET_PRINT_PREFERENCES), so the time-lapse, bed-leveling and "
                          "flow-calibration choices were not applied. The print itself is not affected.");
+        }
+        if (identity_assumed) {
+            data["identity_map_assumed"] = true; // #141
+            data["note"]                 = snapmaker_identity_map_note();
+            std::function<void(const std::string&)> notifier;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                notifier = m_notifier;
+            }
+            if (notifier) notifier(snapmaker_identity_map_note());
         }
         if (!applied) data["context_closed"] = true;
         return SnapmakerPreprintReply::success(std::move(data));
@@ -299,14 +311,26 @@ private:
     // Asks the printer about every command of the validated script (a real /printer/gcode/help read each time). A map or used command
     // that is unknown or unreadable refuses the script; an unknown preference command only drops the preference part (#118: the map is
     // still applied); an unreadable one refuses (fail closed).
-    bool probe_script(const std::string& script, const SnapmakerPreprintGcode& g, std::string& to_send, std::string& why, bool& dropped)
+    bool probe_script([[maybe_unused]] const std::string& script, const SnapmakerPreprintGcode& g, std::string& to_send, std::string& why, bool& dropped, bool& identity_assumed)
     {
+        // #141: a map or used command the printer is KNOWN not to have is left out when the map is the identity; any other map, and any probe
+        // that cannot tell, refuses the script. The lines of the commands the printer does have are still sent.
+        std::vector<std::string> missing;
         for (const char* cmd : {"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}) {
             const auto k = m_printer->command_known(cmd);
-            if (k != SnapmakerPreprintPrinter::Known::Yes) {
-                why = std::string(k == SnapmakerPreprintPrinter::Known::No ? "the printer has no " : "could not tell whether the printer has ") + cmd;
-                return false;
+            if (k == SnapmakerPreprintPrinter::Known::Yes) continue;
+            if (k == SnapmakerPreprintPrinter::Known::No && snapmaker_extruder_map_pairs_are_identity(g.map)) {
+                missing.push_back(cmd);
+                continue;
             }
+            why = std::string(k == SnapmakerPreprintPrinter::Known::No ? "the printer has no " : "could not tell whether the printer has ") + cmd;
+            if (k == SnapmakerPreprintPrinter::Known::No) why += ", and the map is not the identity so it cannot be left out";
+            return false;
+        }
+        if (!missing.empty()) {
+            identity_assumed = true;
+            BOOST_LOG_TRIVIAL(warning) << "SnapmakerPreprintSession: the printer has no " << missing.front() << ", the identity map is assumed and its lines are not sent";
+            to_send = snapmaker_script_without_commands(to_send, missing);
         }
         if (g.prefs.empty()) return true;
         const char* pref_cmd = g.shape == SnapmakerPreprintShape::Plural ? "SET_PRINT_PREFERENCES" : "SET_PRINT_PREFERENCE";
@@ -319,8 +343,8 @@ private:
             dropped = true;
             BOOST_LOG_TRIVIAL(warning) << "SnapmakerPreprintSession: the printer has no " << pref_cmd << ", the print preferences are not applied (the map is)";
             // keep the map + used lines only (no trailing newline, like print_uploaded_file)
-            const std::size_t at = script.find("SET_PRINT_PREFERENCE");
-            to_send = script.substr(0, at);
+            const std::size_t at = to_send.find("SET_PRINT_PREFERENCE");
+            to_send = to_send.substr(0, at);
             while (!to_send.empty() && to_send.back() == '\n') to_send.pop_back();
         }
         return true;

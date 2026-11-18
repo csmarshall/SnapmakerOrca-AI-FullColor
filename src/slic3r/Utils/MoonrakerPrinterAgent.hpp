@@ -39,7 +39,8 @@ public:
     // #120: start an already uploaded file after the legacy send's own upload: the extruder map and USED lines (NO preference lines, the printer
     // keeps its own), then SDCARD_PRINT_FILE. Refuses, sending nothing, unless `filename` passes snapmaker_preprint_filename_ok and a FRESH
     // read of the printer says it is idle (fail closed on any read failure). `error` (optional) gets the user-facing reason on false.
-    bool start_uploaded_print(const StartTarget& target, const PrintParams& params, const std::string& filename, std::string* error = nullptr);
+    bool start_uploaded_print(const StartTarget& target, const PrintParams& params, const std::string& filename, std::string* error = nullptr,
+                              std::string* note = nullptr); // note: set on success when the print went without the map lines (#141)
     explicit MoonrakerPrinterAgent(std::string log_dir);
     ~MoonrakerPrinterAgent() override;
 
@@ -314,7 +315,7 @@ protected:
     // A blocking read of print_stats + machine_state_manager (same GET and timeouts as query_machine_objects_async); false on any failure.
     static bool read_machine_state_sync(const std::string& base_url, const std::string& api_key, nlohmann::json& result);
     enum class StartMode { Page, LegacyNoPreferences };
-    bool run_uploaded_start(const StartTarget& target, const PrintParams& params, const std::string& filename, StartMode mode, std::string* error);
+    bool run_uploaded_start(const StartTarget& target, const PrintParams& params, const std::string& filename, StartMode mode, std::string* error, std::string* note = nullptr);
     // One Moonraker HTTP request for the Spoolman code. `post_body` empty means GET. Returns the HTTP status, 0 on connection failure or
     // timeout. Virtual so tests can record requests without a socket.
     // The printer address and key are passed in (a snapshot), never read from device_info here. Returns Spoolman::kStatusTooLarge when

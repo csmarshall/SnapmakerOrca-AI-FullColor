@@ -989,9 +989,9 @@ MoonrakerPrinterAgent::StartTarget MoonrakerPrinterAgent::start_target() const
     return {device_info.base_url, device_info.api_key, device_info.dev_id};
 }
 
-bool MoonrakerPrinterAgent::start_uploaded_print(const StartTarget& target, const PrintParams& params, const std::string& filename, std::string* error)
+bool MoonrakerPrinterAgent::start_uploaded_print(const StartTarget& target, const PrintParams& params, const std::string& filename, std::string* error, std::string* note)
 {
-    return run_uploaded_start(target, params, filename, StartMode::LegacyNoPreferences, error);
+    return run_uploaded_start(target, params, filename, StartMode::LegacyNoPreferences, error, note);
 }
 
 bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const std::string& filename)
@@ -999,7 +999,7 @@ bool MoonrakerPrinterAgent::print_uploaded_file(const PrintParams& params, const
     return run_uploaded_start(start_target(), params, filename, StartMode::Page, nullptr);
 }
 
-bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const PrintParams& params, const std::string& filename, StartMode mode, std::string* error)
+bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const PrintParams& params, const std::string& filename, StartMode mode, std::string* error, std::string* note)
 {
     const bool legacy = mode == StartMode::LegacyNoPreferences;
     const auto fail   = [&](const std::string& why) {
@@ -1032,6 +1032,7 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
     if (supports_print_preferences() && !legacy && gcode_command_known(target.base_url, target.api_key, "SET_PRINT_PREFERENCE", preferences_known_unsupported) &&
         preferences_known_unsupported)
         BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: the printer has no SET_PRINT_PREFERENCE command, time-lapse / bed-leveling / flow-calibration choices are not applied";
+    bool map_lines_dropped = false; // no map line left in the script (#141)
     if (supports_print_preferences()) {
         // Like Snapmaker's page, the filament-to-extruder map and the preferences go as ONE script: map lines first (#118, #120).
         // PrintParams::ams_mapping is a per-filament array; -1 (and the external tray ids 254/255) mean the filament is not used and has no
@@ -1057,19 +1058,32 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
         if (!extruder_map.ok() || (!extruder_map.script.empty() && !is_snapmaker_extruder_map_script(extruder_map.script))) {
             return fail(std::string(extruder_map.ok() ? "extruder map script invalid" : extruder_map.error) + ", the print is not started");
         }
+        std::string script = extruder_map.script;
         if (!extruder_map.script.empty()) {
+            std::vector<std::string> missing_commands;
             for (const char* command : {"SET_PRINT_EXTRUDER_MAP", "SET_PRINT_USED_EXTRUDERS"}) {
                 bool missing = false;
                 const bool answered = gcode_command_known(target.base_url, target.api_key, command, missing);
                 // The legacy start fails closed: a probe that cannot confirm the command exists refuses the start (Klipper answers an unknown
                 // command with HTTP 200). The page start keeps its behaviour: an unanswered probe goes ahead.
-                if (answered && missing)
-                    return fail(std::string("the printer has no ") + command + " command, the filament-to-extruder mapping cannot be applied and the print is not started");
+                // #141: a command the printer is KNOWN not to have only refuses when the map is not the identity; an identity map goes without
+                // that command's lines (a printer without the commands prints filament i on extruder i anyway).
+                if (answered && missing) {
+                    if (!snapmaker_extruder_map_is_identity(extruder_mapping))
+                        return fail(std::string("the printer has no ") + command + " command, the filament-to-extruder mapping cannot be applied and the print is not started");
+                    missing_commands.emplace_back(command);
+                    continue;
+                }
                 if (legacy && !answered)
                     return fail(std::string("could not confirm the printer has the ") + command + " command; nothing was sent");
             }
+            if (!missing_commands.empty()) {
+                script            = snapmaker_script_without_commands(script, missing_commands);
+                map_lines_dropped = script.find("SET_PRINT_") == std::string::npos;
+                BOOST_LOG_TRIVIAL(warning) << "MoonrakerPrinterAgent: the printer has no " << missing_commands.front() << " command, the identity map is assumed and its lines are not sent";
+                if (note) *note = snapmaker_identity_map_note();
+            }
         }
-        std::string script = extruder_map.script;
         if (!legacy && !preferences_known_unsupported) {
             const std::string preferences = build_snapmaker_print_preference_script(params.task_flow_cali, params.task_record_timelapse,
                                                                                     params.task_bed_leveling);
@@ -1085,7 +1099,7 @@ bool MoonrakerPrinterAgent::run_uploaded_start(const StartTarget& target, const 
             return fail("print preferences / extruder map not applied, the print is not started");
         }
     }
-    const bool map_sent = legacy && !params.ams_mapping.empty() && supports_print_preferences();
+    const bool map_sent = legacy && !params.ams_mapping.empty() && supports_print_preferences() && !map_lines_dropped;
     // Start print via gcode script (simpler than JSON-RPC); quoted so spaces and apostrophes stay part of the name
     if (post_gcode_script(target.base_url, target.api_key, "SDCARD_PRINT_FILE FILENAME=\"" + filename + "\""))
         return true;

@@ -1145,6 +1145,102 @@ TEST_CASE("pre-print session: F4 a bad checksum or capability path is refused at
     }
 }
 
+TEST_CASE("pre-print session: identity map + map commands known missing is answered ok without forwarding the map lines, with a note (#141)", "[SSWCP][preprint_profile]")
+{
+    const std::vector<int> identity = {0, 1};
+    const std::string      script_no_prefs = build_snapmaker_plural_preference_script(identity, {});
+    const std::string      script_prefs    = build_snapmaker_plural_preference_script(identity, kPrefs);
+    SECTION("both missing, no preferences: ok, nothing forwarded, note in data and notifier, the start still works") {
+        Profile h;
+        std::vector<std::string> notices;
+        h.session->set_notifier([&notices](const std::string& m) { notices.push_back(m); });
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"]   = Known::No;
+        h.printer->known["SET_PRINT_USED_EXTRUDERS"] = Known::No;
+        const json r = h.gcodes(script_no_prefs);
+        REQUIRE(is_ok(r));
+        CHECK(h.printer->sends == 0);
+        CHECK(r["data"]["identity_map_assumed"] == true);
+        CHECK(r["data"]["note"].get<std::string>().find("identity mapping assumed") != std::string::npos);
+        REQUIRE(notices.size() == 1);
+        CHECK(notices[0].find("identity mapping assumed") != std::string::npos);
+        CHECK(is_ok(h.start()));
+        CHECK(h.printer->starts == 1);
+    }
+    SECTION("both missing, preferences present: only the preference line is forwarded") {
+        Profile h;
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"]   = Known::No;
+        h.printer->known["SET_PRINT_USED_EXTRUDERS"] = Known::No;
+        REQUIRE(is_ok(h.gcodes(script_prefs)));
+        REQUIRE(h.printer->sent_scripts().size() == 1);
+        CHECK(h.printer->sent_scripts()[0].find("SET_PRINT_EXTRUDER_MAP") == std::string::npos);
+        CHECK(h.printer->sent_scripts()[0].find("SET_PRINT_USED_EXTRUDERS") == std::string::npos);
+        CHECK(h.printer->sent_scripts()[0].find("SET_PRINT_PREFERENCES") == 0);
+    }
+    SECTION("only the used command missing: the map lines still go") {
+        Profile h;
+        h.printer->known["SET_PRINT_USED_EXTRUDERS"] = Known::No;
+        REQUIRE(is_ok(h.gcodes(script_no_prefs)));
+        REQUIRE(h.printer->sent_scripts().size() == 1);
+        CHECK(h.printer->sent_scripts()[0].find("SET_PRINT_EXTRUDER_MAP") == 0);
+        CHECK(h.printer->sent_scripts()[0].find("SET_PRINT_USED_EXTRUDERS") == std::string::npos);
+    }
+    SECTION("non-identity map + missing command: still refused, nothing sent, no note") {
+        Profile h;
+        std::vector<std::string> notices;
+        h.session->set_notifier([&notices](const std::string& m) { notices.push_back(m); });
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"] = Known::No;
+        const json r = h.gcodes(plural()); // kMapping = {2,0}
+        CHECK(r["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 0);
+        CHECK(notices.empty());
+    }
+    SECTION("identity map + unreadable probe: still refused (fail closed)") {
+        Profile h;
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"] = Known::Unreadable;
+        CHECK(h.gcodes(script_no_prefs)["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 0);
+    }
+    SECTION("identity map + one command missing and the other unreadable: refused") {
+        Profile h;
+        h.printer->known["SET_PRINT_EXTRUDER_MAP"]   = Known::No;
+        h.printer->known["SET_PRINT_USED_EXTRUDERS"] = Known::Unreadable;
+        CHECK(h.gcodes(script_no_prefs)["code"] == SSWCPCode::Failure);
+        CHECK(h.printer->sends == 0);
+    }
+    SECTION("commands present, identity map: forwarded unchanged, no note") {
+        Profile h;
+        const json r = h.gcodes(script_no_prefs);
+        REQUIRE(is_ok(r));
+        CHECK(h.printer->sent_scripts() == std::vector<std::string>{script_no_prefs});
+        CHECK_FALSE(r["data"].contains("identity_map_assumed"));
+    }
+}
+
+TEST_CASE("snapmaker_extruder_map_is_identity: used filaments only, bounded by the extruder count (#141)", "[SSWCP][preprint_profile][ExtruderChoice]")
+{
+    CHECK(snapmaker_extruder_map_is_identity({0, 1, 2, 3}));
+    CHECK(snapmaker_extruder_map_is_identity({0, 1}));
+    CHECK(snapmaker_extruder_map_is_identity({}));                  // nothing used: vacuous, callers have nothing to send
+    CHECK(snapmaker_extruder_map_is_identity({-1, -1}));
+    CHECK(snapmaker_extruder_map_is_identity({0, -1, 2, 255}));     // unused entries ignored
+    CHECK(snapmaker_extruder_map_is_identity({-1, 1, 254, 3}));
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({1, 0}));        // a permutation
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({0, 0}));
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({2, 0}));
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({-1, 0}));       // filament 1 on extruder 0
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({0, 1, 2, 3, 4}));      // longer than the extruder count and the extra one is used
+    CHECK(snapmaker_extruder_map_is_identity({0, 1, 2, 3, -1, -1}));       // longer, but the extra entries are unused
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({0, 1, 2}, 2));         // explicit extruder count
+    CHECK_FALSE(snapmaker_extruder_map_is_identity({7}));
+    CHECK(snapmaker_extruder_map_pairs_are_identity({{0, 0}, {1, 1}}));
+    CHECK_FALSE(snapmaker_extruder_map_pairs_are_identity({}));
+    CHECK_FALSE(snapmaker_extruder_map_pairs_are_identity({{0, 0}, {1, 0}}));
+    CHECK_FALSE(snapmaker_extruder_map_pairs_are_identity({{0, 0}, {4, 4}}));
+    CHECK(snapmaker_script_without_commands("A x\nB y\nC z", {"B"}) == "A x\nC z");
+    CHECK(snapmaker_script_without_commands("A x\nB y", {"A", "B"}).empty());
+    CHECK(snapmaker_script_without_commands("AB x\nB y", {"A"}) == "AB x\nB y"); // a prefix of a longer command name is not that command
+}
+
 TEST_CASE("pre-print session: F7 a dropped preference command is said in the reply", "[SSWCP][preprint_profile]")
 {
     Profile h;

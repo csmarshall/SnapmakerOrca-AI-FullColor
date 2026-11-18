@@ -21750,7 +21750,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn)
                 // `name` is the server-confirmed stored name (PrintHostJobQueue never calls this without one); the agent re-checks it
                 // against the filename allowlist and the printer's idle state, and says in `error` whether the map was already applied.
                 upload_job.after_upload = [agent, target, params](const std::string& name, std::string& error) {
-                    return agent->start_uploaded_print(target, params, name, &error);
+                    std::string note;
+                    const bool  started = agent->start_uploaded_print(target, params, name, &error, &note);
+                    if (started && !note.empty())
+                        notify_preprint(note, false); // #141: the print went without the map lines (identity map, firmware without the commands); posts to the UI thread
+                    return started;
                 };
                 if (decision.oversubscribed)
                     notify_preprint("More filaments than extruders: some extruders are shared, so swap filament by hand during the print.", false);
