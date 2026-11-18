@@ -1931,6 +1931,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                wait_for_temp_on_wipe_tower))
     ((ConfigOptionBool,                support_multi_bed_types))
     ((ConfigOptionBool,                use_3mf))
+    ((ConfigOptionString,              gcode_header_product))
 
     // Small Area Infill Flow Compensation
     ((ConfigOptionStrings,              small_area_infill_flow_compensation_model))

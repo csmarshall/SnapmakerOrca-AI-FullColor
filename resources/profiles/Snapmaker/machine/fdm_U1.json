@@ -260,6 +260,7 @@
 	"bed_mesh_min": "3,3",
 	"bed_mesh_max": "267,267",
 	"printer_agent": "snapmaker",
+	"gcode_header_product": "Snapmaker Orca",
 	"printer_extruder_variant": [
 		"Direct Drive Standard",
 		"Direct Drive High Flow",
