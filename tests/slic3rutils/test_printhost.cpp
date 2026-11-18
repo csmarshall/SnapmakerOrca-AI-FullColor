@@ -407,3 +407,18 @@ TEST_CASE("with_device_host_fallback fills only an empty print_host", "[PrintHos
         CHECK(out2.opt_string("print_host").empty());
     }
 }
+
+// #144: which host types pass printhost_ssl_verify to Http::printer_tls. Every PrintHostType is listed, so adding one to the enum
+// (htMoonraker is last) fails the static_assert until a decision is made here.
+TEST_CASE("host_type_honours_ssl_verify covers every host type", "[PrintHost][TlsVerify]")
+{
+    static_assert(htMoonraker == 16, "new PrintHostType: decide whether it honours printhost_ssl_verify and list it below");
+    const std::vector<std::pair<PrintHostType, bool>> expected = {
+        {htPrusaLink, true}, {htPrusaConnect, true}, {htOctoPrint, true}, {htDuet, false}, {htUltiMaker, false},
+        {htFlashAir, false}, {htAstroBox, true}, {htRepetier, true}, {htMKS, false}, {htESP3D, false},
+        {htCrealityPrint, true}, {htObico, true}, {htFlashforge, false}, {htSimplyPrint, false},
+        {htElegooLink, false}, {ht3DPrinterOS, false}, {htMoonraker, true}};
+    REQUIRE(expected.size() == size_t(htMoonraker) + 1);
+    for (const auto &[type, honours] : expected)
+        CHECK(host_type_honours_ssl_verify(type) == honours);
+}

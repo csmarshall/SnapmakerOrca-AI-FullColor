@@ -1172,7 +1172,7 @@ void PrintConfigDef::init_common_params()
 
     def = this->add("printhost_ssl_verify", coBool);
     def->label = L("Verify HTTPS certificate");
-    def->tooltip = L("Verify the printer's TLS certificate. Leave off for printers with self-signed certificates.");
+    def->tooltip = L("Verify the printer's TLS certificate. Leave off for printers with self-signed certificates. Only used by OctoPrint, PrusaLink, Moonraker, Repetier, AstroBox, Creality and Obico connections.");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
     def->set_default_value(new ConfigOptionBool(false));

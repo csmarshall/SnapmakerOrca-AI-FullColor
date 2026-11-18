@@ -58,6 +58,32 @@ bool printhost_ssl_verify(const DynamicPrintConfig *config)
     return config != nullptr && config->has("printhost_ssl_verify") && config->opt_bool("printhost_ssl_verify");
 }
 
+bool host_type_honours_ssl_verify(PrintHostType type)
+{
+    switch (type) {
+    case htOctoPrint:
+    case htPrusaLink:
+    case htPrusaConnect: // inherits OctoPrint::set_auth
+    case htMoonraker:
+    case htRepetier:
+    case htAstroBox:
+    case htCrealityPrint:
+    case htObico:
+        return true;
+    case htDuet:
+    case htUltiMaker:
+    case htFlashAir:
+    case htMKS:
+    case htESP3D:
+    case htFlashforge:
+    case htSimplyPrint:
+    case htElegooLink:
+    case ht3DPrinterOS:
+        return false;
+    }
+    return false;
+}
+
 
 PrintHost::~PrintHost() {}
 

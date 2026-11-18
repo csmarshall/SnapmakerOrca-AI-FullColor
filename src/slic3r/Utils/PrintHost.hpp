@@ -60,6 +60,10 @@ struct PrintHostUpload
 // The per-printer "verify TLS" option (printhost_ssl_verify, #144). False when the config does not carry the key (hand-built configs).
 bool printhost_ssl_verify(const DynamicPrintConfig *config);
 
+// True when the host implementation passes printhost_ssl_verify to Http::printer_tls (#144). The others ignore the option, so the dialog hides it for them.
+// Keep in step with the printer_tls callers; test_printhost.cpp lists every PrintHostType so a new one forces a decision.
+bool host_type_honours_ssl_verify(PrintHostType type);
+
 class PrintHost
 {
 public:

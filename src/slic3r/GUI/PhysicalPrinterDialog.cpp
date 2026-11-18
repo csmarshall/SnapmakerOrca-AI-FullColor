@@ -612,7 +612,13 @@ void PhysicalPrinterDialog::update(bool printer_change)
         m_optgroup->hide_field("bbl_use_print_host_webui");
         m_optgroup->enable_field("printhost_cafile");
         m_optgroup->enable_field("printhost_ssl_ignore_revoke");
-        m_optgroup->enable_field("printhost_ssl_verify");
+        if (host_type_honours_ssl_verify(opt->value)) {
+            m_optgroup->show_field("printhost_ssl_verify");
+            m_optgroup->enable_field("printhost_ssl_verify");
+        } else {
+            // #144: the option is silently ignored by these hosts, so do not offer it.
+            m_optgroup->hide_field("printhost_ssl_verify");
+        }
         if (m_printhost_cafile_browse_btn) { m_printhost_cafile_browse_btn->Enable(); }
 
         // hide pre-configured address, in case user switched to a different host type
